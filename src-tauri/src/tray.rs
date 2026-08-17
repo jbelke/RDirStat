@@ -273,3 +273,24 @@ pub(crate) fn hide_instead_of_closing(window: &tauri::Window, event: &WindowEven
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The tray icon must decode, and it must not be blank.
+    ///
+    /// A menu-bar item whose image fails to load still *exists* — macOS shows an
+    /// empty slot and nothing says why — so this asserts what the eye would
+    /// otherwise have to catch: the PNG decodes, it is square, and it has ink.
+    #[test]
+    fn the_tray_icon_decodes_and_has_ink() {
+        let bytes = include_bytes!("../icons/tray.png");
+        let image = tauri::image::Image::from_bytes(bytes).expect("the tray icon must decode");
+        assert_eq!(image.width(), image.height(), "a menu-bar icon is square");
+        assert!(image.width() >= 22, "at least one menu-bar point of resolution");
+        let opaque = image.rgba().chunks_exact(4).filter(|pixel| pixel[3] > 0).count();
+        assert!(
+            opaque > 0,
+            "a template icon with no opaque pixels renders as an empty slot"
+        );
+    }
+}
