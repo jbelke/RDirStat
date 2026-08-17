@@ -23,12 +23,15 @@ layout, not directories that already exist.
 | `skills-lock.json` | Source and integrity lock for installed skills; currently pins `rust-skills` |
 | `.agents/` | Installer-managed canonical payload for `rust-skills`; external skill content, not project source |
 | `.claude/` | Installer-managed compatibility link to the canonical `rust-skills` payload |
+| `.beads/` | Beads (`bd`) issue database, config, and git hooks. The backlog — phases 0–7 filed as epics — is tracked here, not in a markdown checklist. |
 
-No application workspace exists at root — no `Cargo.toml`, no `src-tauri/`, no
-`src/`, no build or CI configuration, no `.gitignore`, and no git repository.
-The six
-checkouts under `reference-code/` carry their own `.git` directories; the
-project itself is currently an untracked working directory.
+The project is a git repository on `main`, with a root `.gitignore`. The six
+checkouts under `reference-code/` carry their own `.git` directories and are
+excluded by directory, so they are never added as files or as embedded
+gitlinks; `reference-code/AGENTS.md` is re-included explicitly and is the only
+tracked path under it. `.agents/` is excluded as an installed payload, which
+leaves `skills/rust-skills` and `.claude/skills/rust-skills` as tracked symlinks
+that dangle in a fresh clone until the skills are installed.
 
 ## Local Contracts
 
