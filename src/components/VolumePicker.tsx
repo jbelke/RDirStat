@@ -445,6 +445,15 @@ function VolumeRowItem({ volume, container, expanded, busy, onSelect, onScan }: 
         )}
         <span className="min-w-0 flex-1 truncate text-sm">{volume.name}</span>
         {volume.isRootVolume && <Tag title="The volume macOS booted from">boot</Tag>}
+        {/* The filesystem, on the row rather than only inside the preflight,
+          * whenever it is not the one everything else on this Mac uses. It is
+          * the fact that decides what a volume can *hold*: exFAT and MS-DOS
+          * store no extended attributes or ACLs, so a copy onto one loses them
+          * silently, and network mounts have their own rules. Reading "exfat"
+          * before picking beats discovering it afterwards. */}
+        {volume.fsType !== "apfs" && (
+          <Tag title={fsTypeHint(volume.fsType)}>{volume.fsType}</Tag>
+        )}
         {volume.hasLocalSnapshots && (
           <Tag title="Local Time Machine snapshots are present. v1 does not claim their size.">
             snapshots
@@ -484,6 +493,31 @@ function VolumeRowItem({ volume, container, expanded, busy, onSelect, onScan }: 
       )}
     </li>
   );
+}
+
+/**
+ * What a non-APFS filesystem means for the data put on it.
+ *
+ * Only the properties that change what a volume can hold, stated for the
+ * filesystems macOS actually mounts. Anything unrecognised gets the neutral
+ * line rather than a guess: a wrong reassurance about metadata is worse than
+ * no reassurance.
+ */
+function fsTypeHint(fsType: string): string {
+  switch (fsType) {
+    case "exfat":
+    case "msdos":
+      return `${fsType}: no extended attributes, ACLs, or POSIX ownership. Files copied here lose that metadata silently.`;
+    case "hfs":
+      return "HFS+: extended attributes and ACLs are supported, but it is not the format macOS installs on any more.";
+    case "smbfs":
+    case "afpfs":
+    case "nfs":
+    case "webdav":
+      return `${fsType}: a network mount. Metadata support depends on the server, and it can disappear mid-scan.`;
+    default:
+      return `Filesystem type reported by the mount: ${fsType}.`;
+  }
 }
 
 function Tag({ children, title }: { children: React.ReactNode; title?: string }) {
