@@ -512,7 +512,9 @@ mod tests {
 
     #[test]
     fn details_reconstruct_a_real_path_and_report_the_subtree() {
-        let (dir, scan) = fixture();
+        // `_dir` is bound, not dropped: the TempDir must outlive the assertions
+        // below or the paths they check stop existing.
+        let (_dir, scan) = fixture();
         let keys = RandomState::new();
         let page = children(&scan, &keys, scan.root, Sort::default(), None, 500).expect("page");
         let sub = page

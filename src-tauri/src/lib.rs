@@ -43,6 +43,7 @@ mod progress;
 mod query;
 mod state;
 mod token;
+mod tray;
 mod volumes;
 
 pub use crate::events::ScanProgressEvent;
@@ -62,6 +63,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::scan_start,
             commands::scan_cancel,
             commands::scan_status,
+            commands::scan_errors,
             commands::children,
             commands::node_details,
             commands::path_of,
@@ -156,8 +158,17 @@ pub fn run() -> tauri::Result<()> {
         .manage(AppState::new())
         .setup(move |app| {
             builder.mount_events(app);
+            // The menu-bar presence. A tray that cannot be created is not a
+            // reason to refuse to start: the main window is the product, and
+            // the tray is how you watch it without one.
+            if let Err(error) = tray::build(app.handle()) {
+                tracing::error!(%error, "could not create the tray icon; continuing without a menu-bar presence");
+            }
             Ok(())
         })
+        // Closing the main window hides it — the app stays in the menu bar and
+        // Quit stays explicit (docs/05-UI.md, "Menu bar").
+        .on_window_event(tray::hide_instead_of_closing)
         .invoke_handler(move |invoke| {
             // Route by name *before* consuming the invoke: the two binary
             // commands answer with an ArrayBuffer, everything else with JSON.

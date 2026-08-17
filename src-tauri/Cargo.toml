@@ -35,7 +35,10 @@ tauri-build = { version = "2.6.3", features = [] }
 # No "macos-private-api": `titleBarStyle: "Overlay"` is a public NSWindow
 # style and needs no private API. Enabling it would also disable App Store
 # eligibility for no gain.
-tauri = { version = "2.11.5", features = [] }
+# `tray-icon` is the menu-bar presence (docs/05-UI.md, "Menu bar"); `image-png`
+# is what lets `tauri::image::Image::from_bytes` decode the template PNG the
+# tray uses. Neither pulls in a private API.
+tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2.5.4"
 
 serde = { workspace = true }

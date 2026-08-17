@@ -18,13 +18,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rdirstat_core::{
     ActionError, CancelState, CatalogScanId, ChildPage, CommandError, ConfirmationToken, Cursor, Details, DisplayPath,
-    LayoutKind, NodeId, QueryError, ReportName, ReportParams, ScanId, ScanOptions, ScanStatus, Sort, StartError,
-    TrashPreview, TrashReport, TreeGeneration, VolumeInfo,
+    LayoutKind, NodeId, QueryError, ReportName, ReportParams, ScanErrorReport, ScanId, ScanOptions, ScanStatus, Sort,
+    StartError, TrashPreview, TrashReport, TreeGeneration, VolumeInfo,
 };
 
 use crate::engine::{self, ScanOutcome, ScanRequest};
 use crate::state::AppState;
 use crate::{actions, progress, query, volumes};
+
+/// The ceiling on `scan_errors`'s sample list.
+///
+/// The frontend asks for what it will draw; this is the number it cannot
+/// exceed, so a caller asking for a million samples gets a bounded payload
+/// rather than the whole error log. The completed scan keeps
+/// [`MAX_DETAILED_ERRORS`](rdirstat_core::MAX_DETAILED_ERRORS) of them and a
+/// running one keeps far fewer, so this only ever truncates the finished case.
+const MAX_ERROR_SAMPLES: usize = 200;
 
 fn now_unix_ms() -> i64 {
     SystemTime::now()
@@ -143,6 +152,57 @@ pub(crate) async fn scan_cancel(
 #[specta::specta]
 pub(crate) async fn scan_status(state: tauri::State<'_, AppState>) -> Result<ScanStatus, CommandError> {
     Ok(state.status())
+}
+
+/// What the scan's recorded failures actually were.
+///
+/// Answers from the **running** scan's live counters when one is active, and
+/// from the published tree otherwise, so the same affordance works while the
+/// error count is still climbing and after it has stopped. `limit` bounds the
+/// sample list; the per-class counts are uncapped, and
+/// [`ScanErrorReport::truncated`] says when there were more.
+///
+/// # Errors
+///
+/// Never fails. No scan and no published tree is an empty report, not an
+/// error: "nothing has gone wrong yet" is an answer.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn scan_errors(
+    state: tauri::State<'_, AppState>,
+    limit: u32,
+) -> Result<ScanErrorReport, CommandError> {
+    let limit = (limit as usize).min(MAX_ERROR_SAMPLES);
+
+    if let Some(counters) = state.active_counters() {
+        let counts = counters.error_counts();
+        let total = counts.iter().map(|entry| entry.count).sum();
+        let samples = counters.error_samples(limit);
+        return Ok(ScanErrorReport {
+            live: true,
+            // A running scan has not published a tree, and the previously
+            // published one is a different scan's. NONE is the honest answer.
+            generation: TreeGeneration::NONE,
+            total,
+            counts,
+            truncated: total > samples.len() as u64,
+            samples,
+        });
+    }
+
+    let Some(scan) = state.published() else {
+        return Ok(ScanErrorReport::default());
+    };
+    let total = scan.error_counts.iter().map(|entry| entry.count).sum();
+    let samples: Vec<_> = scan.errors.iter().take(limit).cloned().collect();
+    Ok(ScanErrorReport {
+        live: false,
+        generation: scan.generation,
+        total,
+        counts: scan.error_counts.clone(),
+        truncated: total > samples.len() as u64,
+        samples,
+    })
 }
 
 /// One bounded page of children. `limit` is clamped to
