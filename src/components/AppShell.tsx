@@ -15,10 +15,15 @@
  *   animates from the 10 Hz event, but "the scan is done" comes from
  *   `scan_status`, exactly as the contract requires.
  *
- * The left rail lists the routes docs/05 specifies. The five that need a
+ * The left rail lists the routes docs/05 specifies. The four that still need a
  * completed catalog scan are visibly present and disabled with the reason,
  * rather than hidden: a missing feature the user can see and understand beats a
  * navigation model that changes shape.
+ *
+ * **Sizes is no longer one of them.** docs/05 grouped it with the catalog
+ * reports, but a size histogram is a single `O(subtree)` pass over an arena that
+ * is already in memory — it needs no Parquet partition, so it runs on the live
+ * tree and the route is enabled as soon as a scan exists.
  */
 
 import { useQueryClient } from "@tanstack/react-query";
@@ -36,6 +41,7 @@ import {
 } from "@/components/canvas";
 import type { ColorBy } from "@/components/canvas/palette";
 import { ScanAlerts } from "@/components/ScanAlerts";
+import { SizeBands } from "@/components/SizeBands";
 import { ScanProgressStrip, useScanProgress } from "@/components/ScanProgressStrip";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { Titlebar, type Crumb } from "@/components/Titlebar";
@@ -59,6 +65,7 @@ import {
   useAncestors,
   useNodeDetails,
   useScanStatus,
+  useSizeBands,
 } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { GENERATION_NONE, isRealNode } from "@/lib/wire";
@@ -67,7 +74,6 @@ import { CircleAlert, X } from "lucide-react";
 
 const CATALOG_ROUTES: readonly { id: string; label: string }[] = [
   { id: "types", label: "Types" },
-  { id: "sizes", label: "Sizes" },
   { id: "ages", label: "Ages" },
   { id: "diff", label: "Diff" },
   { id: "dupes", label: "Dupes" },
@@ -292,6 +298,8 @@ export function AppShell() {
 
   const crumbs = useCrumbs(generation, currentRoot, summary?.rootPath ?? null);
   const rootDetails = useNodeDetails(generation, currentRoot);
+  // Only while the route is showing: this is an O(subtree) walk on the backend.
+  const sizeBands = useSizeBands(generation, currentRoot, route === "sizes");
   const relocatingDetails = useNodeDetails(generation, relocating);
 
   // A completed relocation makes the tree on screen wrong: the subtree that
@@ -354,6 +362,13 @@ export function AppShell() {
             onSelect={setRoute}
             disabled={generation === GENERATION_NONE}
           />
+          <RailButton
+            id="sizes"
+            label="Sizes"
+            route={route}
+            onSelect={setRoute}
+            disabled={generation === GENERATION_NONE}
+          />
           {CATALOG_ROUTES.map((entry) => (
             <button
               key={entry.id}
@@ -390,6 +405,16 @@ export function AppShell() {
           )}
 
           {route === "volumes" && <VolumePicker onScan={(root) => void handleScan(root)} busy={starting} />}
+
+          {route === "sizes" && currentRoot !== null && (
+            <SizeBands
+              rows={sizeBands.data}
+              isLoading={sizeBands.isLoading}
+              error={sizeBands.error}
+              subtreeAllocated={rootDetails.data?.subtree?.allocated ?? null}
+              className="min-h-0 flex-1"
+            />
+          )}
 
           {route === "tree" && currentRoot !== null && (
             <div className="flex min-h-0 flex-1 flex-col">

@@ -184,6 +184,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bands;
 mod dirs;
 mod error;
 mod fmt_bytes;
@@ -195,6 +196,7 @@ pub mod snapshot;
 mod tree;
 mod wire;
 
+pub use crate::bands::{SIZE_BAND_COUNT, SIZE_BAND_EDGES, SizeBandRow};
 pub use crate::dirs::{DirIndex, DirTotals};
 pub use crate::error::{
     ActionError, ArenaError, CommandError, ErrorClass, ErrorClassCount, Operation, QueryError, ScanError, StartError,

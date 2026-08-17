@@ -77,6 +77,23 @@ export const commands = {
 	 */
 	nodeDetails: (generation: TreeGeneration, node: NodeId) => typedError<Details, QueryError>(__TAURI_INVOKE("node_details", { generation, node })),
 	/**
+	 *  The size-band histogram for a subtree.
+	 * 
+	 *  Always returns every band, including empty ones — "there is nothing over
+	 *  50 GiB here" is an answer, and a table whose rows appear and vanish as the
+	 *  user drills is harder to read than one that does not move.
+	 * 
+	 *  `O(subtree)`, which is why it runs on the blocking pool: the arena is already
+	 *  in memory, but a whole-volume subtree is millions of nodes and that is not
+	 *  work for the async executor.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+	 *  [`QueryError::UnknownNode`].
+	 */
+	sizeBands: (generation: TreeGeneration, node: NodeId) => typedError<SizeBandRow[], QueryError>(__TAURI_INVOKE("size_bands", { generation, node })),
+	/**
 	 *  The chain from the scan root down to a node, for the breadcrumb.
 	 * 
 	 *  Cheap — `O(depth)` with no `stat` — so the shell can call it on every
@@ -1449,6 +1466,31 @@ export type ScanTotals = {
 	/**
 	 *  Allocated bytes over the scan root, after hard-link policy. On APFS this
 	 *  is not a promise of uniquely reclaimable space.
+	 */
+	allocated: number,
+};
+
+/**
+ *  One row of the size-band histogram.
+ * 
+ *  Carries the edges rather than a rendered label so that both front ends
+ *  format them with their own `format_iec`/`format_si`, instead of the backend
+ *  shipping display text that then cannot be re-styled or localised.
+ */
+export type SizeBandRow = {
+	/**  Band index, `0` smallest. Stable for a given [`SIZE_BAND_EDGES`]. */
+	band: number,
+	/**  Inclusive lower edge in bytes; `0` for the smallest band. */
+	lower_bytes: number,
+	/**  Exclusive upper edge in bytes; `None` for the largest band. */
+	upper_bytes: number | null,
+	/**  Files in this band. */
+	files: number,
+	/**  Logical bytes of those files, after hard-link policy. */
+	logical: number,
+	/**
+	 *  Allocated bytes of those files, after hard-link policy. This is the
+	 *  quantity band membership is decided on.
 	 */
 	allocated: number,
 };

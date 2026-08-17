@@ -31,12 +31,14 @@ import {
   nodeDetails,
   scanErrors,
   scanStatus,
+  sizeBands,
   volumes,
   type AncestorRow,
   type ChildPageView,
   type DetailsView,
   type ScanErrorsView,
   type ScanStatusView,
+  type SizeBandView,
   type Sort,
   type VolumeRow,
 } from "@/lib/ipc";
@@ -71,6 +73,7 @@ export const queryKeys = {
     ["children", generation, parent, sort.key, sort.direction] as const,
   details: (generation: number, node: number) => ["details", generation, node] as const,
   ancestors: (generation: number, node: number) => ["ancestors", generation, node] as const,
+  sizeBands: (generation: number, node: number) => ["sizeBands", generation, node] as const,
 } as const;
 
 /**
@@ -84,7 +87,11 @@ export function dropStaleGenerations(client: QueryClient, live: number): void {
   client.removeQueries({
     predicate: (query) => {
       const [scope, generation] = query.queryKey as readonly unknown[];
-      if (scope !== "children" && scope !== "details" && scope !== "ancestors") return false;
+      // Every generation-keyed scope must be listed here. A scope that is
+      // omitted keeps answering from a tree that no longer exists.
+      if (scope !== "children" && scope !== "details" && scope !== "ancestors" && scope !== "sizeBands") {
+        return false;
+      }
       return typeof generation === "number" && generation !== live;
     },
   });
@@ -210,6 +217,30 @@ export function useNodeDetails(
     queryKey: queryKeys.details(generation, target),
     queryFn: () => nodeDetails(generation, target),
     enabled: generation !== GENERATION_NONE && node !== null && isRealNode(target) && !isVirtualGroup(target),
+  });
+}
+
+/**
+ * The size-band histogram for a subtree.
+ *
+ * `staleTime: Infinity` for the same reason every other generation-keyed query
+ * uses it: a published arena is frozen, so the answer for `(generation, node)`
+ * cannot change. A new scan means a new generation and a new key.
+ *
+ * `O(subtree)` on the backend, so this is fetched only when the Sizes route is
+ * actually showing rather than kept warm.
+ */
+export function useSizeBands(
+  generation: number,
+  node: number | null,
+  enabled = true,
+): UseQueryResult<SizeBandView[], Error> {
+  const target = node ?? -1;
+  return useQuery({
+    queryKey: queryKeys.sizeBands(generation, target),
+    queryFn: () => sizeBands(generation, target),
+    staleTime: Number.POSITIVE_INFINITY,
+    enabled: enabled && generation !== GENERATION_NONE && node !== null && isRealNode(target),
   });
 }
 

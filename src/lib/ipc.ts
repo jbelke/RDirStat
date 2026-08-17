@@ -603,6 +603,36 @@ export async function children(
   };
 }
 
+/**
+ * One row of the size-band histogram, with both unit systems already resolved.
+ *
+ * Band edges are binary because the user's reference is `du -h`, which is
+ * 1024-based; the rest of the interface is decimal SI because Finder is. Rather
+ * than pick a winner, every edge carries both renderings and the UI shows the
+ * conversion.
+ */
+export interface SizeBandView {
+  readonly band: number;
+  readonly lowerBytes: number;
+  /** `null` on the open-ended top band. */
+  readonly upperBytes: number | null;
+  readonly files: number;
+  readonly logical: number;
+  readonly allocated: number;
+}
+
+export async function sizeBands(generation: number, node: number): Promise<SizeBandView[]> {
+  const rows = await unwrap("size_bands", commands.sizeBands(toWireU64(generation), node));
+  return rows.map((row) => ({
+    band: num(row.band),
+    lowerBytes: num(row.lower_bytes),
+    upperBytes: row.upper_bytes === null ? null : num(row.upper_bytes),
+    files: num(row.files),
+    logical: num(row.logical),
+    allocated: num(row.allocated),
+  }));
+}
+
 export async function nodeDetails(generation: number, node: number): Promise<DetailsView> {
   const details = await unwrap("node_details", commands.nodeDetails(toWireU64(generation), node));
   return {

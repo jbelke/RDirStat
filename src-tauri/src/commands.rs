@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rdirstat_core::{
     ActionError, CancelState, CatalogScanId, ChildPage, CommandError, CompletedScan, ConfirmationToken, Cursor,
     Details, DisplayPath, LayoutKind, NodeId, QueryError, ReportName, ReportParams, ScanErrorReport, ScanId,
-    ScanOptions, ScanStatus, Sort, StartError, TrashPreview, TrashReport, TreeGeneration, VolumeInfo,
+    ScanOptions, ScanStatus, SizeBandRow, Sort, StartError, TrashPreview, TrashReport, TreeGeneration, VolumeInfo,
 };
 
 use crate::engine::{self, ScanOutcome, ScanRequest};
@@ -288,6 +288,35 @@ pub(crate) async fn node_details(
     tauri::async_runtime::spawn_blocking(move || query::details(&scan, node))
         .await
         .map_err(|error| QueryError::Internal(error.to_string()))?
+}
+
+/// The size-band histogram for a subtree.
+///
+/// Always returns every band, including empty ones — "there is nothing over
+/// 50 GiB here" is an answer, and a table whose rows appear and vanish as the
+/// user drills is harder to read than one that does not move.
+///
+/// `O(subtree)`, which is why it runs on the blocking pool: the arena is already
+/// in memory, but a whole-volume subtree is millions of nodes and that is not
+/// work for the async executor.
+///
+/// # Errors
+///
+/// [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+/// [`QueryError::UnknownNode`].
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn size_bands(
+    state: tauri::State<'_, AppState>,
+    generation: TreeGeneration,
+    node: NodeId,
+) -> Result<Vec<SizeBandRow>, QueryError> {
+    let scan = state.tree_for_query(generation)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        rdirstat_core::bands::size_bands(&scan.tree, node).ok_or(QueryError::UnknownNode { node })
+    })
+    .await
+    .map_err(|error| QueryError::Internal(error.to_string()))?
 }
 
 /// The escaped full path of a node, for display and Copy Path only.
