@@ -80,6 +80,45 @@ pub enum ErrorClass {
     Other,
 }
 
+impl ErrorClass {
+    /// Every class, in a fixed order.
+    ///
+    /// A running scan counts failures into an array of atomics — one slot per
+    /// class — because that is all the scan path is allowed to write. This
+    /// array is that mapping, and [`index`](Self::index) is its inverse, so the
+    /// order here is part of nothing persistent: it is re-read through `ALL`
+    /// every time and may be reordered freely.
+    pub const ALL: [Self; 10] = [
+        Self::PermissionDenied,
+        Self::NotFound,
+        Self::NotADirectory,
+        Self::SymlinkLoop,
+        Self::TooManyOpenFiles,
+        Self::NameTooLong,
+        Self::InvalidName,
+        Self::InputOutput,
+        Self::RemoteUnavailable,
+        Self::Other,
+    ];
+
+    /// This class's slot in [`ALL`](Self::ALL).
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::PermissionDenied => 0,
+            Self::NotFound => 1,
+            Self::NotADirectory => 2,
+            Self::SymlinkLoop => 3,
+            Self::TooManyOpenFiles => 4,
+            Self::NameTooLong => 5,
+            Self::InvalidName => 6,
+            Self::InputOutput => 7,
+            Self::RemoteUnavailable => 8,
+            Self::Other => 9,
+        }
+    }
+}
+
 /// One recorded, non-fatal failure during a scan.
 ///
 /// The first [`MAX_DETAILED_ERRORS`](crate::MAX_DETAILED_ERRORS) of these are

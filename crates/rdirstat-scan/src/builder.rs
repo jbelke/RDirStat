@@ -23,7 +23,7 @@ use crate::categorize::{Categorizer, is_package_name};
 use crate::entry::{EntryError, RawEntryBatch, SmallName};
 use crate::exclude::{ExclusionSet, Verdict};
 use crate::hardlink::HardLinkSet;
-use crate::progress::{ArenaFootprint, Counters};
+use crate::progress::{ArenaFootprint, Counters, ErrorSink};
 use crate::reader::{DirHandle, ReadDirError, SF_FIRMLINK};
 use crate::std_reader::BROKEN_SYMLINK_PROBE;
 
@@ -50,6 +50,7 @@ pub(crate) struct ScanBuilder<'a> {
     exclusions: &'a ExclusionSet,
     categorizer: &'a dyn Categorizer,
     counters: &'a Counters,
+    error_sink: &'a dyn ErrorSink,
     cross_filesystems: bool,
     count_hard_links_once: bool,
     root_device: u64,
@@ -77,6 +78,8 @@ pub(crate) struct BuilderConfig<'a> {
     pub(crate) exclusions: &'a ExclusionSet,
     pub(crate) categorizer: &'a dyn Categorizer,
     pub(crate) counters: &'a Counters,
+    /// Observes recorded failures as they happen. [`NoErrors`] by default.
+    pub(crate) error_sink: &'a dyn ErrorSink,
     pub(crate) cross_filesystems: bool,
     pub(crate) count_hard_links_once: bool,
     pub(crate) root_device: u64,
@@ -115,6 +118,7 @@ impl<'a> ScanBuilder<'a> {
             exclusions: config.exclusions,
             categorizer: config.categorizer,
             counters: config.counters,
+            error_sink: config.error_sink,
             cross_filesystems: config.cross_filesystems,
             count_hard_links_once: config.count_hard_links_once,
             root_device: config.root_device,
@@ -471,6 +475,10 @@ impl<'a> ScanBuilder<'a> {
 
     fn record(&mut self, error: ScanError) {
         Counters::add(&self.counters.errors, 1);
+        // Observation before accounting: the sink sees every recorded failure,
+        // including the ones past MAX_DETAILED_ERRORS that this builder stops
+        // keeping. What it does with them is its problem, not the scan's.
+        self.error_sink.record(&error);
         let class = error.class();
         let operation = error.operation();
         match self

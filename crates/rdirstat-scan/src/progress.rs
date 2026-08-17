@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use rdirstat_core::{DisplayPath, PROGRESS_MAX_HZ, ScanId, ScanProgress, ScanState};
+use rdirstat_core::{DisplayPath, PROGRESS_MAX_HZ, ScanError, ScanId, ScanProgress, ScanState};
 
 /// Minimum wall time between two published snapshots.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -129,6 +129,38 @@ pub struct NoProgress;
 
 impl ProgressSink for NoProgress {
     fn publish(&self, _progress: &ScanProgress) {}
+}
+
+/// Where recorded failures go **while the scan is still running**.
+///
+/// [`ScanProgress::errors`] is a count, and a count cannot answer the question
+/// a user actually asks when they see it: *what* failed. The full list exists —
+/// the builder keeps the first
+/// [`MAX_DETAILED_ERRORS`](rdirstat_core::MAX_DETAILED_ERRORS) in
+/// [`CompletedScan::errors`](rdirstat_core::CompletedScan::errors) — but it
+/// belongs to the builder until the scan ends, which is exactly the window in
+/// which someone is watching the counter climb and wondering what is wrong.
+///
+/// This is the seam that lets an observer see them as they happen. It is
+/// deliberately shaped like [`ProgressSink`]: called from the builder thread,
+/// borrowed rather than owned, and required not to block. An implementation
+/// that takes a contended lock or formats a path here slows the single writer
+/// that the whole scan is bottlenecked on.
+///
+/// Sinking is *observation only*. The recorded error is still counted, still
+/// classified, and still kept in the completed scan; nothing about the scan's
+/// outcome depends on whether a sink is attached.
+pub trait ErrorSink: Send + Sync {
+    /// Observes one recorded failure. Must not block.
+    fn record(&self, error: &ScanError);
+}
+
+/// An error sink that discards everything. The default.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoErrors;
+
+impl ErrorSink for NoErrors {
+    fn record(&self, _error: &ScanError) {}
 }
 
 /// The memory picture the scan can actually measure.

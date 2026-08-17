@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::dirs::DirTotals;
-use crate::error::ActionError;
+use crate::error::{ActionError, ErrorClassCount, ScanError};
 use crate::id::{CatalogScanId, CategoryId, NodeId, TreeGeneration};
 use crate::node::Kind;
 
@@ -506,7 +506,28 @@ pub struct TrashPreview {
 /// Volume capacity is shown **beside** a scan's tree total, never silently
 /// reconciled into it: clones, snapshots, purgeable space, exclusions,
 /// unreadable data, and concurrent mutation all create legitimate deltas.
+///
+/// # Capacity on APFS is a container property, not a volume property
+///
+/// Every APFS volume in one container reports that **container's** size and
+/// free space, so `total_bytes` and `available_bytes` are identical across all
+/// of them and `total_bytes - available_bytes` is the container's usage, not
+/// this volume's. Presenting that difference per volume is how five volumes of
+/// one Mac end up each claiming to have used 968 GB of a 995 GB disk.
+///
+/// [`used_bytes`](Self::used_bytes) is the per-volume number, and
+/// [`container_id`](Self::container_id) / [`disk_id`](Self::disk_id) say which
+/// volumes are sharing the capacity, so the UI can state the shared numbers
+/// once per container and the private number once per volume.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "A wire DTO, not a state machine. These five flags are independent facts macOS \
+              reports about a volume — internal, system, root, removable, snapshotted — and no \
+              two of them are mutually exclusive. Folding them into two-variant enums, which is \
+              what the lint suggests, would change the JSON the frontend already reads and buy \
+              nothing: there is no invalid combination to make unrepresentable."
+)]
 pub struct VolumeInfo {
     /// Display name, e.g. `Macintosh HD`.
     pub name: String,
@@ -516,10 +537,33 @@ pub struct VolumeInfo {
     pub device: u64,
     /// Filesystem type, e.g. `apfs`.
     pub fs_type: String,
-    /// Total capacity in bytes.
+    /// Total capacity in bytes. **Container-wide on APFS.**
     pub total_bytes: u64,
-    /// Ordinary available capacity in bytes.
+    /// Ordinary available capacity in bytes. **Container-wide on APFS.**
     pub available_bytes: u64,
+    /// Bytes this volume itself occupies, as reported for this mount rather
+    /// than derived from `total - available`. This is the only capacity number
+    /// here that is private to the volume.
+    pub used_bytes: u64,
+    /// The device node backing the mount, e.g. `/dev/disk3s1s1`.
+    pub device_node: String,
+    /// The APFS container reference (`disk3`), or the whole disk for a
+    /// non-APFS filesystem (`disk4`). `None` when the topology could not be
+    /// read — grouping then degrades to one group per volume rather than to a
+    /// wrong grouping.
+    pub container_id: Option<String>,
+    /// The physical whole disk backing the container, e.g. `disk0`.
+    pub disk_id: Option<String>,
+    /// Media name of that physical disk, e.g. `APPLE SSD AP1024Z`.
+    pub disk_name: Option<String>,
+    /// Size of that physical disk in bytes, which is larger than a container:
+    /// it includes the other partitions.
+    pub disk_size_bytes: Option<u64>,
+    /// Whether the backing disk is on an internal bus.
+    pub is_internal: bool,
+    /// Whether macOS considers this volume part of the OS install rather than
+    /// somewhere a user keeps files (`/System/Volumes/*`, Preboot, VM, …).
+    pub is_system: bool,
     /// Foundation's "available for important usage", where macOS supplies it.
     /// It can include purgeable capacity and is labelled as such.
     pub important_available_bytes: Option<u64>,
@@ -531,6 +575,41 @@ pub struct VolumeInfo {
     /// only: `tmutil` gives no authoritative byte total to subtract from
     /// `statfs`, so no acceptance gate depends on "snapshot bytes".
     pub has_local_snapshots: bool,
+}
+
+/// The recorded failures of a scan, for the "N errors" affordance.
+///
+/// A scan reports a single error count while it runs and per-class counts when
+/// it finishes, and neither answers the only question a user actually asks:
+/// *what* failed. The scanner already knows — it classifies every failure and
+/// keeps the first [`MAX_DETAILED_ERRORS`](crate::MAX_DETAILED_ERRORS) in full
+/// — so this is that knowledge crossing IPC.
+///
+/// Bounded like every other payload: [`counts`](Self::counts) has one row per
+/// class and operation, and [`samples`](Self::samples) is capped by the caller
+/// with [`truncated`](Self::truncated) saying so. A scan with ten million
+/// unreadable paths returns the same size of answer as one with three.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct ScanErrorReport {
+    /// Whether these are the counters of a running scan. A live report grows;
+    /// a report for the published tree is final.
+    pub live: bool,
+    /// The tree these errors belong to, or [`TreeGeneration::NONE`] while the
+    /// scan that is recording them has not published one.
+    pub generation: TreeGeneration,
+    /// Every recorded failure, uncapped, however many samples were returned.
+    pub total: u64,
+    /// Uncapped counts by class and operation.
+    ///
+    /// While a scan is live the operation is `None`: the running counters are
+    /// per class only, because a fixed array of atomics is what the scan path
+    /// is allowed to write and a per-(class, operation) map is not.
+    pub counts: Vec<ErrorClassCount>,
+    /// The retained failures, in the order they were recorded, capped by the
+    /// caller's `limit`.
+    pub samples: Vec<ScanError>,
+    /// Whether more failures were recorded than are in `samples`.
+    pub truncated: bool,
 }
 
 /// The outcome of a Trash request.

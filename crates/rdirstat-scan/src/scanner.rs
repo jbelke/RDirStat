@@ -23,7 +23,7 @@ use crate::cancel::CancelToken;
 use crate::categorize::{Categorizer, Uncategorized};
 use crate::engine::{Completion, Engine, EngineContext, parallel, sequential};
 use crate::exclude::{ExclusionSet, default_exclusions};
-use crate::progress::{Counters, CurrentDir, NoProgress, ProgressPublisher, ProgressSink};
+use crate::progress::{Counters, CurrentDir, ErrorSink, NoErrors, NoProgress, ProgressPublisher, ProgressSink};
 use crate::reader::{DirReader, classify_os_error};
 use crate::std_reader::StdReader;
 
@@ -88,6 +88,7 @@ pub struct Scanner {
     reader: Arc<dyn DirReader>,
     categorizer: Arc<dyn Categorizer>,
     progress: Arc<dyn ProgressSink>,
+    errors: Arc<dyn ErrorSink>,
     category_config_hash: ConfigHash,
 }
 
@@ -122,6 +123,7 @@ impl Scanner {
             reader: Arc::new(StdReader::new()),
             categorizer: Arc::new(Uncategorized),
             progress: Arc::new(NoProgress),
+            errors: Arc::new(NoErrors),
             category_config_hash: ConfigHash::default(),
         }
     }
@@ -168,6 +170,16 @@ impl Scanner {
     #[must_use]
     pub fn with_progress(mut self, progress: Arc<dyn ProgressSink>) -> Self {
         self.progress = progress;
+        self
+    }
+
+    /// Wires the error sink, which observes every recorded failure as it
+    /// happens rather than waiting for [`CompletedScan::errors`] at the end.
+    ///
+    /// [`CompletedScan::errors`]: rdirstat_core::CompletedScan::errors
+    #[must_use]
+    pub fn with_error_sink(mut self, errors: Arc<dyn ErrorSink>) -> Self {
+        self.errors = errors;
         self
     }
 
@@ -238,6 +250,7 @@ impl Scanner {
                 exclusions: &exclusions,
                 categorizer: self.categorizer.as_ref(),
                 counters: &counters,
+                error_sink: self.errors.as_ref(),
                 cross_filesystems: self.options.cross_filesystems,
                 count_hard_links_once: self.options.count_hard_links_once,
                 root_device,

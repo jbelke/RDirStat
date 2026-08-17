@@ -90,7 +90,8 @@ pub use crate::entry::{EntryError, INLINE_NAME_BYTES, RawEntry, RawEntryBatch, S
 pub use crate::exclude::{ExclusionSet, Verdict, default_exclusions, match_path, match_segment, path_rule};
 pub use crate::hardlink::HardLinkSet;
 pub use crate::progress::{
-    ArenaFootprint, Counters, CurrentDir, NoProgress, PROGRESS_INTERVAL, ProgressPublisher, ProgressSink,
+    ArenaFootprint, Counters, CurrentDir, ErrorSink, NoErrors, NoProgress, PROGRESS_INTERVAL, ProgressPublisher,
+    ProgressSink,
 };
 pub use crate::reader::{DirHandle, DirReader, ReadDirError, SF_FIRMLINK, classify_os_error};
 pub use crate::scanner::{ScanFailure, ScanOutcome, Scanner, engine_for, validate_options};
