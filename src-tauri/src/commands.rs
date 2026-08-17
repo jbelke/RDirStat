@@ -23,8 +23,10 @@ use rdirstat_core::{
 };
 
 use crate::engine::{self, ScanOutcome, ScanRequest};
+use crate::query::Ancestor;
+use crate::relocate::{RelocateError, RelocateMode, RelocatePlan, RelocateReport, SourceDisposal};
 use crate::state::AppState;
-use crate::{actions, progress, query, volumes};
+use crate::{actions, progress, query, relocate, volumes};
 
 /// The ceiling on `scan_errors`'s sample list.
 ///
@@ -267,6 +269,114 @@ pub(crate) async fn path_of(
     let mut bytes = Vec::with_capacity(128);
     scan.tree.path_bytes(item, &mut bytes)?;
     Ok(DisplayPath::from_bytes(&bytes))
+}
+
+/// The chain from the scan root down to a node, for the breadcrumb.
+///
+/// Cheap — `O(depth)` with no `stat` — so the shell can call it on every
+/// navigation instead of trying to remember where the user has been.
+///
+/// # Errors
+///
+/// [`QueryError::NoScan`], [`QueryError::StaleGeneration`],
+/// [`QueryError::UnknownNode`], or [`QueryError::PathTooDeep`].
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn ancestors(
+    state: tauri::State<'_, AppState>,
+    generation: TreeGeneration,
+    node: NodeId,
+) -> Result<Vec<Ancestor>, QueryError> {
+    let scan = state.tree_for_query(generation)?;
+    query::ancestors(&scan, node)
+}
+
+/// What a relocation would do, plus the token that authorizes it.
+///
+/// Returns a plan even when the relocation cannot proceed: the reasons are the
+/// point, and [`RelocatePlan::token`] is `None` for anything unactionable. The
+/// frontend must key the confirm button on the token, not on the call
+/// succeeding.
+///
+/// # Errors
+///
+/// [`RelocateError`] only for a request that cannot be described at all — an
+/// unknown node, a path outside the scan root, or a destination that is not an
+/// absolute, `..`-free path.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn relocate_plan(
+    state: tauri::State<'_, AppState>,
+    generation: TreeGeneration,
+    node: NodeId,
+    destination: String,
+    mode: RelocateMode,
+    disposal: SourceDisposal,
+) -> Result<RelocatePlan, RelocateError> {
+    let scan = state.tree_for_action(generation).map_err(RelocateError::Action)?;
+    let destination = PathBuf::from(destination);
+    // The destination is the one path in the whole app that comes from the
+    // frontend rather than from the arena, so it is validated here rather than
+    // trusted. Everything else is reconstructed from stored components.
+    if !relocate::is_acceptable_destination(&destination) {
+        return Err(RelocateError::Destination {
+            path: DisplayPath::from_bytes(destination.as_os_str().as_encoded_bytes()),
+            reason: "the destination must be an absolute path with no `..` segments".to_owned(),
+        });
+    }
+    let keys = state.token_keys().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        relocate::plan(&scan, &keys, now_unix_ms(), node, &destination, mode, disposal)
+    })
+    .await
+    .map_err(|error| RelocateError::Internal(error.to_string()))?
+}
+
+/// Executes a planned relocation: copy, verify, dispose, symlink.
+///
+/// **Long-running and blocking.** A multi-gigabyte subtree is copied and then
+/// read back in full for verification, so this can run for minutes. It is on
+/// `spawn_blocking` for that reason.
+///
+/// # Errors
+///
+/// [`RelocateError`]. Every failure before the disposal step leaves the source
+/// untouched; [`RelocateError::SymlinkFailed`] is the sole exception and says
+/// so in its message.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn relocate_apply(
+    state: tauri::State<'_, AppState>,
+    generation: TreeGeneration,
+    node: NodeId,
+    destination: String,
+    mode: RelocateMode,
+    disposal: SourceDisposal,
+    confirmation: ConfirmationToken,
+) -> Result<RelocateReport, RelocateError> {
+    let scan = state.tree_for_action(generation).map_err(RelocateError::Action)?;
+    let destination = PathBuf::from(destination);
+    if !relocate::is_acceptable_destination(&destination) {
+        return Err(RelocateError::Destination {
+            path: DisplayPath::from_bytes(destination.as_os_str().as_encoded_bytes()),
+            reason: "the destination must be an absolute path with no `..` segments".to_owned(),
+        });
+    }
+    let keys = state.token_keys().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        relocate::apply(
+            &scan,
+            &keys,
+            now_unix_ms(),
+            node,
+            &destination,
+            mode,
+            disposal,
+            &confirmation,
+        )
+    })
+    .await
+    .map_err(|error| RelocateError::Internal(error.to_string()))?
 }
 
 /// Mounted local volumes, for the launch screen.

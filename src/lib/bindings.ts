@@ -77,6 +77,18 @@ export const commands = {
 	 */
 	nodeDetails: (generation: TreeGeneration, node: NodeId) => typedError<Details, QueryError>(__TAURI_INVOKE("node_details", { generation, node })),
 	/**
+	 *  The chain from the scan root down to a node, for the breadcrumb.
+	 * 
+	 *  Cheap — `O(depth)` with no `stat` — so the shell can call it on every
+	 *  navigation instead of trying to remember where the user has been.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`QueryError::NoScan`], [`QueryError::StaleGeneration`],
+	 *  [`QueryError::UnknownNode`], or [`QueryError::PathTooDeep`].
+	 */
+	ancestors: (generation: TreeGeneration, node: NodeId) => typedError<Ancestor[], QueryError>(__TAURI_INVOKE("ancestors", { generation, node })),
+	/**
 	 *  The escaped full path of a node, for display and Copy Path only.
 	 * 
 	 *  # Errors
@@ -124,6 +136,35 @@ export const commands = {
 	 *  [`ActionError::ChangedSinceScan`], or [`ActionError::OutsideScanRoot`].
 	 */
 	revealInFinder: (generation: TreeGeneration, node: NodeId) => typedError<null, ActionError>(__TAURI_INVOKE("reveal_in_finder", { generation, node })),
+	/**
+	 *  What a relocation would do, plus the token that authorizes it.
+	 * 
+	 *  Returns a plan even when the relocation cannot proceed: the reasons are the
+	 *  point, and [`RelocatePlan::token`] is `None` for anything unactionable. The
+	 *  frontend must key the confirm button on the token, not on the call
+	 *  succeeding.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`RelocateError`] only for a request that cannot be described at all — an
+	 *  unknown node, a path outside the scan root, or a destination that is not an
+	 *  absolute, `..`-free path.
+	 */
+	relocatePlan: (generation: TreeGeneration, node: NodeId, destination: string, mode: RelocateMode, disposal: SourceDisposal) => typedError<RelocatePlan, RelocateError>(__TAURI_INVOKE("relocate_plan", { generation, node, destination, mode, disposal })),
+	/**
+	 *  Executes a planned relocation: copy, verify, dispose, symlink.
+	 * 
+	 *  **Long-running and blocking.** A multi-gigabyte subtree is copied and then
+	 *  read back in full for verification, so this can run for minutes. It is on
+	 *  `spawn_blocking` for that reason.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`RelocateError`]. Every failure before the disposal step leaves the source
+	 *  untouched; [`RelocateError::SymlinkFailed`] is the sole exception and says
+	 *  so in its message.
+	 */
+	relocateApply: (generation: TreeGeneration, node: NodeId, destination: string, mode: RelocateMode, disposal: SourceDisposal, confirmation: ConfirmationToken) => typedError<RelocateReport, RelocateError>(__TAURI_INVOKE("relocate_apply", { generation, node, destination, mode, disposal, confirmation })),
 };
 
 /** Events */
@@ -218,6 +259,22 @@ export type ActionError =
 } } | 
 /**  Anything unexpected, already logged with its full source chain. */
 { kind: "internal"; detail: string };
+
+/**
+ *  One step on the path from the scan root down to a node.
+ * 
+ *  This is what the breadcrumb is built from. It carries the `NodeId` so a
+ *  crumb is directly navigable, and the name so the frontend does not have to
+ *  have visited the ancestor to be able to label it.
+ */
+export type Ancestor = {
+	node: NodeId,
+	/**  Basename. The root carries its full path instead — see [`ancestors`]. */
+	name: DisplayPath,
+	kind: Kind,
+	logical: number,
+	allocated: number,
+};
 
 /**
  *  A structural failure while building or loading an arena.
@@ -769,6 +826,144 @@ export type QueryError =
 { kind: "internal"; detail: string };
 
 /**
+ *  A relocation-specific failure.
+ * 
+ *  Path-identity failures reuse [`ActionError`] through
+ *  [`RelocateError::Action`] rather than being restated here, so the "the thing
+ *  you selected is not the thing on disk" rules stay in one place.
+ *  `Display` and `Error` are written out by hand rather than derived: `src-tauri`
+ *  deliberately does not depend on `thiserror` (docs/08-RUST-PRACTICES.md
+ *  reserves it for the library crates and gives the shell `anyhow`), and adding
+ *  it for one enum would be the wrong end of that trade.
+ */
+export type RelocateError = 
+/**  A path-identity failure, reused from the Trash path. */
+{ kind: "action"; detail: ActionError } | 
+/**  The path is one the system needs where it is. */
+{ kind: "blocked"; detail: {
+	path: DisplayPath,
+	reason: string,
+} } | 
+/**
+ *  The destination exists when it must not, or is missing when it must be
+ *  there — depending on [`RelocateMode`].
+ */
+{ kind: "destination"; detail: {
+	path: DisplayPath,
+	reason: string,
+} } | 
+/**  Source and destination overlap; copying would recurse. */
+{ kind: "overlapping"; detail: {
+	source: DisplayPath,
+	destination: DisplayPath,
+} } | 
+/**  The destination filesystem does not have room. */
+{ kind: "not_enough_space"; detail: {
+	needed: number,
+	available: number,
+} } | 
+/**  `ditto` exited non-zero. */
+{ kind: "copy_failed"; detail: string } | 
+/**  The copy did not match the source. The source has NOT been touched. */
+{ kind: "verify_failed"; detail: {
+	path: DisplayPath,
+	reason: string,
+} } | 
+/**
+ *  The copy verified, but the symlink could not be created. The source has
+ *  already been disposed of — recover it from the Trash. Reported loudly.
+ */
+{ kind: "symlink_failed"; detail: {
+	path: DisplayPath,
+	reason: string,
+} } | { kind: "internal"; detail: string };
+
+/**  How the destination is reached. */
+export type RelocateMode = 
+/**
+ *  Copy the subtree to a destination that does not exist yet, verify it,
+ *  dispose of the source, and symlink. The ordinary case.
+ */
+"migrate" | 
+/**
+ *  The destination **already holds** the data — a previous migration that
+ *  was interrupted, or a copy the user made themselves. Verify it against
+ *  the source, then dispose and symlink. Copies nothing.
+ */
+"repoint";
+
+/**  What a relocation would do, and the token that authorizes it. */
+export type RelocatePlan = {
+	generation: TreeGeneration,
+	/**
+	 *  `None` when [`RelocatePlan::risk`] is [`RiskTier::Blocked`], or when the
+	 *  plan found a condition that makes the relocation impossible. A UI must
+	 *  treat a plan without a token as "show the reasons, disable the button".
+	 */
+	token: ConfirmationToken | null,
+	node: NodeId,
+	source: DisplayPath,
+	destination: DisplayPath,
+	mode: RelocateMode,
+	disposal: SourceDisposal,
+	/**  Subtree size as the scan recorded it. */
+	logical: number,
+	allocated: number,
+	/**  Nodes retained under this one, as the scan recorded them. */
+	retained_nodes: number,
+	/**
+	 *  Directories under this one the scan could not read. Non-zero means the
+	 *  recorded size is a floor and the copy may be larger than planned.
+	 */
+	unreadable: number,
+	/**
+	 *  `st_dev` of the source and of the destination's parent. Equal devices
+	 *  mean the move frees nothing, which is a warning, not an error.
+	 */
+	source_device: number,
+	destination_device: number,
+	/**  Bytes free on the destination filesystem, from `df -Pk`. */
+	destination_available: number,
+	risk: RiskTier,
+	warnings: RelocateWarning[],
+};
+
+/**  What a relocation actually did. */
+export type RelocateReport = {
+	generation: TreeGeneration,
+	node: NodeId,
+	source: DisplayPath,
+	destination: DisplayPath,
+	mode: RelocateMode,
+	/**
+	 *  What was actually done to the source, which is not always what was
+	 *  asked: an unverifiable entry downgrades it to [`SourceDisposal::Keep`].
+	 */
+	disposal: SourceDisposal,
+	/**  Regular files compared byte-for-byte and found identical. */
+	files_verified: number,
+	/**  Bytes in those files. */
+	bytes_verified: number,
+	/**
+	 *  Sockets, FIFOs and device nodes found in the source. `ditto` does not
+	 *  carry these and no copy can, so their presence forces `Keep`.
+	 */
+	special_files: number,
+	/**  Whether the symlink now exists at the source path. */
+	symlink_created: boolean,
+	/**  Set when the relocation did not complete. The source is untouched. */
+	error: RelocateError | null,
+};
+
+/**  One thing the user should read before confirming. */
+export type RelocateWarning = {
+	/**  Stable identifier, so the UI can style or suppress a specific warning. */
+	code: string,
+	/**  Plain sentence, already written for a human. */
+	message: string,
+};
+
+/**
  *  The closed set of named reports.
  * 
  *  The frontend cannot submit SQL, paths, globs, identifiers, or pragmas. Each
@@ -815,6 +1010,15 @@ export type ReportParams = {
 	/**  The second scan, for a diff report. */
 	compare_to: CatalogScanId | null,
 };
+
+/**  How much care this particular path needs. */
+export type RiskTier = 
+/**  User data. Proceed on confirmation. */
+"ordinary" | 
+/**  Allowed, but something about it can break a running system. */
+"risky" | 
+/**  Refused outright. [`plan`] returns this with `token: None`. */
+"blocked";
 
 /**  Include or exclude. */
 export type RuleAction = 
@@ -1287,6 +1491,22 @@ export type SortKey =
 "category" | 
 /**  Directories before files, then name. */
 "kind";
+
+/**  What happens to the original once the copy is proven. */
+export type SourceDisposal = 
+/**
+ *  `NSFileManager.trashItem`. Recoverable through Finder's "Put Back";
+ *  the space is not returned until the Trash is emptied. The default.
+ */
+"trash" | 
+/**  Remove immediately. Returns the space at once and is not undoable. */
+"delete" | 
+/**
+ *  Leave the source in place. Produces a *copy*, not a relocation, and no
+ *  symlink is created. Chosen automatically when verification finds
+ *  something it could not check.
+ */
+"keep";
 
 /**  Starting a scan failed before any traversal happened. */
 export type StartError = 

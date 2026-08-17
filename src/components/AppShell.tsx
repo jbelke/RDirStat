@@ -46,6 +46,7 @@ import { nodeDetails, revealInFinder, scanCancel, scanStart, type LayoutKind } f
 import {
   dropStaleGenerations,
   queryKeys,
+  useAncestors,
   useNodeDetails,
   useScanStatus,
 } from "@/lib/queries";
@@ -89,6 +90,7 @@ export function AppShell() {
   const syncGeneration = useUiStore((state) => state.syncGeneration);
   const navigateTo = useUiStore((state) => state.navigateTo);
   const navigateUpTo = useUiStore((state) => state.navigateUpTo);
+  const setNavPath = useUiStore((state) => state.setNavPath);
   const select = useUiStore((state) => state.select);
   const setHovered = useUiStore((state) => state.setHovered);
   const setLayoutKind = useUiStore((state) => state.setLayoutKind);
@@ -259,12 +261,38 @@ export function AppShell() {
     [describeNode, handleReveal, handleTrash, navigateTo],
   );
 
-  const crumbs = useCrumbs(generation, navStack, summary?.rootPath ?? null);
+  const crumbs = useCrumbs(generation, currentRoot, summary?.rootPath ?? null);
   const rootDetails = useNodeDetails(generation, currentRoot);
+
+  // A crumb click sets the navigation stack to the whole path down to that
+  // crumb, not just the one node. Crumb 0 is the app name and is not
+  // navigable, so the stack is `crumbs[1..=index]`.
+  const handleCrumbNavigate = useCallback(
+    (_node: number, index: number) => {
+      const path = crumbs
+        .slice(1, index + 1)
+        .map((crumb) => crumb.node)
+        .filter((node): node is number => node !== null);
+      if (path.length > 0) setNavPath(path);
+    },
+    [crumbs, setNavPath],
+  );
+
+  // ⌘↑ is the Finder shortcut for "enclosing folder", so it is the one a macOS
+  // user will already try.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.metaKey || event.key !== "ArrowUp" || navStack.length < 2) return;
+      event.preventDefault();
+      navigateUpTo(navStack.length - 2);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [navStack.length, navigateUpTo]);
 
   return (
     <div className="flex h-full flex-col">
-      <Titlebar crumbs={crumbs} onNavigate={(index) => navigateUpTo(index - 1)}>
+      <Titlebar crumbs={crumbs} onNavigate={handleCrumbNavigate}>
         {generation !== GENERATION_NONE && (
           <Button variant="ghost" size="sm" onClick={() => setRoute("volumes")}>
             Scan…
@@ -439,17 +467,20 @@ function RailButton({
  * second is the scan root, labelled with its path rather than its basename so
  * `/Volumes/tuf8tb` does not display as `tuf8tb › tuf8tb`.
  */
-function useCrumbs(generation: number, navStack: readonly number[], rootPath: string | null): Crumb[] {
+function useCrumbs(generation: number, current: number | null, rootPath: string | null): Crumb[] {
+  // The `ancestors` command answers this in O(depth) with no `stat`, from the
+  // frozen tree, so it is both cheaper and more correct than the alternative.
+  const chain = useAncestors(generation, current);
+
   const crumbs: Crumb[] = [{ node: null, label: "RDirStat" }];
-  // Deliberately not `useQueries`: the stack is short (a drill-down path), and
-  // the details for every node on it are already resolved for the panel. This
-  // reads whatever is cached and falls back to the id, which is honest.
-  const client = useQueryClient();
-  for (const [index, node] of navStack.entries()) {
-    const cached = client.getQueryData<{ name: string }>(queryKeys.details(generation, node));
-    const label =
-      index === 0 ? (rootPath ?? cached?.name ?? "Scan root") : (cached?.name ?? `#${node}`);
-    crumbs.push({ node, label });
+  if (chain.data === undefined) {
+    // Before the chain arrives, show the root rather than nothing: the strip
+    // must not change height or jump on every navigation.
+    if (current !== null && rootPath !== null) crumbs.push({ node: null, label: rootPath });
+    return crumbs;
+  }
+  for (const ancestor of chain.data) {
+    crumbs.push({ node: ancestor.node, label: ancestor.name });
   }
   return crumbs;
 }

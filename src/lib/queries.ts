@@ -26,11 +26,13 @@ import {
 } from "@tanstack/react-query";
 
 import {
+  ancestors,
   children,
   nodeDetails,
   scanErrors,
   scanStatus,
   volumes,
+  type AncestorRow,
   type ChildPageView,
   type DetailsView,
   type ScanErrorsView,
@@ -68,6 +70,7 @@ export const queryKeys = {
   children: (generation: number, parent: number, sort: Sort) =>
     ["children", generation, parent, sort.key, sort.direction] as const,
   details: (generation: number, node: number) => ["details", generation, node] as const,
+  ancestors: (generation: number, node: number) => ["ancestors", generation, node] as const,
 } as const;
 
 /**
@@ -81,7 +84,7 @@ export function dropStaleGenerations(client: QueryClient, live: number): void {
   client.removeQueries({
     predicate: (query) => {
       const [scope, generation] = query.queryKey as readonly unknown[];
-      if (scope !== "children" && scope !== "details") return false;
+      if (scope !== "children" && scope !== "details" && scope !== "ancestors") return false;
       return typeof generation === "number" && generation !== live;
     },
   });
@@ -191,5 +194,26 @@ export function useNodeDetails(
     queryKey: queryKeys.details(generation, target),
     queryFn: () => nodeDetails(generation, target),
     enabled: generation !== GENERATION_NONE && node !== null && isRealNode(target) && !isVirtualGroup(target),
+  });
+}
+
+/**
+ * The ancestor chain for the breadcrumb.
+ *
+ * `staleTime: Infinity` because a published tree is frozen: within one
+ * generation a node's ancestors cannot change, so re-fetching could only ever
+ * return the same answer. The generation is in the key, so a new scan gets a
+ * new entry and `dropStaleGenerations` evicts the old one.
+ */
+export function useAncestors(
+  generation: number,
+  node: number | null,
+): UseQueryResult<AncestorRow[], Error> {
+  const target = node ?? -1;
+  return useQuery({
+    queryKey: queryKeys.ancestors(generation, target),
+    queryFn: () => ancestors(generation, target),
+    enabled: generation !== GENERATION_NONE && node !== null && isRealNode(target),
+    staleTime: Number.POSITIVE_INFINITY,
   });
 }

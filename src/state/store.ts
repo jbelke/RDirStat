@@ -86,6 +86,8 @@ export interface UiState {
   syncGeneration: (generation: number, root?: number) => void;
   navigateTo: (node: number) => void;
   navigateUpTo: (depth: number) => void;
+  /** Replace the navigation stack with an exact root-to-node path. */
+  setNavPath: (nodes: readonly number[]) => void;
   select: (node: number, mode?: "replace" | "toggle" | "add") => void;
   clearSelection: () => void;
   setFocused: (node: number | null) => void;
@@ -144,6 +146,18 @@ export const useUiStore = create<UiState>((set) => ({
       if (depth < 0 || depth >= state.navStack.length) return state;
       return { navStack: state.navStack.slice(0, depth + 1) };
     }),
+
+  // Replaces the stack outright with a known-good path.
+  //
+  // The breadcrumb is built from the tree's ancestor chain, not from where the
+  // user has clicked, so it can offer a jump to an ancestor that was never on
+  // the stack — zoom straight from the root to a file eight levels down and
+  // every directory in between is reachable but unvisited. Pushing one of
+  // those with `navigateTo` would leave the stack holding a path that is not a
+  // path. Setting it from the chain keeps `navStack` exactly equal to the
+  // route from the root to the current node, which is what `useCurrentRoot`
+  // and every up-navigation assume it is.
+  setNavPath: (nodes) => set(() => ({ navStack: [...nodes] })),
 
   select: (node, mode = "replace") =>
     set((state) => {

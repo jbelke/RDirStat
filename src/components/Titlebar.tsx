@@ -25,8 +25,8 @@
  * unlabeled toolbar icons."
  */
 
-import { ChevronRight, Search, Settings } from "lucide-react";
-import { Fragment } from "react";
+import { ChevronRight, CornerLeftUp, Search, Settings } from "lucide-react";
+import { Fragment, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -39,13 +39,36 @@ export interface Crumb {
 
 export interface TitlebarProps {
   crumbs: readonly Crumb[];
-  /** Index into `crumbs`; the shell pops the navigation stack to that depth. */
-  onNavigate?: (index: number) => void;
+  /**
+   * Called with the crumb's `NodeId` and its index. Never called for a crumb
+   * whose `node` is `null`, nor for the last one.
+   *
+   * The index is passed alongside the node because the shell rebuilds the
+   * navigation stack from the crumb *path* — everything up to and including
+   * this crumb — rather than pushing a single node. A breadcrumb built from
+   * the tree can offer an ancestor the user has never visited, and pushing one
+   * of those onto a click-history stack leaves it holding something that is
+   * not a path.
+   */
+  onNavigate?: (node: number, index: number) => void;
   onOpenCommandPalette?: () => void;
   onOpenSettings?: () => void;
   /** Rendered between the breadcrumb and the trailing actions (e.g. a Scan button). */
   children?: React.ReactNode;
 }
+
+/**
+ * Crumbs shown before the trail collapses.
+ *
+ * A real drill-down goes deep fast — `/Users/josh/Library/Containers/
+ * com.docker.docker/Data/vms/0/data/Docker.raw` is nine crumbs — and nine
+ * `truncate`d labels in a fixed-width strip degrades into nine unreadable
+ * two-character stubs. Collapsing the middle keeps the two ends, which are the
+ * two the user actually navigates to.
+ */
+const COLLAPSE_THRESHOLD = 6;
+/** Kept at the end of a collapsed trail, nearest the current node. */
+const TAIL_CRUMBS = 3;
 
 export function Titlebar({
   crumbs,
@@ -54,6 +77,25 @@ export function Titlebar({
   onOpenSettings,
   children,
 }: TitlebarProps) {
+  const [expanded, setExpanded] = useState(false);
+
+  // Navigating elsewhere re-collapses: the expansion is about reading *this*
+  // trail, and leaving it open lets the strip stay overfull indefinitely.
+  const trail = crumbs.map((crumb) => crumb.label).join("/");
+  useEffect(() => setExpanded(false), [trail]);
+
+  const collapsible = crumbs.length > COLLAPSE_THRESHOLD && !expanded;
+  // Always keep crumb 0 (the app name) and crumb 1 (the scan root); the hidden
+  // run is everything between that and the tail.
+  const hiddenFrom = 2;
+  const hiddenTo = crumbs.length - TAIL_CRUMBS;
+  const hidden = collapsible ? crumbs.slice(hiddenFrom, hiddenTo) : [];
+
+  // The last crumb is the current node and is never a link, so an "up" control
+  // targets the one before it.
+  const parent = crumbs.length >= 2 ? crumbs[crumbs.length - 2] : undefined;
+  const upTarget = parent?.node ?? null;
+
   return (
     <header
       data-tauri-drag-region
@@ -64,6 +106,19 @@ export function Titlebar({
       )}
       style={{ paddingLeft: "var(--traffic-light-inset)" }}
     >
+      {upTarget !== null && onNavigate !== undefined && (
+        <button
+          type="button"
+          onClick={() => onNavigate(upTarget, crumbs.length - 2)}
+          aria-keyshortcuts="Meta+ArrowUp"
+          title={`Up to ${parent?.label ?? "the parent"} (⌘↑)`}
+          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <CornerLeftUp aria-hidden className="size-4" />
+          <span className="sr-only">Up one level</span>
+        </button>
+      )}
+
       <nav
         aria-label="Breadcrumb"
         // The nav itself stays draggable so the empty space beside a short
@@ -73,6 +128,28 @@ export function Titlebar({
       >
         {crumbs.map((crumb, index) => {
           const isLast = index === crumbs.length - 1;
+          if (collapsible && index >= hiddenFrom && index < hiddenTo) {
+            // Render the ellipsis once, in place of the first hidden crumb.
+            if (index !== hiddenFrom) return null;
+            return (
+              <Fragment key="ellipsis">
+                <ChevronRight aria-hidden className="size-3.5 shrink-0 text-muted-foreground/60" />
+                <button
+                  type="button"
+                  onClick={() => setExpanded(true)}
+                  title={`Show ${hidden.length} hidden: ${hidden.map((entry) => entry.label).join(" / ")}`}
+                  className="shrink-0 rounded px-1.5 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  …
+                  <span className="sr-only">
+                    Show {hidden.length} hidden breadcrumb levels
+                  </span>
+                </button>
+              </Fragment>
+            );
+          }
+          // Bound once so the button branch has a `number`, not `number | null`.
+          const target = crumb.node;
           return (
             <Fragment key={`${crumb.node ?? "root"}-${index}`}>
               {index > 0 && (
@@ -81,7 +158,7 @@ export function Titlebar({
                   className="size-3.5 shrink-0 text-muted-foreground/60"
                 />
               )}
-              {crumb.node === null || isLast || onNavigate === undefined ? (
+              {target === null || isLast || onNavigate === undefined ? (
                 <span
                   aria-current={isLast ? "page" : undefined}
                   className={cn(
@@ -94,7 +171,8 @@ export function Titlebar({
               ) : (
                 <button
                   type="button"
-                  onClick={() => onNavigate(index)}
+                  onClick={() => onNavigate(target, index)}
+                  title={`Go to ${crumb.label}`}
                   className="truncate rounded px-1.5 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   {crumb.label}

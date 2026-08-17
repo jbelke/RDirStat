@@ -35,6 +35,7 @@ import {
   type Kind,
   type LayoutKind,
   type Operation,
+  type RelocatePlan,
   type ScanError,
   type ScanOptions,
   type ScanState,
@@ -627,6 +628,157 @@ export async function pathOf(generation: number, item: number): Promise<string> 
 
 export async function revealInFinder(generation: number, node: number): Promise<void> {
   await unwrap("reveal_in_finder", commands.revealInFinder(toWireU64(generation), node));
+}
+
+// ---------------------------------------------------------------------------
+// Breadcrumb
+// ---------------------------------------------------------------------------
+
+export interface AncestorRow {
+  readonly node: number;
+  /** Basename, except the first row, which carries the scan root's full path. */
+  readonly name: string;
+  readonly kind: Kind;
+  readonly logical: number;
+  readonly allocated: number;
+}
+
+/**
+ * The chain from the scan root down to `node`, root first.
+ *
+ * The breadcrumb is built from this rather than from the navigation history:
+ * where you *are* is a property of the tree, not of how you got there.
+ */
+export async function ancestors(generation: number, node: number): Promise<AncestorRow[]> {
+  const rows = await unwrap("ancestors", commands.ancestors(toWireU64(generation), node));
+  return rows.map((row) => ({
+    node: row.node,
+    name: row.name,
+    kind: row.kind,
+    logical: num(row.logical),
+    allocated: num(row.allocated),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Relocate
+// ---------------------------------------------------------------------------
+
+export type RelocateMode = "migrate" | "repoint";
+export type SourceDisposal = "trash" | "delete" | "keep";
+export type RiskTier = "ordinary" | "risky" | "blocked";
+
+export interface RelocateWarningView {
+  readonly code: string;
+  readonly message: string;
+}
+
+export interface RelocatePlanView {
+  readonly generation: number;
+  /** `null` means the relocation cannot proceed; the reasons are in `warnings`. */
+  readonly token: string | null;
+  readonly node: number;
+  readonly source: string;
+  readonly destination: string;
+  readonly mode: RelocateMode;
+  readonly disposal: SourceDisposal;
+  readonly logical: number;
+  readonly allocated: number;
+  readonly retainedNodes: number;
+  readonly unreadable: number;
+  readonly sourceDevice: number;
+  readonly destinationDevice: number;
+  readonly destinationAvailable: number;
+  readonly risk: RiskTier;
+  readonly warnings: readonly RelocateWarningView[];
+}
+
+export interface RelocateReportView {
+  readonly generation: number;
+  readonly node: number;
+  readonly source: string;
+  readonly destination: string;
+  readonly mode: RelocateMode;
+  /** What was actually done, which is not always what was asked. */
+  readonly disposal: SourceDisposal;
+  readonly filesVerified: number;
+  readonly bytesVerified: number;
+  readonly specialFiles: number;
+  readonly symlinkCreated: boolean;
+}
+
+function toRelocatePlan(plan: RelocatePlan): RelocatePlanView {
+  return {
+    generation: num(plan.generation),
+    token: plan.token,
+    node: plan.node,
+    source: plan.source,
+    destination: plan.destination,
+    mode: plan.mode,
+    disposal: plan.disposal,
+    logical: num(plan.logical),
+    allocated: num(plan.allocated),
+    retainedNodes: num(plan.retained_nodes),
+    unreadable: num(plan.unreadable),
+    sourceDevice: num(plan.source_device),
+    destinationDevice: num(plan.destination_device),
+    destinationAvailable: num(plan.destination_available),
+    risk: plan.risk,
+    warnings: plan.warnings.map((warning) => ({ code: warning.code, message: warning.message })),
+  };
+}
+
+/**
+ * Describe a relocation without performing it.
+ *
+ * Always render the result, including when `token` is `null` — an unactionable
+ * plan's warnings are the useful part, and a UI that only draws the happy path
+ * shows the user nothing at the moment they most need an explanation.
+ */
+export async function relocatePlan(
+  generation: number,
+  node: number,
+  destination: string,
+  mode: RelocateMode,
+  disposal: SourceDisposal,
+): Promise<RelocatePlanView> {
+  const plan = await unwrap(
+    "relocate_plan",
+    commands.relocatePlan(toWireU64(generation), node, destination, mode, disposal),
+  );
+  return toRelocatePlan(plan);
+}
+
+/**
+ * Perform a planned relocation.
+ *
+ * Long-running: the whole subtree is copied and then read back to verify it.
+ * The `token` must be the one `relocatePlan` returned.
+ */
+export async function relocateApply(
+  generation: number,
+  node: number,
+  destination: string,
+  mode: RelocateMode,
+  disposal: SourceDisposal,
+  token: string,
+): Promise<RelocateReportView> {
+  const report = await unwrap(
+    "relocate_apply",
+    commands.relocateApply(toWireU64(generation), node, destination, mode, disposal, token),
+  );
+  return {
+    generation: num(report.generation),
+    node: report.node,
+    source: report.source,
+    destination: report.destination,
+    mode: report.mode,
+    disposal: report.disposal,
+    filesVerified: num(report.files_verified),
+    bytesVerified: num(report.bytes_verified),
+    specialFiles: num(report.special_files),
+    symlinkCreated: report.symlink_created,
+  };
 }
 
 // ---------------------------------------------------------------------------

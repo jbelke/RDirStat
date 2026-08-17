@@ -19,6 +19,21 @@ use crate::fsident;
 /// The label for the synthesized direct-files group.
 pub(crate) const VIRTUAL_GROUP_NAME: &str = "<Files>";
 
+/// One step on the path from the scan root down to a node.
+///
+/// This is what the breadcrumb is built from. It carries the `NodeId` so a
+/// crumb is directly navigable, and the name so the frontend does not have to
+/// have visited the ancestor to be able to label it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+pub struct Ancestor {
+    pub node: NodeId,
+    /// Basename. The root carries its full path instead — see [`ancestors`].
+    pub name: DisplayPath,
+    pub kind: Kind,
+    pub logical: u64,
+    pub allocated: u64,
+}
+
 /// Directory extensions macOS presents as packages.
 const PACKAGE_EXTENSIONS: [&str; 12] = [
     "app",
@@ -340,6 +355,91 @@ pub(crate) fn details(scan: &CompletedScan, node: NodeId) -> Result<Details, Que
     })
 }
 
+/// The chain from the scan root down to `node`, root first, `node` last.
+///
+/// This is what a breadcrumb should be built from. The alternative the shell
+/// used before — remembering which nodes the user clicked — describes the
+/// *journey*, not the *position*: zooming straight from the root to a file
+/// eight levels down produced a two-crumb trail with no way back to any of the
+/// six directories in between.
+///
+/// The root's `name` is its full path rather than its basename, so a scan of
+/// `/Volumes/tuf8tb` reads `/Volumes/tuf8tb › …` and not `tuf8tb › …`, which
+/// would be ambiguous with a directory of the same name further down.
+///
+/// A virtual `<Files>` group resolves to the chain of its owning directory
+/// *with the group appended*, since a group is a real position in the UI even
+/// though it is not a filesystem object.
+///
+/// # Errors
+///
+/// [`QueryError::UnknownNode`] if `node` is not in this tree, or
+/// [`QueryError::PathTooDeep`] if the parent chain exceeds the arena's depth
+/// ceiling — the same bound [`Tree::path_bytes`] enforces, so a corrupt
+/// snapshot cannot spin here.
+pub(crate) fn ancestors(scan: &CompletedScan, node: NodeId) -> Result<Vec<Ancestor>, QueryError> {
+    let tree = &scan.tree;
+
+    // A group has no parent link of its own; it hangs off its owner.
+    let (mut cursor, group) = match node.group_owner() {
+        Some(owner) => (owner, Some(node)),
+        None => (node, None),
+    };
+    if !tree.contains(cursor) {
+        return Err(QueryError::UnknownNode { node });
+    }
+
+    let mut chain: Vec<NodeId> = Vec::new();
+    for _ in 0..=rdirstat_core::MAX_TREE_DEPTH {
+        chain.push(cursor);
+        if cursor == scan.root {
+            break;
+        }
+        match tree.parent(cursor) {
+            Some(parent) => cursor = parent,
+            // Ran off the top without meeting the root: the node is in the
+            // arena but not under the published root. Report it as unknown
+            // rather than returning a chain that starts nowhere.
+            None => return Err(QueryError::UnknownNode { node }),
+        }
+    }
+    if chain.last() != Some(&scan.root) {
+        return Err(QueryError::PathTooDeep {
+            node,
+            limit: rdirstat_core::MAX_TREE_DEPTH,
+        });
+    }
+    chain.reverse();
+
+    let mut out: Vec<Ancestor> = Vec::with_capacity(chain.len() + usize::from(group.is_some()));
+    for (index, id) in chain.iter().copied().enumerate() {
+        let name = if index == 0 {
+            DisplayPath::from_bytes(scan.root_path.as_os_str().as_encoded_bytes())
+        } else {
+            DisplayPath::from_bytes(tree.name_bytes(id).unwrap_or_default())
+        };
+        out.push(Ancestor {
+            node: id,
+            name,
+            kind: tree.node(id).map_or(Kind::Unknown, |entry| entry.kind()),
+            logical: tree.logical_of(id),
+            allocated: tree.allocated_of(id),
+        });
+    }
+
+    if let Some(group) = group {
+        out.push(Ancestor {
+            node: group,
+            name: DisplayPath::from_bytes(VIRTUAL_GROUP_NAME.as_bytes()),
+            kind: Kind::Unknown,
+            logical: tree.logical_of(group),
+            allocated: tree.allocated_of(group),
+        });
+    }
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::hash_map::RandomState;
@@ -585,5 +685,86 @@ mod tests {
             .find(|node| scan.tree.name_bytes(*node) == Some(OsStr::new("Thing.app").as_bytes()))
             .expect("the bundle is a child");
         assert!(details(&scan, child).expect("details").is_package);
+    }
+
+    // -- ancestors -----------------------------------------------------------
+
+    fn child_named(scan: &CompletedScan, parent: NodeId, name: &str) -> NodeId {
+        scan.tree
+            .children(parent)
+            .find(|node| scan.tree.name_bytes(*node) == Some(name.as_bytes()))
+            .unwrap_or_else(|| panic!("no child named {name}"))
+    }
+
+    #[test]
+    fn the_root_is_its_own_only_ancestor_and_shows_its_full_path() {
+        let (dir, scan) = fixture();
+        let chain = ancestors(&scan, scan.root).expect("chain");
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].node, scan.root);
+        // Full path, not the basename: `/Volumes/tuf8tb` must not read as
+        // `tuf8tb`, which is ambiguous with a directory further down.
+        //
+        // Compared against the *canonical* path because `scan_start`
+        // canonicalizes the root before recording it — on macOS `$TMPDIR` is
+        // `/var/folders/...`, which resolves to `/private/var/folders/...`, and
+        // the recorded root is the resolved one by design (it is the authority
+        // every later action reconstructs paths against).
+        let canonical = dir.path().canonicalize().expect("canonicalize");
+        assert_eq!(chain[0].name.as_str(), canonical.to_string_lossy());
+    }
+
+    #[test]
+    fn a_nested_node_reports_the_whole_chain_root_first() {
+        let (_dir, scan) = fixture();
+        let sub = child_named(&scan, scan.root, "sub");
+        let deep = child_named(&scan, sub, "deep.bin");
+
+        let chain = ancestors(&scan, deep).expect("chain");
+        assert_eq!(chain.len(), 3, "root, sub, deep.bin");
+        assert_eq!(chain[0].node, scan.root);
+        assert_eq!(chain[1].node, sub);
+        assert_eq!(chain[1].name.as_str(), "sub");
+        assert_eq!(chain[2].node, deep);
+        assert_eq!(chain[2].name.as_str(), "deep.bin");
+        assert_eq!(chain[2].kind, Kind::File);
+    }
+
+    #[test]
+    fn every_ancestor_is_reachable_even_when_it_was_never_visited() {
+        // The regression this pins: the shell used to build the breadcrumb from
+        // the nodes the user had clicked, so jumping straight from the root to
+        // a deep node left every directory in between unreachable.
+        let (_dir, scan) = fixture();
+        let sub = child_named(&scan, scan.root, "sub");
+        let deep = child_named(&scan, sub, "deep.bin");
+
+        let chain = ancestors(&scan, deep).expect("chain");
+        let intermediate: Vec<NodeId> = chain.iter().map(|entry| entry.node).collect();
+        assert!(
+            intermediate.contains(&sub),
+            "the intermediate directory must be on the trail even though nothing navigated to it"
+        );
+    }
+
+    #[test]
+    fn a_virtual_group_hangs_off_its_owning_directory() {
+        let (_dir, scan) = fixture();
+        let group = scan.tree.virtual_group(scan.root).expect("a group");
+        let chain = ancestors(&scan, group).expect("chain");
+        assert_eq!(chain.len(), 2, "the root, then the group");
+        assert_eq!(chain[0].node, scan.root);
+        assert_eq!(chain[1].node, group);
+        assert_eq!(chain[1].name.as_str(), VIRTUAL_GROUP_NAME);
+    }
+
+    #[test]
+    fn an_unknown_node_is_rejected_rather_than_returning_a_partial_chain() {
+        let (_dir, scan) = fixture();
+        let bogus = NodeId::from_raw(u32::MAX - 3);
+        assert!(matches!(
+            ancestors(&scan, bogus),
+            Err(QueryError::UnknownNode { .. })
+        ));
     }
 }

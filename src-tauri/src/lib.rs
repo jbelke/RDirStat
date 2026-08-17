@@ -27,7 +27,7 @@
 //! `layout` and `report` return `tauri::ipc::Response` carrying an Arrow IPC
 //! stream. `tauri::ipc::Response` does not implement `specta::Type`, so those
 //! two commands are dispatched by a plain `tauri::generate_handler!` that
-//! [`invoke_handler`] routes to by name; the other twelve go through
+//! [`invoke_handler`] routes to by name; the other fourteen go through
 //! `tauri-specta`. Their argument and error types are still exported to
 //! TypeScript, so the frontend calls
 //! `invoke<ArrayBuffer>("layout", { generation, root, kind, viewport, minPx })`
@@ -41,6 +41,7 @@ mod events;
 mod fsident;
 mod progress;
 mod query;
+mod relocate;
 mod state;
 mod token;
 mod tray;
@@ -66,11 +67,14 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::scan_errors,
             commands::children,
             commands::node_details,
+            commands::ancestors,
             commands::path_of,
             commands::volumes,
             commands::trash_preview,
             commands::move_to_trash,
             commands::reveal_in_finder,
+            commands::relocate_plan,
+            commands::relocate_apply,
         ])
         .events(tauri_specta::collect_events![ScanProgressEvent])
         // Argument types for the two binary commands, so the frontend still has
