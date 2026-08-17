@@ -102,6 +102,19 @@ export function DriveSwitcher({
   // Sampled once per render rather than per row, so every age in one open menu
   // is measured from the same instant.
   const nowMs = Date.now();
+  /*
+   * Matched on the mount-point string, which is safe *because of where both
+   * sides come from*: `snapshot_offers` iterates `volumes::list()` and copies
+   * `volume.mount_point` through verbatim, so it is the same string the
+   * `volumes` command returns, not an independently derived one.
+   *
+   * Worth stating because the safety is structural rather than defensive. If
+   * offers are ever built from the snapshot's own stored root path instead,
+   * the two can diverge — `/` versus `/System/Volumes/Data` is the obvious way
+   * — and this match would silently find nothing, so every drive would quietly
+   * lose its restore option with no error anywhere. Match on `device` as well,
+   * or keep the single source.
+   */
   const offerFor = (mountPoint: string): SnapshotOfferView | undefined =>
     offers.find((offer) => offer.hasSnapshot && offer.mountPoint === mountPoint);
 
