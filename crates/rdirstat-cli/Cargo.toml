@@ -1,0 +1,56 @@
+[package]
+name        = "rdirstat-cli"
+description = "Correctness, profiling, and import/export harness for the scanner. A supported surface, not a throwaway."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+publish.workspace      = true
+
+[lints]
+workspace = true
+
+[[bin]]
+# NOT "rdirstat": `src-tauri`'s package is also named `rdirstat` and produces a
+# bin of that name, so two targets collided on `target/debug/rdirstat` and
+# raced each other's output (cargo warns, and says it will become a hard error).
+# docs/01 merges the two into ONE `rdirstat` executable later, at which point
+# this crate becomes a library and this section goes away entirely. Until then
+# the measurement harness keeps a distinct, webview-free bin name.
+name = "rdirstat-cli"
+path = "src/main.rs"
+
+[features]
+default = []
+# Phase 6. Bundled DuckDB materially increases the build surface, so scanner
+# iteration must never compile it by accident. Re-enable together with the
+# `rdirstat-catalog` line in the root [workspace.dependencies] table:
+#   catalog = ["dep:rdirstat-catalog"]
+
+[dependencies]
+rdirstat-core     = { workspace = true }
+# The CLI does not reference these three yet. `src/engine.rs` is the swap point
+# for `rdirstat-scan`'s supervisor, and `report.rs` is the swap point for
+# `rdirstat-classify`'s taxonomy; re-enable each line in the same change that
+# starts calling it. Declaring an unused path dependency only couples this
+# crate's build to a sibling's compile errors, which is how a measurement
+# harness stops being runnable exactly when it is most needed.
+# rdirstat-scan     = { workspace = true }
+# rdirstat-classify = { workspace = true }
+# rdirstat-treemap  = { workspace = true }
+# rdirstat-catalog  = { workspace = true, optional = true }   # phase 6
+anyhow             = { workspace = true }
+clap               = { workspace = true }
+crossbeam-channel  = { workspace = true }
+thiserror          = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-chrome     = { workspace = true }
+
+[dev-dependencies]
+insta    = { workspace = true }
+tempfile = { workspace = true }
