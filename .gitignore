@@ -1,0 +1,69 @@
+# ---------------------------------------------------------------------------
+# Rust / Cargo build output
+# ---------------------------------------------------------------------------
+target/
+**/*.rs.bk
+*.pdb
+
+# ---------------------------------------------------------------------------
+# Node / pnpm dependency output and frontend build output
+# ---------------------------------------------------------------------------
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.tsbuildinfo
+
+# ---------------------------------------------------------------------------
+# Tauri generated / bundled artifacts
+# ---------------------------------------------------------------------------
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# ---------------------------------------------------------------------------
+# Generated secrets, signing material, app data
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.p12
+*.pem
+*.key
+*.cer
+*.mobileprovision
+.tauri/
+*.rdstat
+
+# ---------------------------------------------------------------------------
+# Agent tooling payloads (installed, not authored here)
+# ---------------------------------------------------------------------------
+.agents/
+
+# ---------------------------------------------------------------------------
+# Reference checkouts.
+#
+# Every directory under reference-code/ is an upstream clone carrying its own
+# .git. They must never be added to this repository -- as files, and above all
+# not as embedded repositories / gitlinks. The tracked checkout index
+# reference-code/AGENTS.md is re-included explicitly below and is the only
+# thing in this directory that is ever committed.
+#
+# reference-code/AGENTS.md documents six checkouts (docs/07 says five; the
+# rust-skills provenance clone was added after that sentence was written).
+# The rule below is by-directory, not by-name, so it stays correct either way.
+# ---------------------------------------------------------------------------
+reference-code/*
+!reference-code/AGENTS.md
+
+# ---------------------------------------------------------------------------
+# macOS / editor noise
+# ---------------------------------------------------------------------------
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+*.swp
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json

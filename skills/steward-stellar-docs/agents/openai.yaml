@@ -1,0 +1,4 @@
+interface:
+  display_name: "Steward STELLAR Docs"
+  short_description: "Delta-scan and repair the AGENTS.md chain"
+  default_prompt: "Use $steward-stellar-docs to run a documentation pass over the named path or the whole chain; read the delta first and never drop content the snapshot records."

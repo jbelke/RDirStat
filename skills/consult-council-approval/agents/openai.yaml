@@ -1,0 +1,4 @@
+interface:
+  display_name: "Consult Council Approval"
+  short_description: "Convene the matched advisory council for a decision"
+  default_prompt: "Use $consult-council-approval to convene the matching council on the named decision and record the chair's call with its reversal evidence."

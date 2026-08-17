@@ -1,0 +1,4 @@
+interface:
+  display_name: "Capture CoCO Desktop Screenshots"
+  short_description: "Capture and host focused CoCO desktop visuals"
+  default_prompt: "Use $desktop-screenshot for the named desktop state and produce an immutable PR-ready capture."
