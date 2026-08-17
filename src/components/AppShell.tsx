@@ -26,12 +26,15 @@ import type { SortingState } from "@tanstack/react-table";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DetailsPanel } from "@/components/DetailsPanel";
+import { RelocateDialog } from "@/components/RelocateDialog";
+import { CategoryLegend } from "@/components/canvas/CategoryLegend";
 import {
   HierarchyCanvas,
   type ContextActionRequest,
   type NodeDescription,
   type SelectionChange,
 } from "@/components/canvas";
+import type { ColorBy } from "@/components/canvas/palette";
 import { ScanAlerts } from "@/components/ScanAlerts";
 import { ScanProgressStrip, useScanProgress } from "@/components/ScanProgressStrip";
 import { SegmentedControl } from "@/components/SegmentedControl";
@@ -42,7 +45,14 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { formatSI } from "@/lib/format";
 import { categoryOf } from "@/lib/categories";
-import { nodeDetails, revealInFinder, scanCancel, scanStart, type LayoutKind } from "@/lib/ipc";
+import {
+  nodeDetails,
+  revealInFinder,
+  scanCancel,
+  scanStart,
+  type LayoutKind,
+  type RelocateReportView,
+} from "@/lib/ipc";
 import {
   dropStaleGenerations,
   queryKeys,
@@ -105,6 +115,11 @@ export function AppShell() {
   const [starting, setStarting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [relocating, setRelocating] = useState<number | null>(null);
+  // Family first: a whole-volume scan puts far more than a dozen categories on
+  // screen at once, and past that the per-category hues stop being tellable
+  // apart at tile size. Drilling in is when switching to `category` pays.
+  const [colorBy, setColorBy] = useState<ColorBy>("family");
 
   const liveGeneration = status.data?.generation ?? GENERATION_NONE;
   const scanState = status.data?.state ?? "idle";
@@ -263,6 +278,21 @@ export function AppShell() {
 
   const crumbs = useCrumbs(generation, currentRoot, summary?.rootPath ?? null);
   const rootDetails = useNodeDetails(generation, currentRoot);
+  const relocatingDetails = useNodeDetails(generation, relocating);
+
+  // A completed relocation makes the tree on screen wrong: the subtree that
+  // moved is now a symlink and the sizes above it are stale. Rather than
+  // silently showing numbers that no longer describe the disk, drop the caches
+  // and say so — the honest fix is a re-scan, which the user starts.
+  const handleRelocated = useCallback(
+    (report: RelocateReportView) => {
+      void client.invalidateQueries({ queryKey: queryKeys.scanStatus() });
+      setActionError(
+        `Moved to ${report.destination}. The sizes on screen still describe the volume as it was scanned — re-scan to see the space return.`,
+      );
+    },
+    [client],
+  );
 
   // A crumb click sets the navigation stack to the whole path down to that
   // crumb, not just the one node. Crumb 0 is the app name and is not
@@ -380,7 +410,16 @@ export function AppShell() {
                 trashEnabled={deletionArmed}
                 describeNode={describeNode}
                 formatBytes={formatSI}
+                colorBy={colorBy}
               />
+
+              {/* The key to the colours. Without it the encoding is decoration:
+                * you can see two tiles differ but not what the difference
+                * means, which throws away the entire point of classifying by
+                * content type. `present={null}` lists the whole taxonomy;
+                * once the canvas reports which categories it actually drew,
+                * pass that set instead so the legend shrinks on drill-down. */}
+              <CategoryLegend colorBy={colorBy} present={null} onColorByChange={setColorBy} />
 
               <ScanAlerts summary={summary} className="p-3" />
 
@@ -411,11 +450,22 @@ export function AppShell() {
           selectionCount={selection.size}
           onReveal={handleReveal}
           onTrash={handleTrash}
+          onRelocate={setRelocating}
           onTrashDropped={handleTrash}
           deletionArmed={deletionArmed}
           onArmDeletion={setDeletionArmed}
         />
       </div>
+
+      <RelocateDialog
+        generation={generation}
+        node={relocating}
+        sourcePath={relocatingDetails.data?.path ?? null}
+        scanRootPath={summary?.rootPath ?? null}
+        deletionArmed={deletionArmed}
+        onClose={() => setRelocating(null)}
+        onRelocated={handleRelocated}
+      />
 
       <ScanProgressStrip
         state={scanState}

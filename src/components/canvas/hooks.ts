@@ -8,7 +8,7 @@
 
 import { useEffect, useState, type RefObject } from "react";
 
-import { resolvePalette, type Palette } from "./palette.ts";
+import { resolvePalette, type ColorBy, type Palette } from "./palette.ts";
 
 export interface Size {
   readonly width: number;
@@ -111,12 +111,12 @@ export function usePrefersReducedMotion(): boolean {
  * theme moves either because macOS switched appearance or because the shell put
  * `.light` / `.dark` on `<html>`, so both are watched.
  */
-export function usePalette(): Palette {
-  const [palette, setPalette] = useState<Palette>(() => resolvePalette());
+export function usePalette(colorBy: ColorBy = "category"): Palette {
+  const [palette, setPalette] = useState<Palette>(() => resolvePalette(null, colorBy));
 
   useEffect(() => {
     if (typeof document === "undefined") return;
-    const refresh = (): void => setPalette(resolvePalette());
+    const refresh = (): void => setPalette(resolvePalette(null, colorBy));
 
     const observer = new MutationObserver(refresh);
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
@@ -132,7 +132,9 @@ export function usePalette(): Palette {
       observer.disconnect();
       query?.removeEventListener("change", refresh);
     };
-  }, []);
+    // `colorBy` belongs in the deps: switching encoding has to rebuild the
+    // 256-entry fill table, exactly as a theme change does.
+  }, [colorBy]);
 
   return palette;
 }

@@ -30,7 +30,7 @@
  *    released.
  */
 
-import { CircleAlert, Eye, Loader, Lock, Package, Trash2 } from "lucide-react";
+import { CircleAlert, Eye, HardDriveDownload, Loader, Lock, Package, Trash2 } from "lucide-react";
 import { useState } from "react";
 
 import { CategoryChip } from "@/components/cells/CategoryChip";
@@ -48,6 +48,8 @@ export interface DetailsPanelProps {
   selectionCount: number;
   onReveal?: (node: number) => void;
   onTrash?: (nodes: number[]) => void;
+  /** Opens the move-to-another-volume flow for one node. */
+  onRelocate?: (node: number) => void;
   /** Nodes dropped onto the trash zone. Same authority path as the button. */
   onTrashDropped?: (nodes: number[]) => void;
   /** Whether the destructive actions are live. Off by default; see the store. */
@@ -63,6 +65,7 @@ export function DetailsPanel({
   selectionCount,
   onReveal,
   onTrash,
+  onRelocate,
   onTrashDropped,
   deletionArmed = false,
   onArmDeletion,
@@ -199,6 +202,27 @@ export function DetailsPanel({
               Trash…
             </Button>
           </div>
+
+          {/* Deleting is not the only answer to "this is too big". Very often
+            * the user wants the bytes, just not on this volume — so the move
+            * offer sits directly beneath Trash, at the same weight, rather
+            * than being buried in a context menu. It ends by disposing of the
+            * original, so it is behind the same arming switch. */}
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full"
+            disabled={onRelocate === undefined || isVirtualGroup(data.node) || !deletionArmed}
+            title={
+              deletionArmed
+                ? "Copy this to another volume, verify it, then leave a link behind"
+                : "Moving is off. Arm destructive actions below to enable it."
+            }
+            onClick={() => onRelocate?.(data.node)}
+          >
+            {deletionArmed ? <HardDriveDownload aria-hidden /> : <Lock aria-hidden />}
+            Move to another volume…
+          </Button>
         </>
       )}
 

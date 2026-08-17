@@ -29,7 +29,7 @@ import { NO_HIT, computeSunburstFrame, hitTest, layoutKindLabel, rankLargestTile
 import { normalizeGeneration } from "./generation.ts";
 import { useDevicePixelRatio, useElementSize, usePalette, usePrefersReducedMotion } from "./hooks.ts";
 import { invokeLayout } from "./layoutSource.ts";
-import { categoryLabel } from "./palette.ts";
+import { categoryLabel, type ColorBy } from "./palette.ts";
 import { drawLayout, prepareContext, type DrawStats } from "./render.ts";
 import type {
   CanvasContextAction,
@@ -87,6 +87,13 @@ export interface HierarchyCanvasProps {
    * owns the arming switch and passes it down.
    */
   readonly trashEnabled?: boolean;
+  /**
+   * What a tile's fill encodes. `family` collapses the 25-entry taxonomy onto
+   * docs/04's five headings, which stay distinguishable at tile size;
+   * `category` keeps the full palette, which is the useful one once a
+   * drill-down has cut the categories on screen down to a handful.
+   */
+  readonly colorBy?: ColorBy;
   readonly onNavigate?: (node: number, stack: readonly number[]) => void;
   readonly onPaint?: (report: PaintReport) => void;
 
@@ -125,6 +132,7 @@ export function HierarchyCanvas({
   onSelectionChange,
   onContextAction,
   trashEnabled = false,
+  colorBy = "category",
   onNavigate,
   onPaint,
   formatBytes = formatSi,
@@ -141,7 +149,7 @@ export function HierarchyCanvas({
 
   const size = useElementSize(surfaceRef);
   const devicePixelRatio = useDevicePixelRatio();
-  const palette = usePalette();
+  const palette = usePalette(colorBy);
   const reducedMotion = usePrefersReducedMotion();
 
   const [uncontrolledKind, setUncontrolledKind] = useState<LayoutKind>(defaultKind);
