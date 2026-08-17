@@ -207,9 +207,20 @@ fn disk_facts(container_id: &str) -> DiskFacts {
     let Some(container) = diskutil_info(container_id) else {
         return DiskFacts::default();
     };
-    // A container's `ParentWholeDisk` is the physical disk; for a plain
-    // partition scheme the whole disk is already what we looked up.
-    let id = plist_string(&container, "ParentWholeDisk")
+    // An APFS container is a *synthesized* disk: `diskutil info disk3` reports
+    // `VirtualOrPhysical: Virtual`, `WholeDisk: 1`, and `ParentWholeDisk: disk3`
+    // — itself. Following `ParentWholeDisk` therefore never leaves the
+    // container, and a Mac with three containers on one SSD renders as three
+    // separate physical disks, each captioned with the same media name. The
+    // real device is behind `APFSPhysicalStores`, e.g. `disk0s2`, whose whole
+    // disk is `disk0`.
+    //
+    // `ParentWholeDisk` remains the fallback: for a plain partition scheme
+    // there is no physical store and the whole disk is already what we have.
+    let id = plist_string(&container, "APFSPhysicalStore")
+        .as_deref()
+        .and_then(whole_disk_of)
+        .or_else(|| plist_string(&container, "ParentWholeDisk"))
         .filter(|id| !id.is_empty())
         .unwrap_or_else(|| container_id.to_owned());
     let Some(disk) = diskutil_info(&id) else {
@@ -223,6 +234,23 @@ fn disk_facts(container_id: &str) -> DiskFacts {
         size_bytes: plist_integer(&disk, "Size").or_else(|| plist_integer(&disk, "TotalSize")),
         id: Some(id),
     }
+}
+
+/// The whole disk a slice belongs to: `disk0s2` -> `disk0`.
+///
+/// Returns `None` for anything that is not `disk<digits>[s<digits>…]`, so a
+/// device naming scheme this does not recognise degrades to the
+/// `ParentWholeDisk` fallback rather than to a wrong grouping.
+fn whole_disk_of(slice: &str) -> Option<String> {
+    let digits: String = slice
+        .strip_prefix("disk")?
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    Some(format!("disk{digits}"))
 }
 
 /// Whether macOS owns this mount rather than the user.
@@ -263,12 +291,10 @@ pub(crate) fn list() -> Vec<VolumeInfo> {
 
             Some(VolumeInfo {
                 name: facts.name.clone().unwrap_or_else(|| {
-                    mount
-                        .mount_point
-                        .file_name()
-                        .map_or_else(|| mount.mount_point.to_string_lossy().into_owned(), |name| {
-                            name.to_string_lossy().into_owned()
-                        })
+                    mount.mount_point.file_name().map_or_else(
+                        || mount.mount_point.to_string_lossy().into_owned(),
+                        |name| name.to_string_lossy().into_owned(),
+                    )
                 }),
                 mount_point: DisplayPath::from_bytes(mount.mount_point.as_os_str().as_encoded_bytes()),
                 device,
@@ -352,6 +378,48 @@ devfs        devfs          200       200         0   100%     692          0  1
     }
 
     #[test]
+    fn a_slice_resolves_to_its_whole_disk() {
+        // The case that matters: an APFS container's physical store is a
+        // partition, and the group the UI draws is the *device* behind it.
+        assert_eq!(whole_disk_of("disk0s2").as_deref(), Some("disk0"));
+        assert_eq!(whole_disk_of("disk10s1").as_deref(), Some("disk10"));
+        assert_eq!(whole_disk_of("disk0").as_deref(), Some("disk0"));
+        // Unrecognised shapes degrade to None, so the caller falls back to
+        // ParentWholeDisk instead of inventing a grouping.
+        assert_eq!(whole_disk_of("/dev/disk0s2"), None);
+        assert_eq!(whole_disk_of("diskAs2"), None);
+        assert_eq!(whole_disk_of("md0"), None);
+    }
+
+    #[test]
+    fn every_container_on_one_device_reports_the_same_physical_disk() {
+        // A stock Apple silicon Mac has three synthesized containers — disk1
+        // (iSC), disk2 (recovery), disk3 (the install) — all on disk0. Before
+        // the physical-store lookup these each reported themselves as the
+        // whole disk, and the picker drew three "APPLE SSD" groups for one SSD.
+        let Some(root_container) = volume_facts("/dev/disk3s1s1").container_id else {
+            return; // diskutil unavailable in this environment.
+        };
+        let facts = disk_facts(&root_container);
+        let Some(id) = facts.id else { return };
+        assert_eq!(
+            whole_disk_of(&id).as_deref(),
+            Some(id.as_str()),
+            "a physical disk id is already whole; there is no slice suffix left to strip"
+        );
+        assert_ne!(
+            id, root_container,
+            "the physical disk is not the synthesized container it backs"
+        );
+        if let Some(size) = facts.size_bytes {
+            assert!(
+                size >= 100_000_000_000,
+                "the physical device is at least as large as its containers, got {size}"
+            );
+        }
+    }
+
+    #[test]
     fn the_data_volume_is_not_a_system_volume_but_its_siblings_are() {
         // `/System/Volumes/Data` is where the user's files live; the rest of
         // `/System/Volumes/*` is the OS install.
@@ -404,7 +472,10 @@ devfs        devfs          200       200         0   100%     692          0  1
         let Some(container) = root.container_id.as_deref() else {
             return; // diskutil unavailable; degrading to no grouping is allowed.
         };
-        for volume in volumes.iter().filter(|other| other.container_id.as_deref() == Some(container)) {
+        for volume in volumes
+            .iter()
+            .filter(|other| other.container_id.as_deref() == Some(container))
+        {
             assert_eq!(
                 volume.total_bytes, root.total_bytes,
                 "volumes in one container report one capacity"
