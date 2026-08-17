@@ -160,10 +160,36 @@ export function RelocateDialog({
     }
   }, [generation, node, destination, mode, disposal, plan?.token, onRelocated]);
 
+  // Escape closes, as it does for every other modal on the platform — except
+  // mid-run, when there is a copy in flight and nothing safe to cancel into.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !running) onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose, running]);
+
   if (node === null) return null;
 
   const blocked = plan !== null && plan.token === null;
   const canConfirm = plan?.token != null && deletionArmed && !running && report === null;
+
+  /*
+   * The label carries the state, not just the styling.
+   *
+   * A disabled brand-coloured button at 50% opacity still reads as "clickable"
+   * on a dark surface, and for a destructive action that ambiguity is the
+   * wrong way round: the user should never have to infer refusal from a shade
+   * of purple. So the button says which of the three reasons applies.
+   */
+  const confirmLabel = running
+    ? "Copying and verifying…"
+    : blocked
+      ? "Cannot move"
+      : !deletionArmed
+        ? "Moving is off"
+        : "Move and link";
 
   return (
     <div
@@ -246,15 +272,13 @@ export function RelocateDialog({
               {report === null ? "Cancel" : "Done"}
             </Button>
             {report === null && (
-              <Button onClick={() => void handleConfirm()} disabled={!canConfirm}>
-                {running ? (
-                  <>
-                    <Loader2 aria-hidden className="animate-spin" />
-                    Copying and verifying…
-                  </>
-                ) : (
-                  <>Move and link</>
-                )}
+              <Button
+                onClick={() => void handleConfirm()}
+                disabled={!canConfirm}
+                variant={blocked ? "outline" : "default"}
+              >
+                {running && <Loader2 aria-hidden className="animate-spin" />}
+                {confirmLabel}
               </Button>
             )}
           </div>
