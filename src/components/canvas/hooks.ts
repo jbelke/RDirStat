@@ -111,12 +111,15 @@ export function usePrefersReducedMotion(): boolean {
  * theme moves either because macOS switched appearance or because the shell put
  * `.light` / `.dark` on `<html>`, so both are watched.
  */
-export function usePalette(colorBy: ColorBy = "category"): Palette {
-  const [palette, setPalette] = useState<Palette>(() => resolvePalette(null, colorBy));
+export function usePalette(
+  colorBy: ColorBy = "category",
+  filter: ReadonlySet<number> | null = null,
+): Palette {
+  const [palette, setPalette] = useState<Palette>(() => resolvePalette(null, colorBy, filter));
 
   useEffect(() => {
     if (typeof document === "undefined") return;
-    const refresh = (): void => setPalette(resolvePalette(null, colorBy));
+    const refresh = (): void => setPalette(resolvePalette(null, colorBy, filter));
 
     const observer = new MutationObserver(refresh);
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-theme"] });
@@ -132,9 +135,11 @@ export function usePalette(colorBy: ColorBy = "category"): Palette {
       observer.disconnect();
       query?.removeEventListener("change", refresh);
     };
-    // `colorBy` belongs in the deps: switching encoding has to rebuild the
-    // 256-entry fill table, exactly as a theme change does.
-  }, [colorBy]);
+    // `colorBy` and `filter` both belong in the deps: each rebuilds the
+    // 256-entry fill table, exactly as a theme change does. Resolving the
+    // filter into the table here is what keeps the paint loop a single array
+    // index with no per-tile membership test.
+  }, [colorBy, filter]);
 
   return palette;
 }

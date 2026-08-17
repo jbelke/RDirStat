@@ -210,16 +210,48 @@ function readVar(styles: CSSStyleDeclaration | null, name: string): string | nul
   return value.length > 0 ? value : null;
 }
 
+/** How much of a filtered-out category's own colour survives. */
+const DIM_PERCENT = 16;
+
+/**
+ * The colour a filtered-out category paints in.
+ *
+ * Mixed toward the canvas background rather than made translucent: tiles
+ * overlap their parents, so alpha would compound with depth and the deepest
+ * tiles would come out darkest for no reason the user could explain. A mix
+ * against the background is flat regardless of nesting.
+ *
+ * Enough of the hue survives (16%) that the shape of the excluded data is
+ * still legible — the point is to push it back, not to erase it, because the
+ * excluded tiles are the context that makes the included ones mean anything.
+ *
+ * `color-mix` is validated like every other token: WebKit has supported it for
+ * years, but an unparseable `fillStyle` silently leaves the PREVIOUS fill in
+ * place, which would paint a tile a different category's colour. The fallback
+ * is a flat muted grey, which is wrong but visibly wrong.
+ */
+function dim(color: string, background: string, isValid: (candidate: string) => boolean): string {
+  const mixed = `color-mix(in oklab, ${color} ${DIM_PERCENT}%, ${background})`;
+  return isValid(mixed) ? mixed : "#3a3a3a";
+}
+
 let revisionCounter = 0;
 
 /**
  * Build the palette for the current theme. Call on mount and whenever the theme
  * changes — not per frame.
  */
-export function resolvePalette(element?: Element | null, colorBy: ColorBy = "category"): Palette {
+export function resolvePalette(
+  element?: Element | null,
+  colorBy: ColorBy = "category",
+  filter: ReadonlySet<number> | null = null,
+): Palette {
   const host = element ?? (typeof document === "undefined" ? null : document.documentElement);
   const styles = host !== null && typeof getComputedStyle === "function" ? getComputedStyle(host) : null;
   const isValid = makeColorValidator();
+
+  const background = readVar(styles, "--background") ?? "#0a0a0a";
+  const backgroundOk = isValid(background) ? background : "#0a0a0a";
 
   const fills: string[] = new Array<string>(MAX_CATEGORIES);
   for (let index = 0; index < MAX_CATEGORIES; index += 1) {
@@ -233,13 +265,19 @@ export function resolvePalette(element?: Element | null, colorBy: ColorBy = "cat
       colorBy === "family"
         ? (FALLBACK_FAMILY_COLORS[familyKey(category.family)] ?? FALLBACK_COLORS[0] ?? "#6b7280")
         : (FALLBACK_COLORS.at(index) ?? generatedColor(index));
-    fills[index] = themed !== null && isValid(themed) ? themed : fallback;
+    const full = themed !== null && isValid(themed) ? themed : fallback;
+
+    // The filter is resolved INTO the fill table rather than handed to the
+    // paint loop. Two reasons: the loop stays a single array index with no
+    // branch per tile, and `render.ts` needs no knowledge of filtering at all.
+    // Re-resolving 256 strings when the filter changes is free; a per-tile
+    // membership test on a million tiles is not.
+    fills[index] = filter === null || filter.has(index) ? full : dim(full, backgroundOk, isValid);
   }
 
   const border = readVar(styles, "--cat-border") ?? "rgba(0, 0, 0, 0.35)";
   const selection = readVar(styles, "--cat-selection") ?? readVar(styles, "--ring") ?? "#ffffff";
   const hover = readVar(styles, "--cat-hover") ?? "rgba(255, 255, 255, 0.85)";
-  const background = readVar(styles, "--background") ?? "#0a0a0a";
 
   revisionCounter += 1;
   return {
@@ -248,7 +286,7 @@ export function resolvePalette(element?: Element | null, colorBy: ColorBy = "cat
     border: isValid(border) ? border : "rgba(0, 0, 0, 0.35)",
     selection: isValid(selection) ? selection : "#ffffff",
     hover: isValid(hover) ? hover : "rgba(255, 255, 255, 0.85)",
-    background: isValid(background) ? background : "#0a0a0a",
+    background: backgroundOk,
     revision: revisionCounter,
   };
 }

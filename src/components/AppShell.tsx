@@ -517,6 +517,7 @@ export function AppShell() {
                 describeNode={describeNode}
                 formatBytes={formatSI}
                 colorBy={colorBy}
+                categoryFilter={categoryFilter}
               />
 
               {/* The key to the colours. Without it the encoding is decoration:

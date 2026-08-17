@@ -94,6 +94,17 @@ export interface HierarchyCanvasProps {
    * drill-down has cut the categories on screen down to a handful.
    */
   readonly colorBy?: ColorBy;
+  /**
+   * `CategoryId`s to keep at full strength; everything else paints dimmed.
+   * `null` (the default) paints everything normally.
+   *
+   * This is the *immediate* half of category filtering — the tiles keep their
+   * geometry and lose their colour. Re-proportioning the layout so the
+   * filtered bytes own the whole rectangle is a backend concern and arrives
+   * separately; the two compose, because this needs no round trip and so gives
+   * the click instant feedback.
+   */
+  readonly categoryFilter?: readonly number[] | null;
   readonly onNavigate?: (node: number, stack: readonly number[]) => void;
   readonly onPaint?: (report: PaintReport) => void;
 
@@ -133,6 +144,7 @@ export function HierarchyCanvas({
   onContextAction,
   trashEnabled = false,
   colorBy = "category",
+  categoryFilter = null,
   onNavigate,
   onPaint,
   formatBytes = formatSi,
@@ -149,7 +161,12 @@ export function HierarchyCanvas({
 
   const size = useElementSize(surfaceRef);
   const devicePixelRatio = useDevicePixelRatio();
-  const palette = usePalette(colorBy);
+  // A stable Set identity, or `usePalette`'s effect re-runs every render.
+  const filterSet = useMemo(
+    () => (categoryFilter === null || categoryFilter.length === 0 ? null : new Set(categoryFilter)),
+    [categoryFilter],
+  );
+  const palette = usePalette(colorBy, filterSet);
   const reducedMotion = usePrefersReducedMotion();
 
   const [uncontrolledKind, setUncontrolledKind] = useState<LayoutKind>(defaultKind);
