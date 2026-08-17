@@ -185,7 +185,11 @@
 #![forbid(unsafe_code)]
 
 pub mod bands;
+pub mod by_age;
+pub mod by_category;
 mod dirs;
+pub mod diff;
+pub mod dupes;
 mod error;
 mod fmt_bytes;
 mod id;
