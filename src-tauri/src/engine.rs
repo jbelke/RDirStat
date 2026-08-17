@@ -300,6 +300,66 @@ mod tests {
         ScanOptions::default()
     }
 
+    /// The live error log is fed by the scan, not by the completed result.
+    ///
+    /// This is the whole point of the `ErrorSink` seam: a user watching "334
+    /// errors" climb wants to know what they are *now*, and `CompletedScan`
+    /// does not exist yet. A directory the process cannot open is the cheapest
+    /// reproduction of a real permission denial, which is what a scan of `/`
+    /// hits by the thousand.
+    #[test]
+    fn a_running_scan_records_what_failed_and_not_only_how_many() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let readable = dir.path().join("readable");
+        let refused = dir.path().join("refused");
+        std::fs::create_dir(&readable).expect("mkdir");
+        std::fs::write(readable.join("a.txt"), b"x").expect("write");
+        std::fs::create_dir(&refused).expect("mkdir");
+        std::fs::write(refused.join("hidden.txt"), b"x").expect("write");
+        std::fs::set_permissions(&refused, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+        // Running as root would read it anyway and the test would prove nothing.
+        if std::fs::read_dir(&refused).is_ok() {
+            std::fs::set_permissions(&refused, std::fs::Permissions::from_mode(0o755)).ok();
+            return;
+        }
+
+        let counters = Arc::new(ProgressCounters::new());
+        let outcome = run(ScanRequest {
+            root: dir.path().to_path_buf(),
+            options: ScanOptions::default(),
+            scan_id: ScanId::FIRST,
+            generation: TreeGeneration::FIRST,
+            cancel: Arc::new(CancelToken::new()),
+            counters: Arc::clone(&counters),
+        });
+        // Restore before asserting, so a failure does not leave an undeletable
+        // directory behind for TempDir::drop.
+        std::fs::set_permissions(&refused, std::fs::Permissions::from_mode(0o755)).ok();
+        assert!(
+            matches!(outcome, ScanOutcome::Completed(_)),
+            "a refused child is not fatal"
+        );
+
+        let counts = counters.error_counts();
+        let denied: u64 = counts
+            .iter()
+            .filter(|entry| entry.class == rdirstat_core::ErrorClass::PermissionDenied)
+            .map(|entry| entry.count)
+            .sum();
+        assert_eq!(denied, 1, "one refused directory, counted once: {counts:?}");
+
+        let samples = counters.error_samples(16);
+        assert_eq!(samples.len(), 1, "and kept in full, with its path");
+        let text = samples[0].to_string();
+        assert!(
+            text.contains("refused"),
+            "the sample names the path that failed: {text}"
+        );
+    }
+
     #[test]
     fn a_regex_exclusion_is_refused_before_a_scan_slot_is_claimed() {
         let mut opts = options();
