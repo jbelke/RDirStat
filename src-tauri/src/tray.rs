@@ -45,8 +45,11 @@ pub(crate) const MAIN_LABEL: &str = "main";
 const PANEL_WIDTH: f64 = 400.0;
 const PANEL_HEIGHT: f64 = 520.0;
 
-/// Gap between the menu bar and the top of the panel, in logical pixels.
+/// Gap between the menu bar and the top of the panel, in logical points.
 const PANEL_GAP: f64 = 6.0;
+
+/// Height of the macOS menu bar in logical points, for the unanchored case.
+const MENU_BAR_POINTS: f64 = 26.0;
 
 /// Builds the tray icon, its menu, and its click behaviour.
 ///
@@ -173,95 +176,101 @@ fn toggle_panel(app: &AppHandle, anchor: Option<tauri::Rect>) -> tauri::Result<(
     window.set_focus()
 }
 
-/// Places the panel under the tray icon, clamped to the icon's own monitor.
+/// Places the panel under the tray icon, clamped to that icon's own monitor.
 ///
-/// Falls back to the top-right of the primary monitor when the click carried no
-/// rectangle — that is the menu-item path, which has no icon geometry.
-/// A screen coordinate in physical pixels.
+/// Falls back to the top-right of the monitor that owns the menu bar when the
+/// click carried no rectangle — that is the menu-item path, which has no icon
+/// geometry.
 ///
-/// The workspace denies `cast_possible_truncation` so that every narrowing is
-/// deliberate. `f64 as i32` saturates rather than wrapping, but it also
-/// truncates toward zero; a pixel position wants rounding to nearest, and a
-/// NaN — which `as` would silently turn into 0 — is a bug worth pinning to a
-/// defined value on purpose rather than by accident.
-fn physical_px(value: f64) -> i32 {
-    if value.is_nan() {
-        return 0;
-    }
-    let rounded = value.round();
-    if rounded <= f64::from(i32::MIN) {
-        i32::MIN
-    } else if rounded >= f64::from(i32::MAX) {
-        i32::MAX
-    } else {
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "the two branches above bound `rounded` inside i32's range, so this cannot truncate"
-        )]
-        {
-            rounded as i32
-        }
-    }
-}
-
+/// # Everything here is in logical points, deliberately
+///
+/// The first version of this function did the arithmetic in physical pixels,
+/// and the panel walked off the screen. On a Mac with a 2× built-in display and
+/// a 1× ultra-wide beside it, "physical pixels" is not one coordinate space:
+/// `set_position` interprets a physical position using the scale factor of the
+/// monitor the window is currently on, so a position computed from the primary
+/// monitor's physical width (2788) landed at 2788 *points* once the window had
+/// drifted onto the 1× display — and each subsequent open pushed it further,
+/// 1394 → 2788 → 4250. Observed, not theorised.
+///
+/// Points are the one space every display agrees on, so the anchor rect, the
+/// monitor bounds, and the panel size are all converted to points up front and
+/// the result is set as [`Position::Logical`].
 fn position_panel(window: &tauri::WebviewWindow, anchor: Option<tauri::Rect>) -> tauri::Result<()> {
-    use tauri::{LogicalPosition, PhysicalPosition, PhysicalSize, Position};
+    use tauri::{LogicalPosition, Position};
 
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let panel_width = PANEL_WIDTH * scale;
+    // The monitor the panel should appear on: the one under the tray icon, or
+    // the one that owns the menu bar when we have no icon geometry.
+    let anchor_physical = anchor.as_ref().map(|rect| match rect.position {
+        Position::Physical(value) => (f64::from(value.x), f64::from(value.y)),
+        // A logical anchor needs *a* scale to reach physical for the monitor
+        // lookup; the window's own is the best available guess, and the lookup
+        // only has to land on the right screen.
+        Position::Logical(value) => {
+            let scale = window.scale_factor().unwrap_or(1.0);
+            (value.x * scale, value.y * scale)
+        }
+    });
+
+    let monitor = match anchor_physical {
+        Some((x, y)) => window.monitor_from_point(x, y)?,
+        None => None,
+    };
+    let Some(monitor) = monitor.or(window.primary_monitor()?) else {
+        return Ok(());
+    };
+
+    let scale = monitor.scale_factor();
+    let left = f64::from(monitor.position().x) / scale;
+    let top = f64::from(monitor.position().y) / scale;
+    let width = f64::from(monitor.size().width) / scale;
 
     let Some(rect) = anchor else {
-        // No anchor: the top-right corner of the primary monitor, inset by the
-        // same gap the anchored case uses.
-        let Some(monitor) = window.primary_monitor()? else {
-            return Ok(());
-        };
-        let size = monitor.size();
-        let position = monitor.position();
-        let x = f64::from(position.x) + f64::from(size.width) - panel_width - PANEL_GAP * scale;
-        let y = f64::from(position.y) + 24.0 * scale;
-        return window.set_position(Position::Physical(PhysicalPosition::new(
-            physical_px(x),
-            physical_px(y),
+        // No anchor: top-right, inset by the same gap the anchored case uses,
+        // and below the menu bar rather than under it.
+        return window.set_position(Position::Logical(LogicalPosition::new(
+            left + width - PANEL_WIDTH - PANEL_GAP,
+            top + MENU_BAR_POINTS,
         )));
     };
 
-    // `Rect` carries either logical or physical units depending on the
-    // platform's event; normalize both to physical, which is what
-    // `set_position` takes.
-    let icon_position: PhysicalPosition<f64> = match rect.position {
-        Position::Physical(value) => PhysicalPosition::new(f64::from(value.x), f64::from(value.y)),
-        Position::Logical(value) => LogicalPosition::new(value.x, value.y).to_physical(scale),
+    let (icon_left, icon_top) = match rect.position {
+        Position::Physical(value) => (f64::from(value.x) / scale, f64::from(value.y) / scale),
+        Position::Logical(value) => (value.x, value.y),
     };
-    let icon_size: PhysicalSize<f64> = match rect.size {
-        tauri::Size::Physical(value) => PhysicalSize::new(f64::from(value.width), f64::from(value.height)),
-        tauri::Size::Logical(value) => tauri::LogicalSize::new(value.width, value.height).to_physical(scale),
+    let (icon_width, icon_height) = match rect.size {
+        tauri::Size::Physical(value) => (f64::from(value.width) / scale, f64::from(value.height) / scale),
+        tauri::Size::Logical(value) => (value.width, value.height),
     };
 
-    // Centred under the icon, then clamped so a tray icon near the right edge
-    // does not push the panel off screen.
-    let mut x = icon_position.x + icon_size.width / 2.0 - panel_width / 2.0;
-    let y = icon_position.y + icon_size.height + PANEL_GAP * scale;
+    // Centred under the icon, then clamped so an icon near either edge does not
+    // push the panel off the screen it belongs to.
+    let centred = icon_left + icon_width / 2.0 - PANEL_WIDTH / 2.0;
+    let x = clamp_to_monitor(centred, left, width);
+    let y = icon_top + icon_height + PANEL_GAP;
 
-    if let Some(monitor) = window.monitor_from_point(icon_position.x, icon_position.y)? {
-        let monitor_left = f64::from(monitor.position().x);
-        let monitor_right = monitor_left + f64::from(monitor.size().width);
-        x = x.clamp(
-            monitor_left + PANEL_GAP * scale,
-            monitor_right - panel_width - PANEL_GAP * scale,
-        );
-    }
+    window.set_position(Position::Logical(LogicalPosition::new(x, y)))
+}
 
-    window.set_position(Position::Physical(PhysicalPosition::new(
-        physical_px(x),
-        physical_px(y),
-    )))
+/// Keeps the panel's left edge inside `[left, left + width]`, gap included.
+///
+/// Separated so it can be tested without a window: the clamp is the part that
+/// has an off-by-one-monitor bug in it if the arithmetic is wrong, and a
+/// monitor narrower than the panel must still produce a defined answer rather
+/// than an inverted range.
+fn clamp_to_monitor(x: f64, monitor_left: f64, monitor_width: f64) -> f64 {
+    let min = monitor_left + PANEL_GAP;
+    let max = monitor_left + monitor_width - PANEL_WIDTH - PANEL_GAP;
+    if max <= min { min } else { x.clamp(min, max) }
 }
 
 /// Turns the main window's close button into a hide.
 ///
-/// Wired from `run()` for the main window only. The panel has no close button,
-/// and a hidden panel is hidden by focus loss rather than by this.
+/// Wired from `run()` for the main window only. This is what makes the tray a
+/// real menu-bar presence rather than a decoration that dies with the window:
+/// closing the window leaves the app running and reachable from the icon, and
+/// Quit stays explicit. The panel has no close button, and a visible panel is
+/// dismissed by focus loss rather than by this.
 pub(crate) fn hide_instead_of_closing(window: &tauri::Window, event: &WindowEvent) {
     if window.label() != MAIN_LABEL {
         return;
@@ -276,6 +285,37 @@ pub(crate) fn hide_instead_of_closing(window: &tauri::Window, event: &WindowEven
 
 #[cfg(test)]
 mod tests {
+    /// The panel stays on the monitor it was opened from.
+    ///
+    /// The bug this pins: positions computed in physical pixels are read back
+    /// with whichever monitor's scale factor the window currently sits on, so
+    /// on a mixed-DPI setup the panel walked right across the displays, one
+    /// screen per open. In points there is one coordinate space and the clamp
+    /// is total.
+    #[test]
+    fn the_panel_is_clamped_to_the_monitor_it_opens_on() {
+        use super::{PANEL_GAP, PANEL_WIDTH, clamp_to_monitor};
+
+        // A 1512-point built-in at the origin: an icon at the far right edge
+        // pulls the panel back inside instead of off the screen.
+        assert_eq!(clamp_to_monitor(1400.0, 0.0, 1512.0), 1512.0 - PANEL_WIDTH - PANEL_GAP);
+        assert_eq!(clamp_to_monitor(-50.0, 0.0, 1512.0), PANEL_GAP);
+        assert_eq!(
+            clamp_to_monitor(600.0, 0.0, 1512.0),
+            600.0,
+            "room to spare is left alone"
+        );
+
+        // A monitor to the right of the built-in keeps its own bounds — this is
+        // the case that used to send the panel to x = 4250.
+        let right = 1512.0;
+        assert!(clamp_to_monitor(9_999.0, right, 3440.0) < right + 3440.0);
+        assert!(clamp_to_monitor(-9_999.0, right, 3440.0) >= right);
+
+        // Narrower than the panel: defined, not an inverted clamp range.
+        assert_eq!(clamp_to_monitor(10.0, 0.0, 100.0), PANEL_GAP);
+    }
+
     /// The tray icon must decode, and it must not be blank.
     ///
     /// A menu-bar item whose image fails to load still *exists* — macOS shows an
