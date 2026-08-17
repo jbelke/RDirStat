@@ -15,6 +15,7 @@ use crate::error::LayoutError;
 use crate::geom::{Rect, Slot, slice, sort_drawable_prefix, squarify};
 use crate::options::{
     ICICLE_MAX_ROW_PX, ICICLE_ROW_PX, LayoutOptions, SUNBURST_MAX_RING_PX, SUNBURST_RING_PX, SizeMetric,
+    TREEMAP_DEPTH_CAP,
 };
 use crate::tiles::{Tile, TileBuffer};
 use rdirstat_core::{CategoryId, LayoutKind, MAX_TREE_DEPTH, NodeId, Tree};
@@ -195,7 +196,12 @@ impl Plan {
         };
         let depth_cap = match options.kind {
             LayoutKind::Icicle | LayoutKind::Sunburst => steps_available(available, base_step),
-            _ => MAX_TREE_DEPTH,
+            // The treemap's ceiling is editorial, not geometric: nothing stops
+            // it descending, so without this it subdivides until the sub-pixel
+            // cutoff bites and the nesting stops being readable long before
+            // that. `MAX_TREE_DEPTH` remains the safety bound on the arena, not
+            // a drawing policy.
+            _ => TREEMAP_DEPTH_CAP.min(MAX_TREE_DEPTH),
         };
         Self {
             kind: options.kind,

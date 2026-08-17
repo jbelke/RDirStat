@@ -17,7 +17,8 @@ use rdirstat_core::{
     NodeId, Tree, TreeBuilder, TreeGeneration, Viewport,
 };
 use rdirstat_treemap::{
-    ICICLE_ROW_PX, LayoutOptions, SUNBURST_RING_PX, SizeMetric, Tile, TileBuffer, layout, layout_tiles,
+    ICICLE_ROW_PX, LayoutOptions, SUNBURST_RING_PX, SizeMetric, TREEMAP_DEPTH_CAP, Tile, TileBuffer, layout,
+    layout_tiles,
 };
 use std::collections::HashMap;
 use tempfile::TempDir;
@@ -804,4 +805,29 @@ fn treemap_siblings_are_emitted_largest_first() {
             .map(|n| String::from_utf8_lossy(n).into_owned())
             .collect::<Vec<_>>()
     );
+}
+
+/// A treemap must stop subdividing while the nesting is still readable.
+///
+/// Without a cap it descended until the sub-pixel cutoff bit — depth 18 on a
+/// real 138 GB scan — and the large blocks were shattered into their own leaves
+/// until the canvas was an even scatter of specks. `deep_tree` is deliberately
+/// deeper than the cap so the assertion is about the cap and not about the
+/// fixture running out.
+#[test]
+fn the_treemap_stops_at_the_depth_cap() {
+    let tree = deep_tree(usize::try_from(TREEMAP_DEPTH_CAP).expect("small") + 6);
+    let tiles = layout_tiles(
+        &tree,
+        tree.root(),
+        &options(LayoutKind::Treemap, 1200.0, 900.0, 1.0, 1.0),
+    )
+    .expect("a layout");
+
+    let deepest = tiles.iter().map(|tile| tile.depth).max().unwrap_or(0);
+    assert!(
+        deepest < TREEMAP_DEPTH_CAP,
+        "treemap drew to depth {deepest}, past the cap of {TREEMAP_DEPTH_CAP}"
+    );
+    assert!(deepest > 0, "the fixture produced no children at all");
 }

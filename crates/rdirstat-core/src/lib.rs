@@ -243,7 +243,16 @@ pub const PROGRESS_MAX_HZ: u32 = 10;
 ///
 /// The sub-pixel cutoff is what bounds the drawn tile count; a candidate node
 /// count is not evidence that the rendered set stayed bounded.
-pub const MIN_TILE_PX: f32 = 3.0;
+///
+/// **Eight, not three.** The cutoff is divided by the device pixel ratio to
+/// reach CSS pixels, so on a 2x display a value of 3 admitted a tile 1.5 CSS
+/// pixels on a side — smaller than the 1px border drawn around it, so most of
+/// such a tile *is* border. Measured on a real 138 GB scan in an 832x287
+/// canvas, that produced 26,472 tiles averaging 3x3 CSS pixels: a uniform
+/// scatter in which the large blocks a treemap exists to show were not
+/// visible at all. Eight device pixels is 4 CSS pixels at 2x, which is the
+/// smallest tile that still reads as a rectangle rather than as a speck.
+pub const MIN_TILE_PX: f32 = 8.0;
 
 /// Event name for [`ScanProgress`].
 pub const SCAN_PROGRESS_EVENT: &str = "scan:progress";

@@ -56,6 +56,21 @@ pub const SUNBURST_MAX_RING_PX: f32 = 96.0;
 /// without limit. Hitting it sets [`LayoutStats::truncated`](crate::LayoutStats::truncated).
 pub const DEFAULT_MAX_TILES: usize = 100_000;
 
+/// How many levels below the layout root a treemap subdivides.
+///
+/// The icicle and the sunburst get their depth ceiling from geometry — they run
+/// out of rows or rings — but a treemap has no such natural floor, so before
+/// this it descended until the sub-pixel cutoff stopped it. On a real 138 GB
+/// scan that reached **depth 18**, and the result was not a hierarchy: the
+/// large blocks were shattered into their own leaves until the whole canvas was
+/// an even scatter of specks.
+///
+/// A treemap is read as nested blocks, and past about four levels the nesting
+/// is no longer legible at any tile size — the borders alone consume the space.
+/// Detail is not lost, it is *relocated*: drilling into a directory re-lays out
+/// from there, so the next four levels are always one click away.
+pub const TREEMAP_DEPTH_CAP: u32 = 5;
+
 /// The sub-pixel cutoff, in **device** pixels.
 ///
 /// This is the load-bearing parameter of the whole crate. A tile whose smallest

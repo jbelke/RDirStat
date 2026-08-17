@@ -181,7 +181,7 @@ export const LAYOUT_SCHEMA_VERSION = 1 as const;
 
 export const MAX_CHILD_PAGE = 500 as const;
 
-export const MIN_TILE_PX = 3.0 as const;
+export const MIN_TILE_PX = 8.0 as const;
 
 export const PROGRESS_MAX_HZ = 10 as const;
 

@@ -1264,7 +1264,11 @@ mod tests {
         for chunk in bytes.chunks(7) {
             many.write(chunk);
         }
-        assert_eq!(many.finish(), expected, "the digest changed under repeated small writes");
+        assert_eq!(
+            many.finish(),
+            expected,
+            "the digest changed under repeated small writes"
+        );
     }
 
     #[test]
@@ -1278,11 +1282,7 @@ mod tests {
         forwards.write(b"aaaaaaaabbbbbbbb");
         let mut backwards = Checksum::new();
         backwards.write(b"bbbbbbbbaaaaaaaa");
-        assert_ne!(
-            forwards.finish(),
-            backwards.finish(),
-            "two swapped words hash the same"
-        );
+        assert_ne!(forwards.finish(), backwards.finish(), "two swapped words hash the same");
     }
 
     #[test]

@@ -30,7 +30,7 @@ export const ARROW_META_SCHEMA_NAME = "rdirstat.schema";
 export const ARROW_META_SCHEMA_VERSION = "rdirstat.schema_version";
 
 /** `rdirstat_core::MIN_TILE_PX` — the sub-pixel cutoff the backend applies. */
-export const MIN_TILE_PX = 3;
+export const MIN_TILE_PX = 8;
 
 /* -----------------------------------------------------------------------------
  * `NodeId` encoding. Three disjoint cases, total over u32:
