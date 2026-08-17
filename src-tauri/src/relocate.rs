@@ -478,10 +478,44 @@ fn display(path: &Path) -> DisplayPath {
 
 /// Rejects a source and destination that contain one another.
 fn check_disjoint(source: &Path, destination: &Path) -> Result<(), RelocateError> {
-    if source == destination || destination.starts_with(source) || source.starts_with(destination) {
+    let overlapping = |a: &Path, b: &Path| a == b || b.starts_with(a) || a.starts_with(b);
+
+    if overlapping(source, destination) {
         return Err(RelocateError::Overlapping {
             source: display(source),
             destination: display(destination),
+        });
+    }
+
+    // The lexical check above is not sufficient. A symlink makes two paths that
+    // share no components name the same directory: if `/Volumes/Ext` is a link
+    // to `/Users/josh/big`, then `/Volumes/Ext/payload` and
+    // `/Users/josh/big/payload` look disjoint and are the same place — and
+    // `ditto` would copy a tree into itself, filling the disk.
+    //
+    // So compare resolved paths too. The destination itself need not exist yet
+    // (that is the ordinary Migrate case), but its parent must, so the parent
+    // is what gets resolved and the basename is re-attached afterwards.
+    let (Ok(real_source), Some(parent)) = (source.canonicalize(), destination.parent()) else {
+        // A source that cannot be resolved is caught by `revalidate`; nothing
+        // useful can be added here, and refusing on a canonicalize failure
+        // would reject legitimate moves for an unrelated reason.
+        return Ok(());
+    };
+    let Ok(real_parent) = parent.canonicalize() else {
+        // A missing destination parent is reported by the `is_dir` check in
+        // `plan`, with a message that says so.
+        return Ok(());
+    };
+    let real_destination = match destination.file_name() {
+        Some(name) => real_parent.join(name),
+        None => real_parent,
+    };
+
+    if overlapping(&real_source, &real_destination) {
+        return Err(RelocateError::Overlapping {
+            source: display(&real_source),
+            destination: display(&real_destination),
         });
     }
     Ok(())
@@ -1246,6 +1280,50 @@ mod tests {
         assert!(matches!(error, RelocateError::Overlapping { .. }));
 
         check_disjoint(Path::new("/a/b"), Path::new("/x/y")).expect("disjoint paths are fine");
+    }
+
+    #[test]
+    fn a_destination_reaching_the_source_through_a_symlink_is_refused() {
+        // The hole a lexical check leaves: two paths that share no components
+        // can name the same directory. `ditto` copying a tree into itself
+        // fills the disk, and no amount of comparing strings would catch it.
+        let directory = scratch();
+        let real = directory.path().join("real");
+        fs::create_dir_all(real.join("payload")).expect("mkdir");
+
+        // `link` -> `real`, so `link/payload` IS `real/payload`.
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let source = real.join("payload");
+        let destination = link.join("payload");
+        assert!(
+            !destination.starts_with(&source) && !source.starts_with(&destination),
+            "the two must look disjoint lexically, or this test proves nothing"
+        );
+
+        let error = check_disjoint(&source, &destination).expect_err("must refuse");
+        assert!(matches!(error, RelocateError::Overlapping { .. }), "got {error:?}");
+    }
+
+    #[test]
+    fn a_destination_inside_a_symlinked_ancestor_of_the_source_is_refused() {
+        // Same trap one level up: the destination's *parent* resolves into the
+        // source's tree even though the destination itself does not exist yet,
+        // which is the ordinary Migrate shape.
+        let directory = scratch();
+        let real = directory.path().join("real");
+        fs::create_dir_all(&real).expect("mkdir");
+        let source = real.join("payload");
+        fs::create_dir_all(&source).expect("mkdir");
+
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(&source, &link).expect("symlink");
+
+        // Destination does not exist; its parent `link` resolves inside source.
+        let destination = link.join("copy");
+        let error = check_disjoint(&source, &destination).expect_err("must refuse");
+        assert!(matches!(error, RelocateError::Overlapping { .. }), "got {error:?}");
     }
 
     #[test]
