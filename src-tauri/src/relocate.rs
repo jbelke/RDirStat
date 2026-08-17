@@ -610,8 +610,10 @@ pub(crate) fn plan<S: BuildHasher>(
             path: display(destination_parent),
             reason: format!(
                 "it is {destination_filesystem}, which cannot store extended attributes or ACLs. \
-                 Copying there would drop metadata that this app cannot verify and cannot get back. \
-                 Use an APFS or Mac OS Extended volume, or copy it in Finder if you accept the loss"
+                 Copying there would silently drop Finder tags and colour labels, \"Where from\" \
+                 provenance, resource forks, and POSIX ownership — metadata this app cannot verify \
+                 and cannot get back once the original is gone. Use an APFS or Mac OS Extended \
+                 volume, or copy it in Finder if you accept the loss"
             ),
         });
     }
@@ -868,6 +870,38 @@ fn verify_error(path: &Path, error: &io::Error) -> RelocateError {
 // Applying
 // ---------------------------------------------------------------------------
 
+/// Checks that a symlink can actually be created beside `source`.
+///
+/// Creates a uniquely-named sibling symlink and removes it again. The name is
+/// derived from the source's own name plus a fixed suffix rather than anything
+/// random, so a crash between create and remove leaves one identifiable
+/// artefact rather than an accumulating pile of mystery files.
+fn preflight_symlink(source: &Path) -> Result<(), RelocateError> {
+    let parent = source.parent().ok_or_else(|| RelocateError::SymlinkFailed {
+        path: display(source),
+        reason: "it has no parent directory".to_owned(),
+    })?;
+    let name = source.file_name().unwrap_or_else(|| OsStr::new("item"));
+    let mut probe_name = name.to_os_string();
+    probe_name.push(".rdirstat-link-check");
+    let probe = parent.join(probe_name);
+
+    // A leftover from an interrupted earlier run must not fail this run.
+    let _ = fs::remove_file(&probe);
+
+    let outcome = std::os::unix::fs::symlink(source, &probe).map_err(|error| RelocateError::SymlinkFailed {
+        path: display(source),
+        reason: format!(
+            "a link cannot be created in {}: {error}. Nothing was moved or deleted",
+            parent.display()
+        ),
+    });
+    // Remove it whether or not the create reported success, so a partial
+    // failure cannot leave the probe behind.
+    let _ = fs::remove_file(&probe);
+    outcome
+}
+
 /// Moves one path to the Trash.
 ///
 /// [`crate::actions`] has the node-oriented version, which normalizes a whole
@@ -1019,7 +1053,23 @@ pub(crate) fn apply<S: BuildHasher>(
     report.bytes_verified = tally.bytes;
     report.special_files = tally.special;
 
-    // 3. Dispose of the source — the first irreversible step.
+    // 3. Prove the symlink can be created BEFORE the source is disposed of.
+    //
+    //    Creating it afterwards is the one ordering in this routine with an
+    //    irreversible failure: the original would already be in the Trash and
+    //    its path left with nothing at it, which is recoverable only if the
+    //    user knows to go looking. The symlink cannot be made at the real path
+    //    first — the source still occupies it — so a sibling is created and
+    //    removed instead. That exercises the same directory, the same
+    //    permissions and the same filesystem, which is what the realistic
+    //    causes (read-only mount, no write permission, SIP) all turn on.
+    //
+    //    It is a pre-flight, not a guarantee: something could still change in
+    //    the microseconds afterwards. It converts the common cases from
+    //    "destroyed and stranded" to "refused, nothing touched".
+    preflight_symlink(&source)?;
+
+    // 4. Dispose of the source — the first irreversible step.
     //
     //    Special files force `Keep`: a socket in the source was never copied
     //    and never can be, so removing the source would destroy something the
@@ -1045,8 +1095,10 @@ pub(crate) fn apply<S: BuildHasher>(
         }
     }
 
-    // 4. Leave the pointer. If this fails the source is already in the Trash,
-    //    which is recoverable but not obvious, so the error says exactly that.
+    // 5. Leave the pointer. Step 3 has already shown this directory will
+    //    accept a symlink, so reaching this error means something changed
+    //    underneath us; the message says the source is in the Trash because at
+    //    this point that is the only place it is.
     std::os::unix::fs::symlink(&destination, &source).map_err(|error| RelocateError::SymlinkFailed {
         path: display(&source),
         reason: error.to_string(),
@@ -1476,6 +1528,73 @@ mod tests {
             matches!(error, RelocateError::Action(ActionError::NotActionable { .. })),
             "got {error:?}"
         );
+    }
+
+    #[test]
+    fn the_symlink_preflight_passes_on_a_writable_directory_and_leaves_nothing_behind() {
+        let directory = scratch();
+        let source = directory.path().join("thing");
+        fs::write(&source, b"x").expect("write");
+
+        preflight_symlink(&source).expect("a writable directory must accept a link");
+
+        // The probe must not survive: a stray `thing.rdirstat-link-check` next
+        // to the user's data would be an unexplained artefact of our own making.
+        let leftovers: Vec<String> = fs::read_dir(directory.path())
+            .expect("read_dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("rdirstat-link-check"))
+            .collect();
+        assert!(leftovers.is_empty(), "probe left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn the_symlink_preflight_runs_before_anything_is_destroyed() {
+        // The ordering this pins: creating the symlink AFTER disposing of the
+        // source is the one step in `apply` whose failure is irreversible —
+        // the original would be in the Trash and its path left empty. The
+        // pre-flight turns the realistic causes (read-only mount, no write
+        // permission) into a refusal with nothing touched.
+        let (source, destination, scan) = fixture();
+        let payload = child_named(&scan, scan.root, "payload");
+        let keys = RandomState::new();
+
+        let plan = plan(
+            &scan,
+            &keys,
+            NOW,
+            RelocateRequest {
+                node: payload,
+                destination_parent: destination.path(),
+                mode: RelocateMode::Migrate,
+                disposal: SourceDisposal::Delete,
+            },
+        )
+        .expect("plan");
+        let token = plan.token.clone().expect("token");
+
+        apply(
+            &scan,
+            &keys,
+            NOW,
+            RelocateRequest {
+                node: payload,
+                destination_parent: destination.path(),
+                mode: RelocateMode::Migrate,
+                disposal: SourceDisposal::Delete,
+            },
+            &token,
+        )
+        .expect("apply");
+
+        // Success path still ends with exactly one symlink and no probe.
+        let entries: Vec<String> = fs::read_dir(source.path())
+            .expect("read_dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["payload".to_owned()], "got {entries:?}");
     }
 
     #[test]
