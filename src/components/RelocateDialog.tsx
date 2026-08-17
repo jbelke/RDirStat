@@ -435,7 +435,10 @@ function PlanSummary({ plan, blocked }: { plan: RelocatePlanView; blocked: boole
 
       <dl className="mt-2 grid grid-cols-3 gap-2 text-xs">
         <Stat label="To move" value={formatSI(plan.allocated)} />
-        <Stat label="Free there now" value={formatSI(plan.destinationAvailable)} />
+        <Stat
+          label={`Free there (${plan.destinationFilesystem})`}
+          value={formatSI(plan.destinationAvailable)}
+        />
         <Stat
           label="Free there after"
           value={remaining >= 0 ? formatSI(remaining) : "not enough room"}

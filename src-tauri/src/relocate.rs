@@ -126,7 +126,7 @@ const RISKY_PREFIXES: &[&str] = &["/private", "/Library", "/Applications", "/opt
 /// How the destination is reached.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
-pub enum RelocateMode {
+pub(crate) enum RelocateMode {
     /// Copy the subtree to a destination that does not exist yet, verify it,
     /// dispose of the source, and symlink. The ordinary case.
     Migrate,
@@ -139,7 +139,7 @@ pub enum RelocateMode {
 /// What happens to the original once the copy is proven.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
-pub enum SourceDisposal {
+pub(crate) enum SourceDisposal {
     /// `NSFileManager.trashItem`. Recoverable through Finder's "Put Back";
     /// the space is not returned until the Trash is emptied. The default.
     Trash,
@@ -154,7 +154,7 @@ pub enum SourceDisposal {
 /// How much care this particular path needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
-pub enum RiskTier {
+pub(crate) enum RiskTier {
     /// User data. Proceed on confirmation.
     Ordinary,
     /// Allowed, but something about it can break a running system.
@@ -165,11 +165,11 @@ pub enum RiskTier {
 
 /// One thing the user should read before confirming.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
-pub struct RelocateWarning {
+pub(crate) struct RelocateWarning {
     /// Stable identifier, so the UI can style or suppress a specific warning.
-    pub code: String,
+    pub(crate) code: String,
     /// Plain sentence, already written for a human.
-    pub message: String,
+    pub(crate) message: String,
 }
 
 impl RelocateWarning {
@@ -183,57 +183,61 @@ impl RelocateWarning {
 
 /// What a relocation would do, and the token that authorizes it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
-pub struct RelocatePlan {
-    pub generation: TreeGeneration,
+pub(crate) struct RelocatePlan {
+    pub(crate) generation: TreeGeneration,
     /// `None` when [`RelocatePlan::risk`] is [`RiskTier::Blocked`], or when the
     /// plan found a condition that makes the relocation impossible. A UI must
     /// treat a plan without a token as "show the reasons, disable the button".
-    pub token: Option<ConfirmationToken>,
-    pub node: NodeId,
-    pub source: DisplayPath,
-    pub destination: DisplayPath,
-    pub mode: RelocateMode,
-    pub disposal: SourceDisposal,
+    pub(crate) token: Option<ConfirmationToken>,
+    pub(crate) node: NodeId,
+    pub(crate) source: DisplayPath,
+    pub(crate) destination: DisplayPath,
+    pub(crate) mode: RelocateMode,
+    pub(crate) disposal: SourceDisposal,
     /// Subtree size as the scan recorded it.
-    pub logical: u64,
-    pub allocated: u64,
+    pub(crate) logical: u64,
+    pub(crate) allocated: u64,
     /// Nodes retained under this one, as the scan recorded them.
-    pub retained_nodes: u32,
+    pub(crate) retained_nodes: u32,
     /// Directories under this one the scan could not read. Non-zero means the
     /// recorded size is a floor and the copy may be larger than planned.
-    pub unreadable: u32,
+    pub(crate) unreadable: u32,
     /// `st_dev` of the source and of the destination's parent. Equal devices
     /// mean the move frees nothing, which is a warning, not an error.
-    pub source_device: u64,
-    pub destination_device: u64,
-    /// Bytes free on the destination filesystem, from `df -Pk`.
-    pub destination_available: u64,
-    pub risk: RiskTier,
-    pub warnings: Vec<RelocateWarning>,
+    pub(crate) source_device: u64,
+    pub(crate) destination_device: u64,
+    /// Bytes free on the destination filesystem, from `df -Pk -Y`.
+    pub(crate) destination_available: u64,
+    /// `apfs`, `exfat`, `smbfs`, … Anything that cannot hold extended
+    /// attributes and ACLs is refused, because `ditto` would drop them
+    /// silently and the content comparison would not notice.
+    pub(crate) destination_filesystem: String,
+    pub(crate) risk: RiskTier,
+    pub(crate) warnings: Vec<RelocateWarning>,
 }
 
 /// What a relocation actually did.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
-pub struct RelocateReport {
-    pub generation: TreeGeneration,
-    pub node: NodeId,
-    pub source: DisplayPath,
-    pub destination: DisplayPath,
-    pub mode: RelocateMode,
+pub(crate) struct RelocateReport {
+    pub(crate) generation: TreeGeneration,
+    pub(crate) node: NodeId,
+    pub(crate) source: DisplayPath,
+    pub(crate) destination: DisplayPath,
+    pub(crate) mode: RelocateMode,
     /// What was actually done to the source, which is not always what was
     /// asked: an unverifiable entry downgrades it to [`SourceDisposal::Keep`].
-    pub disposal: SourceDisposal,
+    pub(crate) disposal: SourceDisposal,
     /// Regular files compared byte-for-byte and found identical.
-    pub files_verified: u64,
+    pub(crate) files_verified: u64,
     /// Bytes in those files.
-    pub bytes_verified: u64,
+    pub(crate) bytes_verified: u64,
     /// Sockets, FIFOs and device nodes found in the source. `ditto` does not
     /// carry these and no copy can, so their presence forces `Keep`.
-    pub special_files: u64,
+    pub(crate) special_files: u64,
     /// Whether the symlink now exists at the source path.
-    pub symlink_created: bool,
+    pub(crate) symlink_created: bool,
     /// Set when the relocation did not complete. The source is untouched.
-    pub error: Option<RelocateError>,
+    pub(crate) error: Option<RelocateError>,
 }
 
 /// A relocation-specific failure.
@@ -248,7 +252,7 @@ pub struct RelocateReport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum RelocateError {
+pub(crate) enum RelocateError {
     /// A path-identity failure, reused from the Trash path.
     Action(ActionError),
 
@@ -337,6 +341,22 @@ impl From<ActionError> for RelocateError {
 // Planning
 // ---------------------------------------------------------------------------
 
+/// What the caller wants done, bundled so [`plan`] and [`apply`] take the same
+/// four things and cannot be called with them in a different order.
+///
+/// `node` plus a *parent directory* rather than a finished destination path:
+/// the final path is always `<parent>/<source basename>`, computed by
+/// [`destination_for`], so the frontend cannot ask for a rename and a move in
+/// one step — which would make the "leave a symlink at the old name" promise
+/// ambiguous.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RelocateRequest<'a> {
+    pub(crate) node: NodeId,
+    pub(crate) destination_parent: &'a Path,
+    pub(crate) mode: RelocateMode,
+    pub(crate) disposal: SourceDisposal,
+}
+
 /// Classifies a source path.
 ///
 /// Prefix matching is on *components*, not on string prefixes: `/System` must
@@ -364,16 +384,40 @@ fn assess_risk(path: &Path) -> (RiskTier, Option<&'static str>) {
     (RiskTier::Ordinary, None)
 }
 
-/// Bytes available on the filesystem holding `path`.
+/// Filesystems that can carry the metadata `ditto` is being used to preserve.
 ///
-/// Shells out to `df -Pk` for the single path rather than reusing
+/// This list is the load-bearing half of the metadata-fidelity promise. Using
+/// `ditto` buys nothing if the destination cannot *store* an extended
+/// attribute or an ACL: it drops them without failing, verification below
+/// compares contents and would pass, and the source would then be destroyed —
+/// losing metadata permanently in the one code path that exists to avoid
+/// exactly that.
+///
+/// Verifying xattrs directly would be better and needs `listxattr`/`getxattr`,
+/// which means a `libc` dependency this crate does not have. Refusing the
+/// filesystems that provably cannot hold them is the honest subset: it is
+/// conservative in the safe direction, and a user who genuinely wants a
+/// metadata-losing copy to exFAT can do it in Finder.
+const METADATA_CAPABLE_FILESYSTEMS: &[&str] = &["apfs", "hfs"];
+
+/// What `df` reports for the filesystem holding a path.
+#[derive(Debug, Clone)]
+struct FilesystemFacts {
+    available: u64,
+    /// `apfs`, `exfat`, `msdos`, `smbfs`, …
+    kind: String,
+}
+
+/// Bytes available and filesystem type for the mount holding `path`.
+///
+/// Shells out to `df -Pk -Y` for the single path rather than reusing
 /// `crate::volumes::list`, which enumerates every mount and would then need
 /// prefix-matching to find the right one — one exact answer beats a list plus
 /// a guess. `-P` pins the POSIX single-line output format so the parse is not
-/// at the mercy of a long device name wrapping.
-fn available_bytes(path: &Path) -> Result<u64, RelocateError> {
+/// at the mercy of a long device name wrapping, and `-Y` adds the type column.
+fn filesystem_facts(path: &Path) -> Result<FilesystemFacts, RelocateError> {
     let output = Command::new("/bin/df")
-        .arg("-Pk")
+        .args(["-Pk", "-Y"])
         .arg(path)
         .output()
         .map_err(|error| RelocateError::Internal(format!("df: {error}")))?;
@@ -385,13 +429,22 @@ fn available_bytes(path: &Path) -> Result<u64, RelocateError> {
     }
     let text = String::from_utf8_lossy(&output.stdout);
     // Line 0 is the header; line 1 is the answer.
+    // Filesystem, Type, 1024-blocks, Used, Available, Capacity, Mounted-on
     let fields: Vec<&str> = text.lines().nth(1).unwrap_or_default().split_whitespace().collect();
-    // Filesystem, 1024-blocks, Used, Available, Capacity, Mounted-on
-    fields
-        .get(3)
+    let available = fields
+        .get(4)
         .and_then(|value| value.parse::<u64>().ok())
         .map(|blocks| blocks.saturating_mul(1_024))
-        .ok_or_else(|| RelocateError::Internal("could not parse df output".to_owned()))
+        .ok_or_else(|| RelocateError::Internal("could not parse df output".to_owned()))?;
+    let kind = fields.get(1).copied().unwrap_or("unknown").to_ascii_lowercase();
+    Ok(FilesystemFacts { available, kind })
+}
+
+/// True when the filesystem can hold extended attributes and ACLs.
+fn carries_macos_metadata(kind: &str) -> bool {
+    METADATA_CAPABLE_FILESYSTEMS
+        .iter()
+        .any(|known| kind == *known || kind.starts_with(known))
 }
 
 /// `st_dev` of an existing path, or of its nearest existing ancestor.
@@ -450,11 +503,14 @@ pub(crate) fn plan<S: BuildHasher>(
     scan: &CompletedScan,
     keys: &S,
     now_unix_ms: i64,
-    node: NodeId,
-    destination_parent: &Path,
-    mode: RelocateMode,
-    disposal: SourceDisposal,
+    request: RelocateRequest<'_>,
 ) -> Result<RelocatePlan, RelocateError> {
+    let RelocateRequest {
+        node,
+        destination_parent,
+        mode,
+        disposal,
+    } = request;
     let source = fsident::action_path(scan, node, false)?;
     fsident::confirm_within_root(scan, &source)?;
     let observation = fsident::revalidate(scan, node, &source)?;
@@ -504,7 +560,9 @@ pub(crate) fn plan<S: BuildHasher>(
         ));
     }
 
-    let destination_available = available_bytes(destination_parent).unwrap_or(0);
+    let facts = filesystem_facts(destination_parent).ok();
+    let destination_available = facts.as_ref().map_or(0, |entry| entry.available);
+    let destination_filesystem = facts.map_or_else(|| "unknown".to_owned(), |entry| entry.kind);
 
     // Destination state has to match the mode, or the operation means something
     // other than what the user asked for.
@@ -538,6 +596,23 @@ pub(crate) fn plan<S: BuildHasher>(
         fatal = Some(RelocateError::Destination {
             path: display(destination_parent),
             reason: "it is not a directory".to_owned(),
+        });
+    }
+
+    // The metadata-fidelity gate. `ditto` is used precisely because it carries
+    // ACLs, extended attributes and resource forks; a destination that cannot
+    // store them drops them without failing, the content-comparison below
+    // still passes, and the source would then be disposed of — silently losing
+    // metadata in the one routine whose whole purpose is not to. Refused
+    // rather than warned, because the loss is invisible and permanent.
+    if !carries_macos_metadata(&destination_filesystem) {
+        fatal = Some(RelocateError::Destination {
+            path: display(destination_parent),
+            reason: format!(
+                "it is {destination_filesystem}, which cannot store extended attributes or ACLs. \
+                 Copying there would drop metadata that this app cannot verify and cannot get back. \
+                 Use an APFS or Mac OS Extended volume, or copy it in Finder if you accept the loss"
+            ),
         });
     }
 
@@ -591,6 +666,7 @@ pub(crate) fn plan<S: BuildHasher>(
         source_device,
         destination_device,
         destination_available,
+        destination_filesystem,
         risk,
         warnings,
     })
@@ -860,12 +936,15 @@ pub(crate) fn apply<S: BuildHasher>(
     scan: &CompletedScan,
     keys: &S,
     now_unix_ms: i64,
-    node: NodeId,
-    destination_parent: &Path,
-    mode: RelocateMode,
-    disposal: SourceDisposal,
+    request: RelocateRequest<'_>,
     confirmation: &ConfirmationToken,
 ) -> Result<RelocateReport, RelocateError> {
+    let RelocateRequest {
+        node,
+        destination_parent,
+        mode,
+        disposal,
+    } = request;
     let source = fsident::action_path(scan, node, false)?;
     fsident::confirm_within_root(scan, &source)?;
     let observation = fsident::revalidate(scan, node, &source)?;
@@ -879,6 +958,18 @@ pub(crate) fn apply<S: BuildHasher>(
         return Err(RelocateError::Blocked {
             path: display(&source),
             reason: reason.unwrap_or("it is protected").to_owned(),
+        });
+    }
+
+    // Re-check metadata capability here too, for the same reason. A volume can
+    // be unmounted and a different one mounted at the same path between the
+    // plan and the confirm, and this is the check whose failure mode is a
+    // silent, permanent loss rather than a visible error.
+    let facts = filesystem_facts(destination_parent)?;
+    if !carries_macos_metadata(&facts.kind) {
+        return Err(RelocateError::Destination {
+            path: display(destination_parent),
+            reason: format!("it is {}, which cannot store extended attributes or ACLs", facts.kind),
         });
     }
 
@@ -1209,10 +1300,12 @@ mod tests {
             &scan,
             &keys,
             NOW,
-            payload,
-            destination.path(),
-            RelocateMode::Migrate,
-            SourceDisposal::Delete,
+            RelocateRequest {
+                node: payload,
+                destination_parent: destination.path(),
+                mode: RelocateMode::Migrate,
+                disposal: SourceDisposal::Delete,
+            },
         )
         .expect("plan");
         let token = plan.token.clone().expect("an ordinary path must get a token");
@@ -1222,10 +1315,12 @@ mod tests {
             &scan,
             &keys,
             NOW,
-            payload,
-            destination.path(),
-            RelocateMode::Migrate,
-            SourceDisposal::Delete,
+            RelocateRequest {
+                node: payload,
+                destination_parent: destination.path(),
+                mode: RelocateMode::Migrate,
+                disposal: SourceDisposal::Delete,
+            },
             &token,
         )
         .expect("apply");
@@ -1265,10 +1360,12 @@ mod tests {
             &scan,
             &keys,
             NOW,
-            payload,
-            destination.path(),
-            RelocateMode::Repoint,
-            SourceDisposal::Delete,
+            RelocateRequest {
+                node: payload,
+                destination_parent: destination.path(),
+                mode: RelocateMode::Repoint,
+                disposal: SourceDisposal::Delete,
+            },
         )
         .expect("plan");
         let token = plan.token.clone().expect("token");
@@ -1277,10 +1374,12 @@ mod tests {
             &scan,
             &keys,
             NOW,
-            payload,
-            destination.path(),
-            RelocateMode::Repoint,
-            SourceDisposal::Delete,
+            RelocateRequest {
+                node: payload,
+                destination_parent: destination.path(),
+                mode: RelocateMode::Repoint,
+                disposal: SourceDisposal::Delete,
+            },
             &token,
         )
         .expect_err("a mismatched destination must not be adopted");
@@ -1304,10 +1403,12 @@ mod tests {
             &scan,
             &keys,
             NOW,
-            payload,
-            destination.path(),
-            RelocateMode::Migrate,
-            SourceDisposal::Trash,
+            RelocateRequest {
+                node: payload,
+                destination_parent: destination.path(),
+                mode: RelocateMode::Migrate,
+                disposal: SourceDisposal::Trash,
+            },
         )
         .expect("plan");
 
@@ -1326,10 +1427,12 @@ mod tests {
             &scan,
             &keys,
             NOW,
-            payload,
-            destination.path(),
-            RelocateMode::Migrate,
-            SourceDisposal::Delete,
+            RelocateRequest {
+                node: payload,
+                destination_parent: destination.path(),
+                mode: RelocateMode::Migrate,
+                disposal: SourceDisposal::Delete,
+            },
         )
         .expect("plan");
         let token = plan.token.clone().expect("token");
@@ -1338,10 +1441,12 @@ mod tests {
             &scan,
             &keys,
             NOW,
-            inner,
-            destination.path(),
-            RelocateMode::Migrate,
-            SourceDisposal::Delete,
+            RelocateRequest {
+                node: inner,
+                destination_parent: destination.path(),
+                mode: RelocateMode::Migrate,
+                disposal: SourceDisposal::Delete,
+            },
             &token,
         )
         .expect_err("a token is bound to the node it was minted for");
@@ -1359,15 +1464,66 @@ mod tests {
             &scan,
             &keys,
             NOW,
-            scan.root,
-            destination.path(),
-            RelocateMode::Migrate,
-            SourceDisposal::Trash,
+            RelocateRequest {
+                node: scan.root,
+                destination_parent: destination.path(),
+                mode: RelocateMode::Migrate,
+                disposal: SourceDisposal::Trash,
+            },
         )
         .expect_err("the scan root is not actionable");
         assert!(
             matches!(error, RelocateError::Action(ActionError::NotActionable { .. })),
             "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn only_filesystems_that_can_hold_xattrs_and_acls_are_accepted() {
+        // The defect this pins: `ditto` was chosen precisely because it carries
+        // ACLs, xattrs and resource forks. A destination that cannot store them
+        // drops them WITHOUT failing, and `verify_tree` compares contents,
+        // names and symlink targets — not metadata — so verification would pass
+        // and the source would then be disposed of. The loss is silent and
+        // permanent, which is why this is a refusal and not a warning.
+        assert!(carries_macos_metadata("apfs"));
+        assert!(carries_macos_metadata("hfs"));
+
+        assert!(!carries_macos_metadata("exfat"));
+        assert!(!carries_macos_metadata("msdos"));
+        assert!(!carries_macos_metadata("smbfs"));
+        assert!(!carries_macos_metadata("nfs"));
+        assert!(!carries_macos_metadata("unknown"));
+    }
+
+    #[test]
+    fn the_destination_filesystem_is_reported_and_is_metadata_capable_here() {
+        let (_source, destination, scan) = fixture();
+        let payload = child_named(&scan, scan.root, "payload");
+        let keys = RandomState::new();
+
+        let plan = plan(
+            &scan,
+            &keys,
+            NOW,
+            RelocateRequest {
+                node: payload,
+                destination_parent: destination.path(),
+                mode: RelocateMode::Migrate,
+                disposal: SourceDisposal::Trash,
+            },
+        )
+        .expect("plan");
+
+        // The scratch dir is on the boot volume, which is APFS — so the plan
+        // must name the filesystem and must not have refused on that ground.
+        assert!(carries_macos_metadata(&plan.destination_filesystem), "got {plan:?}");
+        assert!(
+            !plan
+                .warnings
+                .iter()
+                .any(|warning| warning.message.contains("extended attributes")),
+            "an APFS destination must not be refused for metadata reasons"
         );
     }
 
@@ -1381,10 +1537,12 @@ mod tests {
             &scan,
             &keys,
             NOW,
-            payload,
-            destination.path(),
-            RelocateMode::Migrate,
-            SourceDisposal::Trash,
+            RelocateRequest {
+                node: payload,
+                destination_parent: destination.path(),
+                mode: RelocateMode::Migrate,
+                disposal: SourceDisposal::Trash,
+            },
         )
         .expect("plan");
 

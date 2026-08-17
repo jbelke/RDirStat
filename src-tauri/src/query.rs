@@ -25,13 +25,13 @@ pub(crate) const VIRTUAL_GROUP_NAME: &str = "<Files>";
 /// crumb is directly navigable, and the name so the frontend does not have to
 /// have visited the ancestor to be able to label it.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
-pub struct Ancestor {
-    pub node: NodeId,
+pub(crate) struct Ancestor {
+    pub(crate) node: NodeId,
     /// Basename. The root carries its full path instead — see [`ancestors`].
-    pub name: DisplayPath,
-    pub kind: Kind,
-    pub logical: u64,
-    pub allocated: u64,
+    pub(crate) name: DisplayPath,
+    pub(crate) kind: Kind,
+    pub(crate) logical: u64,
+    pub(crate) allocated: u64,
 }
 
 /// Directory extensions macOS presents as packages.
@@ -762,9 +762,6 @@ mod tests {
     fn an_unknown_node_is_rejected_rather_than_returning_a_partial_chain() {
         let (_dir, scan) = fixture();
         let bogus = NodeId::from_raw(u32::MAX - 3);
-        assert!(matches!(
-            ancestors(&scan, bogus),
-            Err(QueryError::UnknownNode { .. })
-        ));
+        assert!(matches!(ancestors(&scan, bogus), Err(QueryError::UnknownNode { .. })));
     }
 }

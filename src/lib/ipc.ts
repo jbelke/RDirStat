@@ -689,6 +689,8 @@ export interface RelocatePlanView {
   readonly sourceDevice: number;
   readonly destinationDevice: number;
   readonly destinationAvailable: number;
+  /** `apfs`, `exfat`, `smbfs`, … Anything that cannot hold xattrs is refused. */
+  readonly destinationFilesystem: string;
   readonly risk: RiskTier;
   readonly warnings: readonly RelocateWarningView[];
 }
@@ -723,6 +725,7 @@ function toRelocatePlan(plan: RelocatePlan): RelocatePlanView {
     sourceDevice: num(plan.source_device),
     destinationDevice: num(plan.destination_device),
     destinationAvailable: num(plan.destination_available),
+    destinationFilesystem: plan.destination_filesystem,
     risk: plan.risk,
     warnings: plan.warnings.map((warning) => ({ code: warning.code, message: warning.message })),
   };

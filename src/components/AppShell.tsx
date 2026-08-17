@@ -63,7 +63,7 @@ import {
 import { cn } from "@/lib/utils";
 import { GENERATION_NONE, isRealNode } from "@/lib/wire";
 import { useCurrentRoot, useSoleSelection, useUiStore, type Route } from "@/state/store";
-import { CircleAlert } from "lucide-react";
+import { CircleAlert, X } from "lucide-react";
 
 const CATALOG_ROUTES: readonly { id: string; label: string }[] = [
   { id: "types", label: "Types" },
@@ -133,6 +133,13 @@ export function AppShell() {
     lastGeneration.current = liveGeneration;
     dropStaleGenerations(client, liveGeneration);
     syncGeneration(liveGeneration, status.data?.summary?.root ?? 0);
+    // A new tree makes every previous complaint obsolete. Without this, a
+    // correct refusal — "already scanning", say — stays on screen through the
+    // successful scan that followed it, so the user reads a red banner
+    // describing something that is no longer true and has no way to dismiss
+    // it. An error message outliving the state it described is worse than no
+    // message.
+    setActionError(null);
   }, [liveGeneration, client, syncGeneration, status.data?.summary?.root]);
 
   // A cancel is only "done" when the supervisor says so.
@@ -355,10 +362,23 @@ export function AppShell() {
 
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           {actionError !== null && (
-            <Alert variant="destructive" className="m-3">
+            <Alert variant="destructive" className="m-3 pr-10">
               <CircleAlert aria-hidden />
               <AlertTitle>Action failed</AlertTitle>
               <AlertDescription>{actionError}</AlertDescription>
+              {/* Dismissible on purpose. It also clears itself on the next
+                * generation, but a banner the user cannot get rid of is its
+                * own defect — especially for a message that has already been
+                * read and acted on. */}
+              <button
+                type="button"
+                onClick={() => setActionError(null)}
+                title="Dismiss"
+                className="absolute right-2 top-2 rounded p-1 opacity-70 hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <X aria-hidden className="size-4" />
+                <span className="sr-only">Dismiss this message</span>
+              </button>
             </Alert>
           )}
 

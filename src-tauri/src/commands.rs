@@ -17,9 +17,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rdirstat_core::{
-    ActionError, CancelState, CatalogScanId, ChildPage, CommandError, ConfirmationToken, Cursor, Details, DisplayPath,
-    LayoutKind, NodeId, QueryError, ReportName, ReportParams, ScanErrorReport, ScanId, ScanOptions, ScanStatus, Sort,
-    StartError, TrashPreview, TrashReport, TreeGeneration, VolumeInfo,
+    ActionError, CancelState, CatalogScanId, ChildPage, CommandError, CompletedScan, ConfirmationToken, Cursor,
+    Details, DisplayPath, LayoutKind, NodeId, QueryError, ReportName, ReportParams, ScanErrorReport, ScanId,
+    ScanOptions, ScanStatus, Sort, StartError, TrashPreview, TrashReport, TreeGeneration, VolumeInfo,
 };
 
 use crate::engine::{self, ScanOutcome, ScanRequest};
@@ -114,7 +114,16 @@ pub(crate) async fn scan_start(
 
             let state = tauri::Manager::state::<AppState>(&app);
             match outcome {
-                ScanOutcome::Completed(scan) => state.publish(Arc::from(scan)),
+                ScanOutcome::Completed(scan) => {
+                    let scan = Arc::from(scan);
+                    // Published first, saved second. The tree is what the user
+                    // asked for and it is ready now; writing gigabytes of arena
+                    // must not stand between them and it. `publish` swaps an
+                    // `Arc`, so the save below reads the same immutable tree the
+                    // UI is already querying.
+                    state.publish(Arc::clone(&scan));
+                    save_snapshot(&app, &scan);
+                }
                 ScanOutcome::Cancelled => state.release_unpublished(false),
                 ScanOutcome::Failed(error) => {
                     tracing::error!(%error, "scan failed");
@@ -128,6 +137,36 @@ pub(crate) async fn scan_start(
         return Err(StartError::Internal("could not spawn the scan thread".to_owned()));
     }
     Ok(scan_id)
+}
+
+/// Writes the completed scan to the snapshot store so the next launch is a file
+/// read instead of another full traversal.
+///
+/// Every failure is logged and swallowed. The scan itself succeeded and is
+/// already published; a snapshot that could not be written costs the *next*
+/// launch a rescan, which is exactly what happened before snapshots existed. A
+/// full disk is the likely cause, and refusing to complete a scan over it would
+/// turn a missing optimisation into a broken app.
+///
+/// Only complete scans reach here. A cancelled or failed scan is never
+/// published and is therefore never saved — a partial arena must not come back
+/// on the next launch wearing the totals of a whole volume.
+fn save_snapshot(app: &tauri::AppHandle, scan: &CompletedScan) {
+    let store = match crate::snapshot_store::SnapshotStore::new(app) {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::warn!(%error, "no snapshot store; this scan will not survive a restart");
+            return;
+        }
+    };
+    match store.save(scan) {
+        Ok(path) => tracing::info!(
+            path = %path.display(),
+            nodes = scan.tree.len(),
+            "saved a snapshot of the completed scan"
+        ),
+        Err(error) => tracing::warn!(%error, "could not save a snapshot of the completed scan"),
+    }
 }
 
 /// Requests cancellation of `scan_id`.
@@ -326,7 +365,17 @@ pub(crate) async fn relocate_plan(
     }
     let keys = state.token_keys().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        relocate::plan(&scan, &keys, now_unix_ms(), node, &destination, mode, disposal)
+        relocate::plan(
+            &scan,
+            &keys,
+            now_unix_ms(),
+            relocate::RelocateRequest {
+                node,
+                destination_parent: &destination,
+                mode,
+                disposal,
+            },
+        )
     })
     .await
     .map_err(|error| RelocateError::Internal(error.to_string()))?
@@ -368,10 +417,12 @@ pub(crate) async fn relocate_apply(
             &scan,
             &keys,
             now_unix_ms(),
-            node,
-            &destination,
-            mode,
-            disposal,
+            relocate::RelocateRequest {
+                node,
+                destination_parent: &destination,
+                mode,
+                disposal,
+            },
             &confirmation,
         )
     })

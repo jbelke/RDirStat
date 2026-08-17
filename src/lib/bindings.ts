@@ -922,8 +922,14 @@ export type RelocatePlan = {
 	 */
 	source_device: number,
 	destination_device: number,
-	/**  Bytes free on the destination filesystem, from `df -Pk`. */
+	/**  Bytes free on the destination filesystem, from `df -Pk -Y`. */
 	destination_available: number,
+	/**
+	 *  `apfs`, `exfat`, `smbfs`, … Anything that cannot hold extended
+	 *  attributes and ACLs is refused, because `ditto` would drop them
+	 *  silently and the content comparison would not notice.
+	 */
+	destination_filesystem: string,
 	risk: RiskTier,
 	warnings: RelocateWarning[],
 };
