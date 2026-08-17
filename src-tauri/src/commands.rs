@@ -29,6 +29,7 @@ use crate::engine::{self, ScanOutcome, ScanRequest};
 use crate::query::Ancestor;
 use crate::relocate::{RelocateError, RelocateMode, RelocatePlan, RelocateReport, SourceDisposal};
 use crate::state::AppState;
+use crate::storage::{self, StorageReport};
 use crate::{actions, progress, query, relocate, volumes};
 
 /// The ceiling on `scan_errors`'s sample list.
@@ -817,6 +818,75 @@ pub(crate) async fn relocate_apply(
     })
     .await
     .map_err(|error| RelocateError::Internal(error.to_string()))?
+}
+
+/// What the app has stored on disk.
+///
+/// Reads the snapshot store's directory and peeks each file's header — never
+/// decodes an arena, so this stays kilobytes per file rather than the hundreds
+/// of megabytes one holds. Safe to call whenever the panel opens.
+///
+/// # Errors
+///
+/// Never. A store that does not exist yet is an empty report, not a failure:
+/// that is the ordinary state of a fresh install and the panel still has to
+/// render.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn storage_report(app: tauri::AppHandle) -> Result<StorageReport, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::snapshot_store::SnapshotStore::new(&app).map_or_else(
+            |error| storage::empty_report(&error.to_string()),
+            |store| storage::describe(store.directory()),
+        )
+    })
+    .await
+    .map_err(|error| CommandError::Internal(error.to_string()))
+}
+
+/// Copies one stored snapshot to a path the user chose.
+///
+/// `destination_dir` is the folder to write into; empty means the user's
+/// Downloads folder. The snapshot keeps its own filename, and the full path
+/// written is returned so the UI can say where it went.
+///
+/// A byte-for-byte copy, so the original checksum still verifies when the file
+/// is restored later. Both paths are validated against the store rather than
+/// trusted: `source` must be inside it, and neither may be relative or contain
+/// `..`. Without that this command is an arbitrary-file-read primitive.
+///
+/// # Errors
+///
+/// [`CommandError::Internal`] carrying the reason — a source outside the
+/// store, a destination that already exists, or any I/O failure.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn export_snapshot(
+    app: tauri::AppHandle,
+    source: String,
+    destination_dir: String,
+) -> Result<String, CommandError> {
+    // Resolved here rather than in the frontend: the webview has no business
+    // knowing where the user's home is, and a path it invented would be one
+    // more attacker-controlled string for `export_snapshot` to validate.
+    let fallback = tauri::Manager::path(&app)
+        .download_dir()
+        .map_err(|error| CommandError::Internal(format!("no Downloads folder: {error}")))?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = crate::snapshot_store::SnapshotStore::new(&app)
+            .map_err(|error| CommandError::Internal(error.to_string()))?;
+        let directory = if destination_dir.trim().is_empty() {
+            fallback
+        } else {
+            PathBuf::from(destination_dir)
+        };
+        storage::export_snapshot(store.directory(), Path::new(&source), &directory)
+            .map(|written| written.display().to_string())
+            .map_err(CommandError::Internal)
+    })
+    .await
+    .map_err(|error| CommandError::Internal(error.to_string()))?
 }
 
 /// Mounted local volumes, for the launch screen.

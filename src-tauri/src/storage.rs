@@ -22,13 +22,6 @@
 //! [`export_snapshot`], which copies a file out — and copying out cannot
 //! corrupt what stays behind.
 
-// Everything below is reached through the Tauri commands that expose it. The
-// command layer is held by another session while it lands its own work, so for
-// the moment these are used only by the tests in this file — which is what
-// `dead_code` is reporting. Remove this the moment the commands land; it is a
-// scaffold, not a policy.
-#![allow(dead_code)]
-
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -98,6 +91,24 @@ pub(crate) struct StorageReport {
     /// catalog is a documented future phase, not a missing feature, and the UI
     /// says so rather than showing an empty database panel.
     pub catalog_present: bool,
+}
+
+/// A report for a store that could not even be located.
+///
+/// Returned instead of an error because the panel's job is to say what is on
+/// disk, and "the store directory could not be resolved" is an answer to that
+/// question. Failing the command would render nothing at all, which tells the
+/// user strictly less.
+pub(crate) fn empty_report(reason: &str) -> StorageReport {
+    StorageReport {
+        directory: reason.to_owned(),
+        directory_exists: false,
+        snapshots: Vec::new(),
+        unreadable: Vec::new(),
+        total_bytes: 0,
+        truncated: false,
+        catalog_present: false,
+    }
 }
 
 /// Reads the store directory and describes every snapshot in it.
@@ -196,26 +207,40 @@ fn snapshot_files(store_root: &Path) -> Vec<PathBuf> {
 ///
 /// # Errors
 ///
-/// A source outside the store, a destination that is not an absolute `..`-free
-/// path, or any I/O failure. The source check is not paranoia: the path comes
+/// A source outside the store, a destination directory that is not an
+/// absolute `..`-free path, a name that already exists there, or any I/O
+/// failure. The source check is not paranoia: the path comes
 /// from the frontend, and without it this is an arbitrary-file-read primitive
 /// dressed up as an export.
-pub(crate) fn export_snapshot(store_root: &Path, source: &Path, destination: &Path) -> Result<u64, String> {
+pub(crate) fn export_snapshot(
+    store_root: &Path,
+    source: &Path,
+    destination_dir: &Path,
+) -> Result<PathBuf, String> {
     if !source.starts_with(store_root) {
         return Err("that file is not in this app's snapshot store".to_owned());
     }
-    if !acceptable(source) || !acceptable(destination) {
+    if !acceptable(source) || !acceptable(destination_dir) {
         return Err("paths must be absolute and free of `..` segments".to_owned());
     }
     if source.extension().is_none_or(|ext| ext != "rdstat") {
         return Err("only .rdstat snapshots can be exported".to_owned());
     }
+    let name = source
+        .file_name()
+        .ok_or_else(|| "that snapshot has no filename".to_owned())?;
+    let destination = destination_dir.join(name);
+
     // Refuse to clobber. An export that silently overwrote a previous export
-    // would destroy the very thing the user asked to keep.
+    // would destroy the very thing the user asked to keep — and since the
+    // filename is derived from the source, exporting the same snapshot twice
+    // is a completely ordinary thing to do by accident.
     if destination.exists() {
         return Err(format!("{} already exists", destination.display()));
     }
-    fs::copy(source, destination).map_err(|error| error.to_string())
+    fs::create_dir_all(destination_dir).map_err(|error| error.to_string())?;
+    fs::copy(source, &destination).map_err(|error| error.to_string())?;
+    Ok(destination)
 }
 
 fn acceptable(path: &Path) -> bool {
@@ -297,7 +322,7 @@ mod tests {
         let store = dir.path().join("store");
         fs::create_dir_all(&store).expect("mkdir");
 
-        let error = export_snapshot(&store, &outside, &dir.path().join("out.rdstat"))
+        let error = export_snapshot(&store, &outside, dir.path())
             .expect_err("a source outside the store must be refused");
         assert!(error.contains("not in this app's snapshot store"), "got {error}");
     }
@@ -311,10 +336,12 @@ mod tests {
         fs::create_dir_all(&store).expect("mkdir");
         let source = store.join("a.rdstat");
         fs::write(&source, b"payload").expect("write");
-        let destination = dir.path().join("taken.rdstat");
+        let out = dir.path().join("out");
+        fs::create_dir_all(&out).expect("mkdir");
+        let destination = out.join("a.rdstat");
         fs::write(&destination, b"do not lose me").expect("write");
 
-        let error = export_snapshot(&dir.path().join("store"), &source, &destination)
+        let error = export_snapshot(&dir.path().join("store"), &source, &out)
             .expect_err("must refuse to clobber");
         assert!(error.contains("already exists"), "got {error}");
         assert_eq!(fs::read(&destination).expect("read"), b"do not lose me");
@@ -328,11 +355,13 @@ mod tests {
         fs::create_dir_all(&store).expect("mkdir");
         let source = store.join("a.rdstat");
         fs::write(&source, b"exact bytes").expect("write");
-        let destination = dir.path().join("copy.rdstat");
+        let out = dir.path().join("out");
 
-        let written = export_snapshot(&dir.path().join("store"), &source, &destination).expect("export");
-        assert_eq!(written, 11);
-        assert_eq!(fs::read(&destination).expect("read"), b"exact bytes");
+        let written = export_snapshot(&dir.path().join("store"), &source, &out).expect("export");
+        // The exported file keeps the snapshot's own name, so a user with
+        // several exports can tell them apart.
+        assert_eq!(written.file_name().expect("name"), "a.rdstat");
+        assert_eq!(fs::read(&written).expect("read"), b"exact bytes");
     }
 
     #[test]
@@ -343,9 +372,7 @@ mod tests {
         let source = store.join("a.rdstat");
         fs::write(&source, b"x").expect("write");
 
-        assert!(export_snapshot(&dir.path().join("store"), &source, Path::new("relative.rdstat")).is_err());
-        assert!(
-            export_snapshot(&dir.path().join("store"), &source, &dir.path().join("../escape.rdstat")).is_err()
-        );
+        assert!(export_snapshot(&dir.path().join("store"), &source, Path::new("relative")).is_err());
+        assert!(export_snapshot(&dir.path().join("store"), &source, &dir.path().join("../escape")).is_err());
     }
 }

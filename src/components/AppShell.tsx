@@ -26,6 +26,7 @@
  * tree and the route is enabled as soon as a scan exists.
  */
 
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useQueryClient } from "@tanstack/react-query";
 import type { SortingState } from "@tanstack/react-table";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -34,6 +35,7 @@ import { DetailsPanel } from "@/components/DetailsPanel";
 import { DriveSwitcher } from "@/components/DriveSwitcher";
 import { RelocateDialog } from "@/components/RelocateDialog";
 import { SelectionActions } from "@/components/SelectionActions";
+import { StoragePanel } from "@/components/StoragePanel";
 import { CategoryLegend } from "@/components/canvas/CategoryLegend";
 import {
   HierarchyCanvas,
@@ -59,6 +61,7 @@ import { formatSI } from "@/lib/format";
 import { categoryOf } from "@/lib/categories";
 import {
   nodeDetails,
+  exportSnapshot,
   revealInFinder,
   scanCancel,
   restoreSnapshot,
@@ -81,6 +84,7 @@ import {
   useScanDiff,
   useScanStatus,
   useSnapshotOffers,
+  useStorageReport,
   useVolumes,
   useSizeBands,
 } from "@/lib/queries";
@@ -155,6 +159,9 @@ export function AppShell() {
   // Which drives can be restored rather than rescanned. Header-only on the
   // backend, so this is cheap enough to keep fresh alongside the volume list.
   const offers = useSnapshotOffers();
+  // Only while the panel is open: reading this walks the store directory and
+  // peeks every file, which is cheap but not free.
+  const storage = useStorageReport(route === "storage");
 
   const [sorting, setSorting] = useState<SortingState>([{ id: "logical", desc: true }]);
   const [starting, setStarting] = useState(false);
@@ -478,6 +485,7 @@ export function AppShell() {
       <Titlebar
         crumbs={crumbs}
         onNavigate={handleCrumbNavigate}
+        onOpenSettings={() => setRoute("storage")}
         leadingActions={
           generation !== GENERATION_NONE && (
             <DriveSwitcher
@@ -525,6 +533,15 @@ export function AppShell() {
               disabled={generation === GENERATION_NONE}
             />
           ))}
+
+          {/* Below a spacer: this is about the app's own data rather than the
+            * scanned volume's, so it does not belong in the same run as the
+            * views. Never disabled — what the app has stored is a question you
+            * can ask before you have scanned anything, and the honest answer
+            * then is "nothing yet". */}
+          <div className="mt-auto pt-2">
+            <RailButton id="storage" label="Stored data" route={route} onSelect={setRoute} />
+          </div>
         </nav>
 
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -547,6 +564,28 @@ export function AppShell() {
                 <span className="sr-only">Dismiss this message</span>
               </button>
             </Alert>
+          )}
+
+          {route === "storage" && (
+            <StoragePanel
+              report={storage.data ?? null}
+              loading={storage.isLoading}
+              onRevealDirectory={() => {
+                const directory = storage.data?.directory;
+                // Reveal rather than open: the store holds the app's own data
+                // and the user wants to SEE it, not have something try to
+                // interpret a 960 MB binary.
+                if (directory !== undefined) void revealItemInDir(directory);
+              }}
+              onExport={(snapshot) => {
+                setActionError(null);
+                exportSnapshot(snapshot.path)
+                  .then((written) => setActionError(`Exported to ${written}`))
+                  .catch((cause: unknown) => {
+                    setActionError(cause instanceof Error ? cause.message : String(cause));
+                  });
+              }}
+            />
           )}
 
           {route === "volumes" && <VolumePicker onScan={(root) => void handleScan(root)} busy={starting} />}

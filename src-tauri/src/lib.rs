@@ -86,6 +86,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::trash_preview,
             commands::move_to_trash,
             commands::reveal_in_finder,
+            commands::storage_report,
+            commands::export_snapshot,
             commands::relocate_plan,
             commands::relocate_apply,
         ])

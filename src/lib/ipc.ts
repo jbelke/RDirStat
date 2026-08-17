@@ -1008,6 +1008,87 @@ export async function revealInFinder(generation: number, node: number): Promise<
 }
 
 // ---------------------------------------------------------------------------
+// Stored data
+// ---------------------------------------------------------------------------
+
+export interface StoredSnapshotView {
+  readonly path: string;
+  readonly rootPath: string;
+  readonly device: number;
+  readonly takenUnixMs: number;
+  readonly nodes: number;
+  readonly directories: number;
+  /** What the snapshot file costs on disk. */
+  readonly bytes: number;
+  /** What it is *about* — the volume it measured. A different quantity. */
+  readonly logical: number;
+  readonly allocated: number;
+  readonly toolVersion: string;
+}
+
+export interface UnreadableSnapshotView {
+  readonly path: string;
+  readonly bytes: number;
+  readonly reason: string;
+}
+
+export interface StorageReportView {
+  readonly directory: string;
+  readonly directoryExists: boolean;
+  readonly snapshots: readonly StoredSnapshotView[];
+  readonly unreadable: readonly UnreadableSnapshotView[];
+  readonly totalBytes: number;
+  readonly truncated: boolean;
+  /**
+   * False in every current build. The DuckDB/Parquet catalog in
+   * docs/06-DATA.md is a documented future phase, and the UI says so rather
+   * than rendering an empty database that reads as broken.
+   */
+  readonly catalogPresent: boolean;
+}
+
+/** Everything the app keeps on disk. Peeks headers only; never decodes an arena. */
+export async function storageReport(): Promise<StorageReportView> {
+  const report = await unwrap("storage_report", commands.storageReport());
+  return {
+    directory: report.directory,
+    directoryExists: report.directory_exists,
+    snapshots: report.snapshots.map((snapshot) => ({
+      path: snapshot.path,
+      rootPath: snapshot.root_path,
+      device: num(snapshot.device),
+      takenUnixMs: num(snapshot.taken_unix_ms),
+      nodes: num(snapshot.nodes),
+      directories: num(snapshot.directories),
+      bytes: num(snapshot.bytes),
+      logical: num(snapshot.logical),
+      allocated: num(snapshot.allocated),
+      toolVersion: snapshot.tool_version,
+    })),
+    unreadable: report.unreadable.map((entry) => ({
+      path: entry.path,
+      bytes: num(entry.bytes),
+      reason: entry.reason,
+    })),
+    totalBytes: num(report.total_bytes),
+    truncated: report.truncated,
+    catalogPresent: report.catalog_present,
+  };
+}
+
+/**
+ * Copy one stored snapshot somewhere the user chose.
+ *
+ * Byte-for-byte, so the original checksum still verifies on a later restore.
+ * The backend refuses a source outside the store and refuses to overwrite, and
+ * resolves the destination itself — the webview has no business knowing where
+ * the user's home is. Empty means Downloads. Returns the path written.
+ */
+export async function exportSnapshot(source: string, destinationDir = ""): Promise<string> {
+  return unwrap("export_snapshot", commands.exportSnapshot(source, destinationDir));
+}
+
+// ---------------------------------------------------------------------------
 // Snapshots
 // ---------------------------------------------------------------------------
 

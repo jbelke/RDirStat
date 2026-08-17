@@ -80,6 +80,18 @@ pub(crate) struct SnapshotStore {
     root: PathBuf,
 }
 
+impl SnapshotStore {
+    /// Where the store lives.
+    ///
+    /// Exposed read-only so [`crate::storage`] can describe the directory and
+    /// bound an export to it. That module never writes here — writing,
+    /// pruning and restoring stay in this file, because two implementations of
+    /// the pruning invariant is one too many.
+    pub(crate) fn directory(&self) -> &Path {
+        &self.root
+    }
+}
+
 /// What is on disk for one root, without decoding it.
 ///
 /// Enough to label a menu item honestly — "Restore scan from 14:32, 12.3M

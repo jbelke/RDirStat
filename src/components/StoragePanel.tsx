@@ -29,38 +29,8 @@ import { AlertTriangle, Database, Download, FolderOpen, HardDrive, Info } from "
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { formatSI } from "@/lib/format";
+import type { StorageReportView, StoredSnapshotView } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
-
-export interface StoredSnapshotView {
-  readonly path: string;
-  readonly rootPath: string;
-  readonly device: number;
-  readonly takenUnixMs: number;
-  readonly nodes: number;
-  readonly directories: number;
-  /** What the snapshot file costs on disk. */
-  readonly bytes: number;
-  /** What the snapshot is *about* — the volume it measured. */
-  readonly logical: number;
-  readonly allocated: number;
-  readonly toolVersion: string;
-}
-
-export interface UnreadableSnapshotView {
-  readonly path: string;
-  readonly bytes: number;
-  readonly reason: string;
-}
-
-export interface StorageReportView {
-  readonly directory: string;
-  readonly directoryExists: boolean;
-  readonly snapshots: readonly StoredSnapshotView[];
-  readonly unreadable: readonly UnreadableSnapshotView[];
-  readonly totalBytes: number;
-  readonly truncated: boolean;
-  readonly catalogPresent: boolean;
-}
 
 export interface StoragePanelProps {
   report: StorageReportView | null;
@@ -104,8 +74,9 @@ export function StoragePanel({
           Stored data
         </h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          Every completed scan is saved so it can be reopened instantly instead of rescanned. This is
-          everything RDirStat keeps on your disk.
+          Every completed scan is saved so it can be reopened instantly instead of rescanned. Two are
+          kept per volume and older ones are removed automatically — this is a cache, not a history.
+          <strong className="font-medium text-foreground"> Export a scan to keep it.</strong>
         </p>
       </header>
 

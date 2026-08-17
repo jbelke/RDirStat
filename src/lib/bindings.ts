@@ -296,6 +296,38 @@ export const commands = {
 	 */
 	revealInFinder: (generation: TreeGeneration, node: NodeId) => typedError<null, ActionError>(__TAURI_INVOKE("reveal_in_finder", { generation, node })),
 	/**
+	 *  What the app has stored on disk.
+	 * 
+	 *  Reads the snapshot store's directory and peeks each file's header — never
+	 *  decodes an arena, so this stays kilobytes per file rather than the hundreds
+	 *  of megabytes one holds. Safe to call whenever the panel opens.
+	 * 
+	 *  # Errors
+	 * 
+	 *  Never. A store that does not exist yet is an empty report, not a failure:
+	 *  that is the ordinary state of a fresh install and the panel still has to
+	 *  render.
+	 */
+	storageReport: () => typedError<StorageReport, CommandError>(__TAURI_INVOKE("storage_report")),
+	/**
+	 *  Copies one stored snapshot to a path the user chose.
+	 * 
+	 *  `destination_dir` is the folder to write into; empty means the user's
+	 *  Downloads folder. The snapshot keeps its own filename, and the full path
+	 *  written is returned so the UI can say where it went.
+	 * 
+	 *  A byte-for-byte copy, so the original checksum still verifies when the file
+	 *  is restored later. Both paths are validated against the store rather than
+	 *  trusted: `source` must be inside it, and neither may be relative or contain
+	 *  `..`. Without that this command is an arbitrary-file-read primitive.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`CommandError::Internal`] carrying the reason — a source outside the
+	 *  store, a destination that already exists, or any I/O failure.
+	 */
+	exportSnapshot: (source: string, destinationDir: string) => typedError<string, CommandError>(__TAURI_INVOKE("export_snapshot", { source, destinationDir })),
+	/**
 	 *  What a relocation would do, plus the token that authorizes it.
 	 * 
 	 *  Returns a plan even when the relocation cannot proceed: the reasons are the
@@ -2240,6 +2272,56 @@ export type StartError =
 /**  Anything unexpected, already logged with its full source chain. */
 { kind: "internal"; detail: string };
 
+/**  Everything the app has on disk. */
+export type StorageReport = {
+	/**  `<app data>/snapshots`. Shown so the user can open it themselves. */
+	directory: string,
+	/**  Whether that directory exists yet — it does not until the first scan. */
+	directory_exists: boolean,
+	snapshots: StoredSnapshot[],
+	unreadable: UnreadableSnapshot[],
+	/**
+	 *  Total bytes of every snapshot file, readable or not. This is the number
+	 *  that answers "what is this app costing me".
+	 */
+	total_bytes: number,
+	/**
+	 *  True when more files were found than [`MAX_REPORTED`], so the UI can say
+	 *  the list is partial rather than implying it is complete.
+	 */
+	truncated: boolean,
+	/**
+	 *  **False in every current build.** See the module docs: the DuckDB
+	 *  catalog is a documented future phase, not a missing feature, and the UI
+	 *  says so rather than showing an empty database panel.
+	 */
+	catalog_present: boolean,
+};
+
+/**  One stored snapshot, described without decoding its arena. */
+export type StoredSnapshot = {
+	/**  Absolute path to the `.rdstat` file, so the user can find it in Finder. */
+	path: string,
+	/**  The root that was scanned. */
+	root_path: string,
+	/**  `st_dev` of the volume it was scanned from. */
+	device: number,
+	/**  When the scan behind it finished, Unix milliseconds. */
+	taken_unix_ms: number,
+	nodes: number,
+	directories: number,
+	/**  Size of the snapshot file itself — what it costs to keep. */
+	bytes: number,
+	/**
+	 *  Logical bytes the scan measured. What the snapshot is *about*, as
+	 *  opposed to what it costs.
+	 */
+	logical: number,
+	allocated: number,
+	/**  The build that wrote it, so an unreadable one has a suspect. */
+	tool_version: string,
+};
+
 /**  What happened to one item in a Trash request. */
 export type TrashItemResult = {
 	/**  The selected node. */
@@ -2328,6 +2410,20 @@ export type TrashReport = {
  *  failed scan never produces a generation.
  */
 export type TreeGeneration = number;
+
+/**
+ *  A snapshot file that could not be read.
+ * 
+ *  Reported rather than skipped. A file sitting in the store consuming disk
+ *  that the app cannot open is exactly the thing a storage panel exists to
+ *  surface — silently omitting it would make the panel's total disagree with
+ *  Finder's for no visible reason.
+ */
+export type UnreadableSnapshot = {
+	path: string,
+	bytes: number,
+	reason: string,
+};
 
 /**  The canvas region a layout is computed for. */
 export type Viewport = {

@@ -40,6 +40,7 @@ import {
   sizeBandEntries,
   sizeBands,
   snapshotOffers,
+  storageReport,
   volumes,
   type AncestorRow,
   type ChildPageView,
@@ -57,6 +58,7 @@ import {
   type SizeBandView,
   type SnapshotOfferView,
   type Sort,
+  type StorageReportView,
   type VolumeRow,
 } from "@/lib/ipc";
 import { MAX_REPORT_ENTRIES as BINDINGS_MAX_REPORT_ENTRIES } from "@/lib/bindings";
@@ -88,6 +90,7 @@ export const queryKeys = {
   scanErrors: () => ["scanErrors"] as const,
   volumes: () => ["volumes"] as const,
   snapshotOffers: () => ["snapshotOffers"] as const,
+  storageReport: () => ["storageReport"] as const,
   children: (generation: number, parent: number, sort: Sort) =>
     ["children", generation, parent, sort.key, sort.direction] as const,
   details: (generation: number, node: number) => ["details", generation, node] as const,
@@ -213,6 +216,22 @@ export function useSnapshotOffers(): UseQueryResult<SnapshotOfferView[], Error> 
     queryKey: queryKeys.snapshotOffers(),
     queryFn: snapshotOffers,
     staleTime: 15_000,
+  });
+}
+
+/**
+ * What the app keeps on disk.
+ *
+ * `enabled` is the panel's disclosure state: reading this walks the store
+ * directory and peeks every file, so it should happen when someone is looking
+ * at it and not on every render of the shell.
+ */
+export function useStorageReport(enabled: boolean): UseQueryResult<StorageReportView, Error> {
+  return useQuery({
+    queryKey: queryKeys.storageReport(),
+    queryFn: storageReport,
+    enabled,
+    staleTime: 5_000,
   });
 }
 
