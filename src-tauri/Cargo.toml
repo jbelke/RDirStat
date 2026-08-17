@@ -1,0 +1,50 @@
+#                       rdirstat — the Tauri desktop shell
+#
+# A member of the root workspace (see /Cargo.toml, owned by the CONTRACT agent).
+# Everything shared — edition, MSRV, version, licence, lints, profiles — is
+# inherited, never re-declared here. `src-tauri/src/**` is owned by the app
+# author; this manifest is not.
+
+[package]
+name = "rdirstat"
+description = "RDirStat — disk usage and file inventory for macOS"
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+publish.workspace      = true
+
+[lints]
+workspace = true
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "rdirstat_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+# Tauri's own crates are pinned here rather than in [workspace.dependencies]
+# because no other member links against them.
+# No "macos-private-api": `titleBarStyle: "Overlay"` is a public NSWindow
+# style and needs no private API. Enabling it would also disable App Store
+# eligibility for no gain.
+tauri = { version = "2.11.5", features = [] }
+tauri-plugin-opener = "2.5.4"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The workspace reserves anyhow for rdirstat-cli and src-tauri
+# (docs/08-RUST-PRACTICES.md): the shell converts to a typed IPC error at the
+# boundary, libraries use thiserror.
+anyhow = { workspace = true }
+
+# NOTE: there is deliberately no [profile.*] here. Cargo ignores profiles in a
+# non-root workspace member; /Cargo.toml sets `lto = "thin"`, `codegen-units = 1`
+# and, deliberately, no `panic = "abort"`.

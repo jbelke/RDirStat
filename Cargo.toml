@@ -1,0 +1,118 @@
+#                            STELLAR-RDIRSTAT workspace
+#
+# This file is owned by the CONTRACT agent. Sibling crates inherit everything
+# below with `workspace = true` and never re-declare a version, a lint, or a
+# profile locally. See `crates/rdirstat-core/src/lib.rs` for the shared type and
+# IPC contract that these crates are built against.
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/*",
+    # The Tauri shell joins the workspace as soon as `src-tauri/Cargo.toml`
+    # exists. Cargo refuses to load a workspace that names a missing member, so
+    # the entry stays commented until then. The src-tauri owner uncomments the
+    # next line in the SAME change that creates that manifest. Nobody else
+    # edits this file.
+    "src-tauri",
+]
+
+[workspace.package]
+edition      = "2024"
+rust-version = "1.90"        # MSRV; the exact toolchain is in rust-toolchain.toml
+version      = "0.1.0"
+license      = "MIT"
+repository   = "https://github.com/jbelke/RDirStat"
+authors      = ["STELLAR-RDIRSTAT contributors"]
+publish      = false
+
+# ---------------------------------------------------------------------------
+# Lints: configured once, here (docs/08-RUST-PRACTICES.md).
+#
+# `unsafe_code` is "deny", not "forbid", because `rdirstat-scan::sys::bulk`
+# lowers it locally for the audited `getattrlistbulk(2)` parser and `forbid`
+# cannot be overridden. Every crate that contains no `unsafe` at all carries
+# `#![forbid(unsafe_code)]` in its own lib.rs instead; `rdirstat-core` does.
+# ---------------------------------------------------------------------------
+
+[workspace.lints.rust]
+unsafe_code                   = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub               = "warn"
+rust_2018_idioms              = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+pedantic                 = { level = "warn", priority = -1 }
+unwrap_used              = "deny"
+expect_used              = "warn"
+panic                    = "deny"
+todo                     = "deny"
+dbg_macro                = "deny"
+cast_possible_truncation = "deny"   # u64 sizes become f32 for layout
+mem_forget               = "deny"
+float_cmp                = "deny"
+
+# ---------------------------------------------------------------------------
+# Shared dependency versions. A crate writes `foo = { workspace = true }` and
+# adds only the features it needs; it never writes a version string.
+# ---------------------------------------------------------------------------
+
+[workspace.dependencies]
+# --- internal ---
+rdirstat-core     = { path = "crates/rdirstat-core" }
+rdirstat-scan     = { path = "crates/rdirstat-scan" }
+rdirstat-classify = { path = "crates/rdirstat-classify" }
+rdirstat-treemap  = { path = "crates/rdirstat-treemap" }
+# Phase 6 only. Cargo refuses to load a path dependency whose manifest is
+# missing, so this stays commented until `crates/rdirstat-catalog/` exists. The
+# `crates/*` member glob picks the crate up automatically once it does.
+# rdirstat-catalog  = { path = "crates/rdirstat-catalog" }
+
+# --- scan path ---
+rayon             = "1.12.0"
+crossbeam-channel = "0.5.16"
+libc              = "0.2.180"      # 1.0 is still an alpha; do not adopt it
+arc-swap          = "1.7.1"
+smallvec          = "1.15.1"
+memchr            = "2.7.6"
+
+# --- errors ---
+thiserror         = "2.0.20"       # libraries only
+anyhow            = "1.0.104"      # rdirstat-cli and src-tauri only
+
+# --- observability ---
+tracing            = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-chrome     = "0.7.2"
+
+# --- wire formats ---
+arrow        = "59.2.0"
+serde        = { version = "1.0.229", features = ["derive"] }
+serde_json   = "1.0.145"
+specta       = { version = "=2.0.0-rc.25", features = ["derive"] }
+tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
+
+# --- macOS actions ---
+trash = "5.2.6"
+
+# --- cli ---
+clap = { version = "4.5.53", features = ["derive"] }
+
+# --- dev / test / bench ---
+tempfile  = "3.27.0"
+criterion = "0.8.2"
+insta     = "1.44.0"
+proptest  = "1.9.0"
+
+# ---------------------------------------------------------------------------
+# Profiles. `panic = "abort"` is deliberately absent: Cargo cannot give the app
+# and the CLI different panic strategies through a per-package profile, and the
+# crash-reporting consequences must be documented before that changes.
+# ---------------------------------------------------------------------------
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+
+[profile.bench]
+debug = true          # so profiles have symbols

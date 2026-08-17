@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "skipLibCheck": true,
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    /* A composite project may not disable emit (TS6310), so send the output
+     * somewhere already ignored instead. Nothing consumes it; Vite loads
+     * vite.config.ts through esbuild, not through tsc. */
+    "outDir": "./node_modules/.tmp/tsconfig-node",
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig-node.tsbuildinfo"
+  },
+  "include": ["vite.config.ts"]
+}

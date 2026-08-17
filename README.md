@@ -14,15 +14,22 @@ differ from "bytes physically reclaimable."
 
 ## Status
 
-**Design complete; no application code yet.**
+**Design complete; phase 0 scaffold in place, no application logic yet.**
 
-This repository currently holds the design contract (`docs/`), the agent skills
-carried into the project (`skills/`), and an index of six third-party reference
-checkouts (`reference-code/`). There is no Rust workspace: paths such as
-`crates/`, `src-tauri/`, and `src/` appear throughout the docs as the *planned*
-layout, not directories that exist. Phase 0 in
-[docs/07-BUILD-PHASES.md](docs/07-BUILD-PHASES.md) is the entry point that
-creates them.
+Alongside the design contract (`docs/`), the agent skills carried into the
+project (`skills/`), and an index of six third-party reference checkouts
+(`reference-code/`), the repository now has the phase-0 skeleton: the Cargo
+workspace (`Cargo.toml`, `rust-toolchain.toml`, `crates/`), the Tauri v2 desktop
+shell (`src-tauri/`), and the React 19 + Vite + Tailwind v4 frontend (`src/`).
+Nothing scans a disk yet — the crates are contract stubs and the window renders
+the generator's placeholder view. Phase 0 in
+[docs/07-BUILD-PHASES.md](docs/07-BUILD-PHASES.md) is the entry point.
+
+```bash
+pnpm install        # frontend dependencies (pnpm 10.30.1)
+pnpm build          # typecheck + production frontend bundle
+cargo tauri dev     # run the desktop shell
+```
 
 ## Start here
 
