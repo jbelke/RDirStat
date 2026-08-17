@@ -22,8 +22,22 @@
  */
 
 import { type ColorBy, type LegendEntry, legendEntries } from "./palette.ts";
+import { SegmentedControl } from "@/components/SegmentedControl";
 import { categoryOf } from "@/lib/categories";
 import { cn } from "@/lib/utils";
+
+const COLOR_BY_OPTIONS = [
+  {
+    value: "family" as ColorBy,
+    label: "Family",
+    title: "Five headings — legible at tile size on a whole-volume scan",
+  },
+  {
+    value: "category" as ColorBy,
+    label: "Category",
+    title: "All 25 categories — useful once a drill-down has narrowed the view",
+  },
+];
 
 export interface CategoryLegendProps {
   colorBy: ColorBy;
@@ -61,28 +75,19 @@ export function CategoryLegend({
         className,
       )}
     >
-      <span className="text-xs font-medium text-muted-foreground">Colour</span>
-
+      {/* The same segmented control the layout and metric toggles use, rather
+        * than a third bespoke style. It is also the reason the "Colour" label
+        * is gone: the swatches to the right already say the row is about
+        * colour, so the word was restating what the user can see. The control
+        * carries the meaning in its accessible name instead, where it costs no
+        * horizontal space and still reaches a screen reader. */}
       {onColorByChange !== undefined && (
-        <div role="radiogroup" aria-label="Colour tiles by" className="flex items-center gap-0.5">
-          {(["family", "category"] as const).map((mode) => (
-            <button
-              key={mode}
-              type="button"
-              role="radio"
-              aria-checked={colorBy === mode}
-              onClick={() => onColorByChange(mode)}
-              className={cn(
-                "rounded px-1.5 py-0.5 text-xs capitalize transition-colors",
-                colorBy === mode
-                  ? "bg-accent font-medium text-accent-foreground"
-                  : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
-              )}
-            >
-              {mode}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl
+          label="Colour tiles by"
+          options={COLOR_BY_OPTIONS}
+          value={colorBy}
+          onChange={onColorByChange}
+        />
       )}
 
       <ul className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
