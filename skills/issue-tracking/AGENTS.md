@@ -20,11 +20,11 @@ this repository. Unlike the other three project-carried skills it has no
 ## Local Contracts
 
 - Follow `SKILL.md`. Do not paraphrase it here.
-- **The binary is installed; the workspace is not.** `bd version 1.0.4` resolves
-  on `PATH`, so every command in `SKILL.md` is runnable — what is missing is a
-  workspace, not a tool. This project also is not a git repository yet, and
-  beads needs one: its data rides the git remote on `refs/dolt/data` and its
-  sync path is git hooks. Activation is a phase-0 question, not a today one.
+- **This skill went live during phase 0.** The repository was initialized and
+  `bd init` ran on 2026-08-17, so `.beads/` exists, the build phases are filed
+  as epics, and the activation gate in `SKILL.md` now opens. `.beads/` is
+  tracked (config plus the `issues.jsonl` export); only the local Dolt working
+  database is ignored, so a fresh clone sees the backlog.
 - **The procedure is pinned to a `bd` version, and that is its maintenance
   burden.** Every command in `SKILL.md` was verified against 1.0.4, including
   the ones recorded as failing — `bd sync` is named there because an earlier
@@ -43,16 +43,15 @@ this repository. Unlike the other three project-carried skills it has no
 
 ## Work Guidance
 
-The skill self-disables here and the parent records why. What would make it live
-is a `.beads/` directory, which belongs to the phase that starts tracking work in
-beads instead of in prose — see [`../../docs/07-BUILD-PHASES.md`](../../docs/07-BUILD-PHASES.md)
-for that ordering. Until then, read `SKILL.md` for the shape of the workflow and
-leave it unrun.
+Follow `SKILL.md` — the gate is open, and the backlog is where the build phases
+in [`../../docs/07-BUILD-PHASES.md`](../../docs/07-BUILD-PHASES.md) now live as
+epics. Claim before editing, and land a session the way the skill's landing
+sequence says.
 
-If it does become live, two things need re-deciding before the first session
-leans on it: the `bd` version the Command Traps table was verified against, and
-whether this project has gates yet to fill step 2 of the landing sequence
-("run quality gates"), which today names no command because none exists.
+One step of that sequence has no target yet: "run quality gates" names no
+command, because `justfile` and CI do not exist even though phase 0 specifies
+both. Until they do, run the checks by hand and say which ones you ran rather
+than reporting a gate that did not execute.
 
 ## Verification
 

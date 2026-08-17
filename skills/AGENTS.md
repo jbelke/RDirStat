@@ -15,7 +15,7 @@ in place of improvising.
 | `steward-stellar-docs/` | The documentation pass: re-scan, repair, and extend the `AGENTS.md` chain as a delta against a committed snapshot | Yes — this chain was authored under it |
 | `consult-council-approval/` | The advisory-council gate: route a decision with real trade-offs to one of seven chartered councils, collect falsifiable seat positions, close with the chair's call and its reversal evidence | Partly — the method transfers, the CoCO wiring does not |
 | `desktop-screenshot/` | Capturing desktop screenshots through a Playwright mock bridge and publishing them as immutable git-backed PR URLs | Not yet — see below |
-| `issue-tracking/` | Beads workflow, deliberately self-disabled unless a root `.beads/` exists | No — this project has no `.beads/` |
+| `issue-tracking/` | Beads workflow, gated on a root `.beads/` existing | Yes — phase 0 ran `bd init`, so the gate is open and the build phases are filed as epics |
 | `rust-skills/` | Installed general Rust guidance (source/integrity pinned by root `skills-lock.json`) | Later — only while writing/reviewing Rust, subordinate to `docs/08-RUST-PRACTICES.md` |
 
 Every skill folder has `SKILL.md`. `steward-stellar-docs/`,
@@ -37,16 +37,17 @@ Installed/external skill shapes are not rewritten to match.
   binding text; the `AGENTS.md` beside it says what the folder owns and points at
   it. Two copies of a procedure drift, and the copy that drifts is the one the
   reader happens to open.
-- **A skill's Verification is the gate it actually closes on.** All three of
-  these close on repo commands (`just check-stellar`, `just check-skills`) that
-  do not exist in this project. Leave that stated, not silently dropped — an
-  aspirational gate reads as one that runs.
+- **A skill's Verification is the gate it actually closes on.** Phase 0 now
+  provides `just check-stellar` and `just check-skills` as aliases of the
+  repository documentation/skill validator. Keep those commands runnable when
+  changing the task surface.
 - **Changing a skill's frontmatter `description` changes when it fires.** It is
   the routing surface, not documentation. Treat an edit to it as a behaviour
   change.
-- **`issue-tracking` is inactive here.** Its own activation contract says not to
-  run `bd init` when `.beads/` is absent. Carrying a skill is not authorization
-  to introduce its state system.
+- **`issue-tracking` went live in phase 0.** It was dormant while `.beads/` was
+  absent — carrying a skill is not authorization to introduce its state system —
+  and `bd init` ran as part of repository initialization, not on a skill's
+  initiative. Work is now tracked in beads rather than in prose.
 - **Project Rust law wins.** `rust-skills` is broad external guidance;
   `docs/08-RUST-PRACTICES.md` is the narrower binding contract for this project.
   A conflict is resolved in favour of `08` and recorded there if recurring.
@@ -65,16 +66,8 @@ leaves the skill describing a repository that is not this one.
 
 ## Verification
 
-None — no skills linter exists in this repository. The carried skill files name
-`just check-skills`, but no `Justfile` exists. Until phase 0, check by hand that
-every folder has `SKILL.md` frontmatter with matching `name`, and that every
-installed skill has a matching lock entry.
-
-```bash
-for d in skills/*/; do
-  test -f "$d/SKILL.md" || echo "missing SKILL.md: $d"
-done
-```
+Run `just check-skills`. It verifies every project-carried `SKILL.md`
+frontmatter name and requires a lock entry for each installed skill symlink.
 
 ## Child STELLAR Index
 
