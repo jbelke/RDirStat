@@ -1,0 +1,353 @@
+/**
+ * Application composition.
+ *
+ * This is the only component that knows about all the others, and the only one
+ * that owns cross-cutting lifecycle:
+ *
+ * - **Generation change is the app's one real invalidation event.** When
+ *   `scan_status` reports a new `TreeGeneration`, every cached page and every
+ *   selected NodeId from the previous generation becomes meaningless — the
+ *   arena they indexed is gone. `dropStaleGenerations` evicts the Query cache
+ *   and `syncGeneration` drops selection, focus, and the navigation stack. Both
+ *   have to happen together, which is why neither lives in a component that
+ *   could unmount.
+ * - **Completion is a state transition, never an inference.** The strip
+ *   animates from the 10 Hz event, but "the scan is done" comes from
+ *   `scan_status`, exactly as the contract requires.
+ *
+ * The left rail lists the routes docs/05 specifies. The five that need a
+ * completed catalog scan are visibly present and disabled with the reason,
+ * rather than hidden: a missing feature the user can see and understand beats a
+ * navigation model that changes shape.
+ */
+
+import { useQueryClient } from "@tanstack/react-query";
+import type { SortingState } from "@tanstack/react-table";
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import { DetailsPanel } from "@/components/DetailsPanel";
+import { ScanAlerts } from "@/components/ScanAlerts";
+import { ScanProgressStrip, useScanProgress } from "@/components/ScanProgressStrip";
+import { SegmentedControl } from "@/components/SegmentedControl";
+import { Titlebar, type Crumb } from "@/components/Titlebar";
+import { TreeTable } from "@/components/TreeTable";
+import { VolumePicker } from "@/components/VolumePicker";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { formatSI } from "@/lib/format";
+import { revealInFinder, scanCancel, scanStart, type LayoutKind } from "@/lib/ipc";
+import {
+  dropStaleGenerations,
+  queryKeys,
+  useNodeDetails,
+  useScanStatus,
+} from "@/lib/queries";
+import { cn } from "@/lib/utils";
+import { GENERATION_NONE } from "@/lib/wire";
+import { useCurrentRoot, useSoleSelection, useUiStore, type Route } from "@/state/store";
+import { CircleAlert } from "lucide-react";
+
+const CATALOG_ROUTES: readonly { id: string; label: string }[] = [
+  { id: "types", label: "Types" },
+  { id: "sizes", label: "Sizes" },
+  { id: "ages", label: "Ages" },
+  { id: "diff", label: "Diff" },
+  { id: "dupes", label: "Dupes" },
+];
+
+const LAYOUT_OPTIONS = [
+  { value: "treemap" as LayoutKind, label: "Treemap", title: "Squarified — biggest single thing" },
+  { value: "icicle" as LayoutKind, label: "Icicle", title: "Depth on the y-axis — which deep path is heavy" },
+  { value: "sunburst" as LayoutKind, label: "Sunburst", title: "Best overview, worst drill-down" },
+];
+
+const METRIC_OPTIONS = [
+  { value: "logical" as const, label: "Logical", title: "File size as reported by the filesystem" },
+  { value: "allocated" as const, label: "Allocated", title: "Blocks actually occupied (st_blocks × 512)" },
+];
+
+export function AppShell() {
+  const client = useQueryClient();
+  const status = useScanStatus();
+  const progress = useScanProgress();
+
+  const route = useUiStore((state) => state.route);
+  const setRoute = useUiStore((state) => state.setRoute);
+  const generation = useUiStore((state) => state.generation);
+  const navStack = useUiStore((state) => state.navStack);
+  const selection = useUiStore((state) => state.selection);
+  const focused = useUiStore((state) => state.focused);
+  const layoutKind = useUiStore((state) => state.layoutKind);
+  const sizeMetric = useUiStore((state) => state.sizeMetric);
+  const syncGeneration = useUiStore((state) => state.syncGeneration);
+  const navigateTo = useUiStore((state) => state.navigateTo);
+  const navigateUpTo = useUiStore((state) => state.navigateUpTo);
+  const select = useUiStore((state) => state.select);
+  const setHovered = useUiStore((state) => state.setHovered);
+  const setLayoutKind = useUiStore((state) => state.setLayoutKind);
+  const setSizeMetric = useUiStore((state) => state.setSizeMetric);
+
+  const currentRoot = useCurrentRoot();
+  const soleSelection = useSoleSelection();
+
+  const [sorting, setSorting] = useState<SortingState>([{ id: "logical", desc: true }]);
+  const [starting, setStarting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const liveGeneration = status.data?.generation ?? GENERATION_NONE;
+  const scanState = status.data?.state ?? "idle";
+  const summary = status.data?.summary ?? null;
+  const activeScan = status.data?.activeScan ?? null;
+
+  // The one invalidation. Both halves, or neither.
+  const lastGeneration = useRef(GENERATION_NONE);
+  useEffect(() => {
+    if (lastGeneration.current === liveGeneration) return;
+    lastGeneration.current = liveGeneration;
+    dropStaleGenerations(client, liveGeneration);
+    syncGeneration(liveGeneration, status.data?.summary?.root ?? 0);
+  }, [liveGeneration, client, syncGeneration, status.data?.summary?.root]);
+
+  // A cancel is only "done" when the supervisor says so.
+  useEffect(() => {
+    if (scanState !== "scanning" && scanState !== "cancelling") setCancelling(false);
+  }, [scanState]);
+
+  const handleScan = useCallback(
+    async (root: string) => {
+      setActionError(null);
+      setStarting(true);
+      try {
+        await scanStart(root);
+        await client.invalidateQueries({ queryKey: queryKeys.scanStatus() });
+      } catch (cause) {
+        setActionError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        setStarting(false);
+      }
+    },
+    [client],
+  );
+
+  const handleCancel = useCallback(async () => {
+    if (activeScan === null) return;
+    setCancelling(true);
+    try {
+      await scanCancel(activeScan);
+      await client.invalidateQueries({ queryKey: queryKeys.scanStatus() });
+    } catch (cause) {
+      setCancelling(false);
+      setActionError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, [activeScan, client]);
+
+  const handleReveal = useCallback(
+    (node: number) => {
+      void revealInFinder(generation, node).catch((cause: unknown) => {
+        setActionError(cause instanceof Error ? cause.message : String(cause));
+      });
+    },
+    [generation],
+  );
+
+  // Trash needs `trash_preview` -> confirmation UI -> `move_to_trash`. The
+  // preview command exists in the contract; the confirmation sheet does not
+  // exist in this build, and issuing `move_to_trash` without showing the user
+  // what a generation-bound token covers would be worse than not offering it.
+  const handleTrash = useCallback((nodes: number[]) => {
+    setActionError(
+      `Move to Trash is not wired up in this build (${nodes.length} item${nodes.length === 1 ? "" : "s"} selected). ` +
+        "The confirmation sheet that binds a token to this generation has not been built, and issuing the action without it is not acceptable.",
+    );
+  }, []);
+
+  const crumbs = useCrumbs(generation, navStack, summary?.rootPath ?? null);
+  const rootDetails = useNodeDetails(generation, currentRoot);
+
+  return (
+    <div className="flex h-full flex-col">
+      <Titlebar crumbs={crumbs} onNavigate={(index) => navigateUpTo(index - 1)}>
+        {generation !== GENERATION_NONE && (
+          <Button variant="ghost" size="sm" onClick={() => setRoute("volumes")}>
+            Scan…
+          </Button>
+        )}
+      </Titlebar>
+
+      <div className="flex min-h-0 flex-1">
+        <nav aria-label="Views" className="flex w-32 shrink-0 flex-col gap-0.5 border-r border-border/60 p-2">
+          <RailButton id="volumes" label="Volumes" route={route} onSelect={setRoute} />
+          <RailButton
+            id="tree"
+            label="Tree"
+            route={route}
+            onSelect={setRoute}
+            disabled={generation === GENERATION_NONE}
+          />
+          {CATALOG_ROUTES.map((entry) => (
+            <button
+              key={entry.id}
+              type="button"
+              disabled
+              title="Requires a completed catalog scan. The catalog (DuckDB/Parquet) is not part of this build."
+              className="rounded px-2 py-1 text-left text-sm text-muted-foreground/40"
+            >
+              {entry.label}
+            </button>
+          ))}
+        </nav>
+
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {actionError !== null && (
+            <Alert variant="destructive" className="m-3">
+              <CircleAlert aria-hidden />
+              <AlertTitle>Action failed</AlertTitle>
+              <AlertDescription>{actionError}</AlertDescription>
+            </Alert>
+          )}
+
+          {route === "volumes" && <VolumePicker onScan={(root) => void handleScan(root)} busy={starting} />}
+
+          {route === "tree" && currentRoot !== null && (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <div className="flex items-center gap-3 border-b border-border/60 px-3 py-2">
+                <SegmentedControl
+                  label="Hierarchy layout"
+                  options={LAYOUT_OPTIONS}
+                  value={layoutKind}
+                  onChange={setLayoutKind}
+                />
+                <SegmentedControl
+                  label="Size metric"
+                  options={METRIC_OPTIONS}
+                  value={sizeMetric}
+                  onChange={setSizeMetric}
+                />
+                <span className="ml-auto text-xs text-muted-foreground">
+                  {rootDetails.data !== undefined && (
+                    <>
+                      {formatSI(
+                        sizeMetric === "logical"
+                          ? rootDetails.data.logical
+                          : rootDetails.data.allocated,
+                      )}{" "}
+                      in this subtree
+                    </>
+                  )}
+                </span>
+              </div>
+
+              {/* --------------------------------------------------------------
+                * The canvas hierarchy view mounts here.
+                *
+                * `src/components/canvas/**` is owned by another agent and is
+                * deliberately NOT imported: an import of a module that does not
+                * exist fails the build outright, which would take the whole
+                * shell down rather than degrade one pane.
+                *
+                * Wiring is one line — render the view with
+                * `generation`, `currentRoot`, `layoutKind`, and `sizeMetric`,
+                * calling `select`/`navigateTo` for click and double-click so
+                * tree <-> canvas selection sync stays bidirectional.
+                * ----------------------------------------------------------- */}
+              <div className="flex h-56 shrink-0 items-center justify-center border-b border-border/60 bg-card/40 text-xs text-muted-foreground">
+                Hierarchy view ({layoutKind}) renders here — owned by the canvas module.
+              </div>
+
+              <ScanAlerts summary={summary} className="p-3" />
+
+              <TreeTable
+                generation={generation}
+                root={currentRoot}
+                rootLogical={rootDetails.data?.logical ?? summary?.totals.logical ?? 0}
+                rootAllocated={rootDetails.data?.allocated ?? summary?.totals.allocated ?? 0}
+                sizeMetric={sizeMetric}
+                sorting={sorting}
+                onSortingChange={setSorting}
+                selection={selection}
+                focused={focused}
+                onSelect={select}
+                onDrillDown={navigateTo}
+                onHover={setHovered}
+                onReveal={handleReveal}
+                onTrash={(node) => handleTrash([node])}
+              />
+            </div>
+          )}
+        </main>
+
+        <DetailsPanel
+          generation={generation}
+          node={soleSelection}
+          selectionCount={selection.size}
+          onReveal={handleReveal}
+          onTrash={handleTrash}
+          onTrashDropped={handleTrash}
+        />
+      </div>
+
+      <ScanProgressStrip
+        state={scanState}
+        progress={progress}
+        cancelling={cancelling}
+        onCancel={() => void handleCancel()}
+      />
+    </div>
+  );
+}
+
+function RailButton({
+  id,
+  label,
+  route,
+  onSelect,
+  disabled = false,
+}: {
+  id: Route;
+  label: string;
+  route: Route;
+  onSelect: (route: Route) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      aria-current={route === id ? "page" : undefined}
+      onClick={() => onSelect(id)}
+      className={cn(
+        "rounded px-2 py-1 text-left text-sm transition-colors",
+        route === id ? "bg-accent font-medium text-accent-foreground" : "text-muted-foreground",
+        !disabled && "hover:bg-accent/60 hover:text-foreground",
+        disabled && "text-muted-foreground/40",
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
+/**
+ * Breadcrumb labels.
+ *
+ * Each ancestor's name comes from the same `node_details` cache entry the
+ * details panel uses, so navigating back up a path the user already visited
+ * costs nothing. The first crumb is the app name and is not navigable; the
+ * second is the scan root, labelled with its path rather than its basename so
+ * `/Volumes/tuf8tb` does not display as `tuf8tb › tuf8tb`.
+ */
+function useCrumbs(generation: number, navStack: readonly number[], rootPath: string | null): Crumb[] {
+  const crumbs: Crumb[] = [{ node: null, label: "RDirStat" }];
+  // Deliberately not `useQueries`: the stack is short (a drill-down path), and
+  // the details for every node on it are already resolved for the panel. This
+  // reads whatever is cached and falls back to the id, which is honest.
+  const client = useQueryClient();
+  for (const [index, node] of navStack.entries()) {
+    const cached = client.getQueryData<{ name: string }>(queryKeys.details(generation, node));
+    const label =
+      index === 0 ? (rootPath ?? cached?.name ?? "Scan root") : (cached?.name ?? `#${node}`);
+    crumbs.push({ node, label });
+  }
+  return crumbs;
+}

@@ -1,0 +1,197 @@
+/* =============================================================================
+ * RDirStat — categorical palette + app surface accents.
+ *
+ * docs/05-UI.md, "Color and formatting":
+ *
+ *   "Define the categorical palette once as CSS vars (`--cat-video`, …) with
+ *    light and dark values … and have Rust send *category indices* while the
+ *    frontend resolves colours."
+ *
+ * So: **no RGB ever crosses IPC**. `Node.category` is a `u8`; the frontend maps
+ * the index to a key (src/lib/categories.ts) and the key to a custom property
+ * declared here. Changing a colour is a CSS edit and never a Rust rebuild.
+ *
+ * Dark first, light derived — also docs/05: the reference surface is near-black
+ * and "doing it the other way produces washed-out category colors on black".
+ * The values below were authored against `--background: oklch(0.145 0 0)` and
+ * then darkened (L down, C up) for the light surface, not the reverse.
+ *
+ * Semantic grouping preserved from QDirStat *as a design idea only* (no literal
+ * was transcribed): waste and archives read warm, media reads cool, and
+ * Uncompressed Image is deliberately as red as junk because an uncompressed TIFF
+ * on a full disk is exactly as actionable as a cache.
+ *
+ * NOT DONE HERE, and it is a real gap: the automated contrast test and the
+ * colour-vision snapshots docs/05 requires. These values are hand-balanced in
+ * OKLCH (equal-ish L within a family) which makes them *plausible*, not
+ * *verified*.
+ * ========================================================================== */
+
+/* -----------------------------------------------------------------------------
+ * Light surface values (the default), derived from the dark set below.
+ * -------------------------------------------------------------------------- */
+:root {
+  /* The single saturated accent. Everything else on screen that is not a
+   * category chip or a bar is greyscale. */
+  --brand: oklch(0.52 0.24 295);
+  --brand-foreground: oklch(0.99 0 0);
+
+  /* Capacity-pressure ramp for the volume picker. Pressure is a *threshold*
+   * signal, not a gradient: green / amber / red at 75% / 90%. */
+  --pressure-ok: oklch(0.58 0.15 150);
+  --pressure-warn: oklch(0.62 0.15 75);
+  --pressure-critical: oklch(0.55 0.21 27);
+  --capacity-purgeable: oklch(0.72 0.03 260);
+  --capacity-free: oklch(0.9 0.01 260);
+
+  /* System */
+  --cat-uncategorized: oklch(0.62 0.015 260);
+  --cat-symlink: oklch(0.58 0.06 215);
+  --cat-executable: oklch(0.52 0.17 300);
+  --cat-apple-metadata: oklch(0.55 0.04 250);
+
+  /* Archives — warm */
+  --cat-compressed-archive: oklch(0.62 0.14 75);
+  --cat-uncompressed-archive: oklch(0.58 0.16 55);
+  --cat-compressed-stream: oklch(0.64 0.12 95);
+  --cat-disk-image: oklch(0.56 0.16 35);
+
+  /* Media — cool */
+  --cat-image: oklch(0.56 0.12 195);
+  --cat-raw-photo: oklch(0.54 0.13 215);
+  --cat-uncompressed-image: oklch(0.53 0.21 25); /* deliberately junk-red */
+  --cat-video: oklch(0.52 0.17 265);
+  --cat-audio: oklch(0.56 0.13 165);
+
+  /* Documents and code */
+  --cat-document: oklch(0.6 0.07 250);
+  --cat-source: oklch(0.56 0.14 145);
+  --cat-object-generated: oklch(0.55 0.09 110);
+  --cat-library: oklch(0.55 0.11 320);
+
+  /* Large runtime data */
+  --cat-vm-disk: oklch(0.54 0.15 345);
+  --cat-container-disk: oklch(0.57 0.13 15);
+
+  /* Anything the backend sends that this build does not know a key for. Kept
+   * visually distinct from Uncategorized(0), which is a *decision*, whereas
+   * this is a version skew between the category table and the UI. */
+  --cat-unknown: oklch(0.5 0.02 300);
+}
+
+/* -----------------------------------------------------------------------------
+ * Dark surface values — the authored set.
+ *
+ * Duplicated across `.dark` and the media query for the same reason index.css
+ * duplicates them: the default is "follow macOS", and `.light` / `.dark` force.
+ * -------------------------------------------------------------------------- */
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    --brand: oklch(0.62 0.22 295);
+    --brand-foreground: oklch(0.14 0 0);
+
+    --pressure-ok: oklch(0.74 0.15 150);
+    --pressure-warn: oklch(0.79 0.15 80);
+    --pressure-critical: oklch(0.66 0.21 25);
+    --capacity-purgeable: oklch(0.45 0.02 260);
+    --capacity-free: oklch(0.28 0.01 260);
+
+    --cat-uncategorized: oklch(0.62 0.02 260);
+    --cat-symlink: oklch(0.7 0.06 215);
+    --cat-executable: oklch(0.72 0.15 300);
+    --cat-apple-metadata: oklch(0.64 0.04 250);
+
+    --cat-compressed-archive: oklch(0.78 0.13 75);
+    --cat-uncompressed-archive: oklch(0.73 0.15 55);
+    --cat-compressed-stream: oklch(0.81 0.11 95);
+    --cat-disk-image: oklch(0.7 0.15 35);
+
+    --cat-image: oklch(0.77 0.12 195);
+    --cat-raw-photo: oklch(0.72 0.12 215);
+    --cat-uncompressed-image: oklch(0.64 0.2 25);
+    --cat-video: oklch(0.68 0.16 265);
+    --cat-audio: oklch(0.76 0.13 165);
+
+    --cat-document: oklch(0.82 0.06 250);
+    --cat-source: oklch(0.78 0.14 145);
+    --cat-object-generated: oklch(0.68 0.08 110);
+    --cat-library: oklch(0.72 0.1 320);
+
+    --cat-vm-disk: oklch(0.66 0.14 345);
+    --cat-container-disk: oklch(0.71 0.12 15);
+
+    --cat-unknown: oklch(0.55 0.02 300);
+  }
+}
+
+.dark {
+  --brand: oklch(0.62 0.22 295);
+  --brand-foreground: oklch(0.14 0 0);
+
+  --pressure-ok: oklch(0.74 0.15 150);
+  --pressure-warn: oklch(0.79 0.15 80);
+  --pressure-critical: oklch(0.66 0.21 25);
+  --capacity-purgeable: oklch(0.45 0.02 260);
+  --capacity-free: oklch(0.28 0.01 260);
+
+  --cat-uncategorized: oklch(0.62 0.02 260);
+  --cat-symlink: oklch(0.7 0.06 215);
+  --cat-executable: oklch(0.72 0.15 300);
+  --cat-apple-metadata: oklch(0.64 0.04 250);
+
+  --cat-compressed-archive: oklch(0.78 0.13 75);
+  --cat-uncompressed-archive: oklch(0.73 0.15 55);
+  --cat-compressed-stream: oklch(0.81 0.11 95);
+  --cat-disk-image: oklch(0.7 0.15 35);
+
+  --cat-image: oklch(0.77 0.12 195);
+  --cat-raw-photo: oklch(0.72 0.12 215);
+  --cat-uncompressed-image: oklch(0.64 0.2 25);
+  --cat-video: oklch(0.68 0.16 265);
+  --cat-audio: oklch(0.76 0.13 165);
+
+  --cat-document: oklch(0.82 0.06 250);
+  --cat-source: oklch(0.78 0.14 145);
+  --cat-object-generated: oklch(0.68 0.08 110);
+  --cat-library: oklch(0.72 0.1 320);
+
+  --cat-vm-disk: oklch(0.66 0.14 345);
+  --cat-container-disk: oklch(0.71 0.12 15);
+
+  --cat-unknown: oklch(0.55 0.02 300);
+}
+
+/* -----------------------------------------------------------------------------
+ * Utility mapping. `@theme inline` so a `.dark` toggle re-resolves at runtime
+ * with no rebuild — same reason index.css uses `inline`.
+ * -------------------------------------------------------------------------- */
+@theme inline {
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-pressure-ok: var(--pressure-ok);
+  --color-pressure-warn: var(--pressure-warn);
+  --color-pressure-critical: var(--pressure-critical);
+  --color-capacity-purgeable: var(--capacity-purgeable);
+  --color-capacity-free: var(--capacity-free);
+}
+
+/* -----------------------------------------------------------------------------
+ * Row/table primitives that are cheaper as one CSS rule than as a Tailwind
+ * class soup repeated on every one of 500 virtual rows.
+ * -------------------------------------------------------------------------- */
+@layer components {
+  /* The virtualized viewport. `contain` is load-bearing: without it, Safari
+   * relayouts the whole 500-row absolute-positioned stack on every scroll tick. */
+  .rds-virtual-viewport {
+    contain: strict;
+    overflow: auto;
+    will-change: transform;
+  }
+
+  /* Tabular numerals so the right-aligned size columns line up digit-for-digit;
+   * a proportional-figure size column visibly jitters while scrolling. */
+  .rds-numeric {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+  }
+}

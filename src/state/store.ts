@@ -1,0 +1,159 @@
+/**
+ * Local UI state. **Nothing that came from a command lives here.**
+ *
+ * docs/01-ARCHITECTURE.md, "Frontend boundary":
+ *
+ *   "Zustand holds only local UI state (selection, navigation stack, layout
+ *    toggle); everything that came from a command is TanStack Query cache,
+ *    keyed by `TreeGeneration` so a new scan invalidates rather than mixes."
+ *
+ * So this store may hold node *ids* but never node *rows*, a navigation stack
+ * but never the paths it resolves to, and a size-metric preference but never a
+ * size. Duplicating server data into Zustand is how the two caches drift and
+ * how a stale row survives a rescan.
+ *
+ * The one piece of coupling that has to exist: a selection is only meaningful
+ * inside the generation it was made in. `syncGeneration` is called by the shell
+ * whenever the live generation changes, and it drops selection, focus, and the
+ * navigation stack rather than letting them point into a freed arena. That is
+ * the "a generation change invalidates both cached pages and stale selections"
+ * rule from docs/05-UI.md, and it belongs on the state that would otherwise
+ * survive the invalidation.
+ */
+
+import { create } from "zustand";
+
+import type { LayoutKind } from "@/lib/bindings";
+import { GENERATION_NONE, NODE_ID_ROOT } from "@/lib/wire";
+
+/** Left-rail routes. Only the two that exist in this build are reachable. */
+export type Route = "volumes" | "overview" | "tree";
+
+/**
+ * Which byte count the size columns and the canvas show.
+ *
+ * docs/05-UI.md makes this an explicit user choice rather than a silent
+ * default, "so a screenshot is never ambiguous about which number it is
+ * showing". Logical and allocated are never summed or reconciled.
+ */
+export type SizeMetric = "logical" | "allocated";
+
+export interface UiState {
+  route: Route;
+
+  /** The generation the ids below were resolved in. `0` == nothing loaded. */
+  generation: number;
+
+  /**
+   * Drill-down stack, root-first. The last element is the current subtree and
+   * drives both the breadcrumb and the canvas root. Never empty once a scan is
+   * loaded.
+   */
+  navStack: readonly number[];
+
+  /** Multi-selection, for the details panel and the trash drop target. */
+  selection: ReadonlySet<number>;
+
+  /**
+   * Keyboard focus. Independent of selection on purpose — docs/05-UI.md
+   * requires focus, selection, and hover to be three distinct states, because
+   * merging them is what makes arrow-key navigation destructive.
+   */
+  focused: number | null;
+
+  /** Hover, for tree <-> canvas highlight sync. Not persisted, not selection. */
+  hovered: number | null;
+
+  layoutKind: LayoutKind;
+  sizeMetric: SizeMetric;
+  detailsOpen: boolean;
+
+  setRoute: (route: Route) => void;
+  /** Drop everything id-shaped when the live tree is replaced. */
+  syncGeneration: (generation: number, root?: number) => void;
+  navigateTo: (node: number) => void;
+  navigateUpTo: (depth: number) => void;
+  select: (node: number, mode?: "replace" | "toggle" | "add") => void;
+  clearSelection: () => void;
+  setFocused: (node: number | null) => void;
+  setHovered: (node: number | null) => void;
+  setLayoutKind: (kind: LayoutKind) => void;
+  setSizeMetric: (metric: SizeMetric) => void;
+  toggleDetails: () => void;
+}
+
+const EMPTY_SELECTION: ReadonlySet<number> = new Set<number>();
+
+export const useUiStore = create<UiState>((set) => ({
+  route: "volumes",
+  generation: GENERATION_NONE,
+  navStack: [],
+  selection: EMPTY_SELECTION,
+  focused: null,
+  hovered: null,
+  layoutKind: "treemap",
+  sizeMetric: "allocated",
+  detailsOpen: true,
+
+  setRoute: (route) => set({ route }),
+
+  syncGeneration: (generation, root = NODE_ID_ROOT) =>
+    set((state) => {
+      if (state.generation === generation) return state;
+      const loaded = generation !== GENERATION_NONE;
+      return {
+        generation,
+        navStack: loaded ? [root] : [],
+        selection: EMPTY_SELECTION,
+        focused: null,
+        hovered: null,
+        route: loaded ? "tree" : "volumes",
+      };
+    }),
+
+  navigateTo: (node) =>
+    set((state) => {
+      const existing = state.navStack.indexOf(node);
+      // Navigating to something already on the stack is a *pop*, not a push:
+      // otherwise clicking the breadcrumb grows the stack it is displaying.
+      if (existing >= 0) return { navStack: state.navStack.slice(0, existing + 1) };
+      return { navStack: [...state.navStack, node] };
+    }),
+
+  navigateUpTo: (depth) =>
+    set((state) => {
+      if (depth < 0 || depth >= state.navStack.length) return state;
+      return { navStack: state.navStack.slice(0, depth + 1) };
+    }),
+
+  select: (node, mode = "replace") =>
+    set((state) => {
+      if (mode === "replace") {
+        return { selection: new Set([node]), focused: node };
+      }
+      const next = new Set(state.selection);
+      if (mode === "toggle" && next.has(node)) {
+        next.delete(node);
+      } else {
+        next.add(node);
+      }
+      return { selection: next, focused: node };
+    }),
+
+  clearSelection: () => set({ selection: EMPTY_SELECTION }),
+  setFocused: (focused) => set({ focused }),
+  setHovered: (hovered) => set({ hovered }),
+  setLayoutKind: (layoutKind) => set({ layoutKind }),
+  setSizeMetric: (sizeMetric) => set({ sizeMetric }),
+  toggleDetails: () => set((state) => ({ detailsOpen: !state.detailsOpen })),
+}));
+
+/** The subtree currently being viewed, or `null` before a scan is loaded. */
+export function useCurrentRoot(): number | null {
+  return useUiStore((state) => state.navStack.at(-1) ?? null);
+}
+
+/** The single selected node, or `null` for an empty or multiple selection. */
+export function useSoleSelection(): number | null {
+  return useUiStore((state) => (state.selection.size === 1 ? [...state.selection][0] : null));
+}

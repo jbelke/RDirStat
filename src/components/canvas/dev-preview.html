@@ -1,0 +1,17 @@
+<!doctype html>
+<!--
+  Dev-only preview for the hierarchy canvas. Vite serves this at
+  /src/components/canvas/dev-preview.html while `pnpm dev` is running. It is not
+  listed in `build.rollupOptions.input`, so `vite build` ignores it entirely.
+-->
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HierarchyCanvas preview</title>
+  </head>
+  <body>
+    <div id="preview-root"></div>
+    <script type="module" src="./dev-preview.tsx"></script>
+  </body>
+</html>

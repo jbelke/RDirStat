@@ -14,6 +14,11 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+/* The categorical palette (`--cat-*`), the capacity/pressure ramp, and the
+ * single brand accent. Kept in its own file because it is the one token set
+ * docs/05-UI.md makes a hard contract: Rust sends category *indices* and this
+ * is where they resolve to colour. */
+@import "./styles/categories.css";
 
 /* -----------------------------------------------------------------------------
  * Dark variant.

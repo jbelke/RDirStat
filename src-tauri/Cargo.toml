@@ -45,6 +45,35 @@ serde_json = { workspace = true }
 # boundary, libraries use thiserror.
 anyhow = { workspace = true }
 
+# --- the shared contract; every DTO and error crossing IPC lives here ---
+rdirstat-core = { workspace = true }
+
+# --- typed IPC: `specta` describes the DTOs, `tauri-specta` emits the client ---
+specta = { workspace = true }
+tauri-specta = { workspace = true }
+# The TypeScript emitter behind tauri-specta's `typescript` feature. Pinned
+# locally rather than in [workspace.dependencies] because no other member
+# links against it; `=0.0.12` is the version tauri-specta 2.0.0-rc.25 depends
+# on, and a mismatch would make `Typescript` a different type than the one
+# `LanguageExt` is implemented for.
+specta-typescript = "=0.0.12"
+
+# --- Arrow IPC for `layout` (and, in phase 6, `report`) ---
+# Only the `ipc` writer is used; the workspace pin already enables it by
+# default, and a member may not lower `default-features` on an inherited dep.
+arrow = { workspace = true, features = ["ipc"] }
+
+# --- macOS actions: NSFileManager trashItem, never fs::remove_file ---
+trash = { workspace = true }
+
+# --- bounded channels between the reader workers and the single builder ---
+crossbeam-channel = { workspace = true }
+
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
 # NOTE: there is deliberately no [profile.*] here. Cargo ignores profiles in a
 # non-root workspace member; /Cargo.toml sets `lto = "thin"`, `codegen-units = 1`
 # and, deliberately, no `panic = "abort"`.
