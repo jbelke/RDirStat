@@ -27,8 +27,12 @@
  * and the rows would not sum to the subtree. The bands partition the leaves.
  */
 
-import { formatCount, formatIEC, formatSI } from "@/lib/format";
+import { ChevronRight, Info } from "lucide-react";
+import { Fragment, useState } from "react";
+
+import { formatCount, formatIEC, formatSI, formatMtime } from "@/lib/format";
 import type { SizeBandView } from "@/lib/ipc";
+import { BAND_ENTRY_LIMIT, useSizeBandEntries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
 export interface SizeBandsProps {
@@ -37,6 +41,9 @@ export interface SizeBandsProps {
   error: Error | null;
   /** Total allocated bytes of the subtree, for the share column. */
   subtreeAllocated: number | null;
+  /** The subtree the bands describe, for the per-band breakdown. */
+  generation: number;
+  root: number | null;
   className?: string;
 }
 
@@ -54,7 +61,19 @@ function conversionLabel(row: SizeBandView): string {
   return `${formatSI(row.lowerBytes)} – ${formatSI(row.upperBytes)}`;
 }
 
-export function SizeBands({ rows, isLoading, error, subtreeAllocated, className }: SizeBandsProps) {
+export function SizeBands({
+  rows,
+  isLoading,
+  error,
+  subtreeAllocated,
+  generation,
+  root,
+  className,
+}: SizeBandsProps) {
+  const [expanded, setExpanded] = useState<number | null>(null);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const entries = useSizeBandEntries(generation, root, expanded);
+
   if (error !== null) {
     return (
       <div className={cn("p-6 text-sm text-pressure-critical", className)}>
@@ -74,15 +93,42 @@ export function SizeBands({ rows, isLoading, error, subtreeAllocated, className 
 
   return (
     <div className={cn("flex min-h-0 flex-col gap-3 overflow-auto p-4", className)}>
-      <header className="flex flex-col gap-1">
+      <header className="relative flex shrink-0 items-center gap-2">
         <h2 className="text-sm font-medium">Files by size</h2>
-        <p className="max-w-2xl text-xs text-muted-foreground">
-          Bands are powers of 1024, matching <code className="font-mono">du -h</code>. The decimal
-          equivalent is shown beneath each one, because the size column and Finder are decimal SI —
-          the same bytes read <span className="rds-numeric">128G</span> in{" "}
-          <code className="font-mono">du</code> and <span className="rds-numeric">138 GB</span> here.
-          Directories are not counted: these bands partition the files.
-        </p>
+        <span className="rds-numeric text-xs text-muted-foreground">
+          {formatCount(totalFiles)} files
+        </span>
+        {/* The explanation is real and occasionally necessary, but it is the
+          * same paragraph every time and it was the tallest thing on the route.
+          * One icon, opened on demand. */}
+        <button
+          type="button"
+          aria-expanded={notesOpen}
+          onClick={() => setNotesOpen((open) => !open)}
+          title="How these bands are defined"
+          className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <Info aria-hidden className="size-3.5" />
+          <span className="sr-only">How these bands are defined</span>
+        </button>
+        {notesOpen && (
+          <div className="absolute left-0 top-full z-50 mt-1 flex w-[30rem] max-w-[80vw] flex-col gap-2 rounded-lg border border-border bg-popover p-3 text-xs text-muted-foreground shadow-xl">
+            <p>
+              Bands are powers of 1024, matching <code className="font-mono">du -h</code>. The
+              decimal equivalent is shown beneath each one, because the size column and Finder are
+              decimal SI — the same bytes read differently in the two systems.
+            </p>
+            <p>
+              Directories are not counted: these bands partition the files, so the rows sum to the
+              subtree exactly once.
+            </p>
+            <p>
+              Allocated and logical are never summed. Allocated is what the filesystem spent,
+              logical is what the files claim, and on APFS they disagree for sparse, compressed, and
+              cloned files.
+            </p>
+          </div>
+        )}
       </header>
 
       <table className="w-full text-sm">
@@ -110,15 +156,29 @@ export function SizeBands({ rows, isLoading, error, subtreeAllocated, className 
             const share =
               subtreeAllocated !== null && subtreeAllocated > 0 ? row.allocated / subtreeAllocated : 0;
             const empty = row.files === 0;
+            const open = expanded === row.band;
             return (
+              <Fragment key={row.band}>
               <tr
-                key={row.band}
-                className={cn("border-b border-border/30", empty && "text-muted-foreground/50")}
+                className={cn(
+                  "border-b border-border/30",
+                  empty ? "text-muted-foreground/50" : "cursor-pointer hover:bg-accent/40",
+                  open && "bg-accent/30",
+                )}
+                onClick={empty ? undefined : () => setExpanded(open ? null : row.band)}
               >
                 <th scope="row" className="py-2 text-left font-normal">
-                  <div className="font-medium">{edgeLabel(row)}</div>
+                  <div className="flex items-center gap-1">
+                    {!empty && (
+                      <ChevronRight
+                        aria-hidden
+                        className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")}
+                      />
+                    )}
+                    <span className={cn("font-medium", empty && "pl-4.5")}>{edgeLabel(row)}</span>
+                  </div>
                   {/* The conversion, always present — never inferred. */}
-                  <div className="text-xs text-muted-foreground">{conversionLabel(row)}</div>
+                  <div className="pl-4.5 text-xs text-muted-foreground">{conversionLabel(row)}</div>
                 </th>
                 <td className="rds-numeric py-2 text-right tabular-nums">
                   {empty ? "—" : formatCount(row.files)}
@@ -146,16 +206,87 @@ export function SizeBands({ rows, isLoading, error, subtreeAllocated, className 
                   {empty ? "—" : formatSI(row.logical)}
                 </td>
               </tr>
+              {open && (
+                <tr className="border-b border-border/30">
+                  <td colSpan={5} className="p-0">
+                    <BandBreakdown
+                      rows={entries.data}
+                      isLoading={entries.isLoading}
+                      error={entries.error}
+                      total={row.files}
+                    />
+                  </td>
+                </tr>
+              )}
+              </Fragment>
             );
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
 
-      <p className="text-xs text-muted-foreground">
-        {formatCount(totalFiles)} files counted. Allocated and logical are never summed — allocated
-        is what the filesystem spent, logical is what the files claim, and on APFS they disagree for
-        sparse, compressed, and cloned files.
-      </p>
+/**
+ * The heaviest files in one band.
+ *
+ * Explicitly a leaderboard. The smallest band on a boot volume holds ten
+ * million files, so the header says how many there are and the list shows the
+ * top few hundred — the alternative is not a longer list, it is a hang.
+ */
+function BandBreakdown({
+  rows,
+  isLoading,
+  error,
+  total,
+}: {
+  rows: readonly { node: number; path: string; allocated: number; logical: number; mtime: number }[] | undefined;
+  isLoading: boolean;
+  error: Error | null;
+  total: number;
+}) {
+  if (error !== null) {
+    return <div className="px-4 py-3 text-xs text-pressure-critical">{error.message}</div>;
+  }
+  if (isLoading || rows === undefined) {
+    return <div className="px-4 py-3 text-xs text-muted-foreground">Finding the largest…</div>;
+  }
+  if (rows.length === 0) {
+    return <div className="px-4 py-3 text-xs text-muted-foreground">No files in this band.</div>;
+  }
+
+  const truncated = total > rows.length;
+
+  return (
+    <div className="flex flex-col gap-1 bg-background/60 px-4 py-3">
+      <div className="text-xs text-muted-foreground">
+        {truncated
+          ? `The ${formatCount(rows.length)} largest of ${formatCount(total)} — ordered by allocated bytes.`
+          : `All ${formatCount(rows.length)}, ordered by allocated bytes.`}
+      </div>
+      <ul className="flex flex-col">
+        {rows.map((entry) => (
+          <li
+            key={entry.node}
+            className="flex items-baseline gap-3 border-b border-border/20 py-1 last:border-0"
+          >
+            <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={entry.path}>
+              {entry.path}
+            </span>
+            <span className="rds-numeric shrink-0 text-xs tabular-nums">
+              {formatSI(entry.allocated)}
+            </span>
+            <span className="rds-numeric w-24 shrink-0 text-right text-[11px] text-muted-foreground tabular-nums">
+              {formatMtime(entry.mtime)}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {truncated && (
+        <div className="text-[11px] text-muted-foreground">
+          Capped at {formatCount(BAND_ENTRY_LIMIT)}; the count above is the true total.
+        </div>
+      )}
     </div>
   );
 }

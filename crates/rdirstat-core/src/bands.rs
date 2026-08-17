@@ -167,6 +167,103 @@ pub fn size_bands(tree: &Tree, root: NodeId) -> Option<Vec<SizeBandRow>> {
     Some(rows)
 }
 
+/// One file inside a band, for the breakdown.
+///
+/// Carries its resolved path because the whole point of expanding a band is to
+/// find out *which* files are in it; a list of node ids would make the caller
+/// issue one `path_of` per row.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct SizeBandEntry {
+    /// The arena node, so a row can be selected or revealed.
+    pub node: NodeId,
+    /// Full path, escaped for display.
+    pub path: crate::wire::DisplayPath,
+    /// Allocated bytes, after hard-link policy. The quantity that placed it in
+    /// this band.
+    pub allocated: u64,
+    /// Logical bytes, after hard-link policy.
+    pub logical: u64,
+    /// Modification time in whole Unix seconds.
+    pub mtime: i64,
+    /// Content category index.
+    pub category: u8,
+}
+
+/// The largest files in one band, biggest first.
+///
+/// Bounded by `limit` on purpose. A band can hold ten million files — the
+/// "under 5 MiB" band on this machine does — so this is deliberately a
+/// *leaderboard*, not an enumeration. The caller is told the total via
+/// [`size_bands`] and shown the head of the list; a full listing of ten million
+/// paths is not a UI, it is a file dump.
+///
+/// Returns `None` if `root` is not a node in this tree.
+#[must_use]
+pub fn size_band_entries(tree: &Tree, root: NodeId, band: usize, limit: usize) -> Option<Vec<SizeBandEntry>> {
+    let start = root.group_owner().unwrap_or(root);
+    tree.node(start)?;
+    if limit == 0 || band >= SIZE_BAND_COUNT {
+        return Some(Vec::new());
+    }
+
+    // Collect (allocated, node) for matching files, keeping only the heaviest
+    // `limit`. A full sort of ten million entries to show two hundred would be
+    // the expensive way to answer the same question.
+    let mut best: Vec<(u64, NodeId)> = Vec::with_capacity(limit.min(1024));
+    let mut floor = 0_u64;
+
+    let mut stack = vec![start];
+    let mut budget = tree.len().saturating_mul(2).saturating_add(16);
+    while let Some(id) = stack.pop() {
+        if budget == 0 {
+            break;
+        }
+        budget -= 1;
+        let Some(node) = tree.node(id) else { continue };
+
+        if node.kind().is_file() {
+            let allocated = node.contributed_alloc();
+            if size_band_of(allocated) == band && (best.len() < limit || allocated > floor) {
+                best.push((allocated, id));
+                // Sorting on every insertion past the cap keeps the vector
+                // bounded without a heap; `limit` is small (hundreds), so this
+                // is cheaper than it looks and never allocates unboundedly.
+                if best.len() > limit {
+                    best.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+                    best.truncate(limit);
+                    floor = best.last().map_or(0, |entry| entry.0);
+                }
+            }
+        }
+
+        stack.extend(tree.children(id));
+    }
+
+    best.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    best.truncate(limit);
+
+    let mut out = Vec::with_capacity(best.len());
+    let mut scratch = Vec::new();
+    for (allocated, id) in best {
+        let Some(node) = tree.node(id) else { continue };
+        scratch.clear();
+        // A path that cannot be reconstructed is skipped rather than shown
+        // blank: a row naming no file is worse than a shorter list.
+        if tree.path_bytes(id, &mut scratch).is_err() {
+            continue;
+        }
+        out.push(SizeBandEntry {
+            node: id,
+            path: crate::wire::DisplayPath::from_bytes(&scratch),
+            allocated,
+            logical: node.contributed_size(),
+            mtime: node.mtime,
+            category: node.category,
+        });
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,

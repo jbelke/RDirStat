@@ -94,6 +94,19 @@ export const commands = {
 	 */
 	sizeBands: (generation: TreeGeneration, node: NodeId) => typedError<SizeBandRow[], QueryError>(__TAURI_INVOKE("size_bands", { generation, node })),
 	/**
+	 *  The largest files inside one size band, for the breakdown accordion.
+	 * 
+	 *  A leaderboard, not an enumeration: the smallest band on a boot volume holds
+	 *  ten million files, so `limit` is a hard ceiling and the caller already knows
+	 *  the true count from `size_bands`.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+	 *  [`QueryError::UnknownNode`].
+	 */
+	sizeBandEntries: (generation: TreeGeneration, node: NodeId, band: number, limit: number) => typedError<SizeBandEntry[], QueryError>(__TAURI_INVOKE("size_band_entries", { generation, node, band, limit })),
+	/**
 	 *  The chain from the scan root down to a node, for the breadcrumb.
 	 * 
 	 *  Cheap — `O(depth)` with no `stat` — so the shell can call it on every
@@ -1468,6 +1481,31 @@ export type ScanTotals = {
 	 *  is not a promise of uniquely reclaimable space.
 	 */
 	allocated: number,
+};
+
+/**
+ *  One file inside a band, for the breakdown.
+ * 
+ *  Carries its resolved path because the whole point of expanding a band is to
+ *  find out *which* files are in it; a list of node ids would make the caller
+ *  issue one `path_of` per row.
+ */
+export type SizeBandEntry = {
+	/**  The arena node, so a row can be selected or revealed. */
+	node: NodeId,
+	/**  Full path, escaped for display. */
+	path: DisplayPath,
+	/**
+	 *  Allocated bytes, after hard-link policy. The quantity that placed it in
+	 *  this band.
+	 */
+	allocated: number,
+	/**  Logical bytes, after hard-link policy. */
+	logical: number,
+	/**  Modification time in whole Unix seconds. */
+	mtime: number,
+	/**  Content category index. */
+	category: number,
 };
 
 /**

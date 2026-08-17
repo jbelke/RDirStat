@@ -70,6 +70,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::children,
             commands::node_details,
             commands::size_bands,
+            commands::size_band_entries,
             commands::ancestors,
             commands::path_of,
             commands::volumes,

@@ -621,6 +621,36 @@ export interface SizeBandView {
   readonly allocated: number;
 }
 
+/** One file inside a band. The breakdown is a leaderboard, not an enumeration. */
+export interface SizeBandEntryView {
+  readonly node: number;
+  readonly path: string;
+  readonly allocated: number;
+  readonly logical: number;
+  readonly mtime: number;
+  readonly category: number;
+}
+
+export async function sizeBandEntries(
+  generation: number,
+  node: number,
+  band: number,
+  limit: number,
+): Promise<SizeBandEntryView[]> {
+  const rows = await unwrap(
+    "size_band_entries",
+    commands.sizeBandEntries(toWireU64(generation), node, band, limit),
+  );
+  return rows.map((row) => ({
+    node: num(row.node),
+    path: row.path,
+    allocated: num(row.allocated),
+    logical: num(row.logical),
+    mtime: num(row.mtime),
+    category: num(row.category),
+  }));
+}
+
 export async function sizeBands(generation: number, node: number): Promise<SizeBandView[]> {
   const rows = await unwrap("size_bands", commands.sizeBands(toWireU64(generation), node));
   return rows.map((row) => ({

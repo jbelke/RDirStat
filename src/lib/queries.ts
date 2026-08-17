@@ -31,6 +31,7 @@ import {
   nodeDetails,
   scanErrors,
   scanStatus,
+  sizeBandEntries,
   sizeBands,
   volumes,
   type AncestorRow,
@@ -38,6 +39,7 @@ import {
   type DetailsView,
   type ScanErrorsView,
   type ScanStatusView,
+  type SizeBandEntryView,
   type SizeBandView,
   type Sort,
   type VolumeRow,
@@ -74,6 +76,8 @@ export const queryKeys = {
   details: (generation: number, node: number) => ["details", generation, node] as const,
   ancestors: (generation: number, node: number) => ["ancestors", generation, node] as const,
   sizeBands: (generation: number, node: number) => ["sizeBands", generation, node] as const,
+  sizeBandEntries: (generation: number, node: number, band: number) =>
+    ["sizeBandEntries", generation, node, band] as const,
 } as const;
 
 /**
@@ -89,7 +93,13 @@ export function dropStaleGenerations(client: QueryClient, live: number): void {
       const [scope, generation] = query.queryKey as readonly unknown[];
       // Every generation-keyed scope must be listed here. A scope that is
       // omitted keeps answering from a tree that no longer exists.
-      if (scope !== "children" && scope !== "details" && scope !== "ancestors" && scope !== "sizeBands") {
+      if (
+        scope !== "children" &&
+        scope !== "details" &&
+        scope !== "ancestors" &&
+        scope !== "sizeBands" &&
+        scope !== "sizeBandEntries"
+      ) {
         return false;
       }
       return typeof generation === "number" && generation !== live;
@@ -241,6 +251,30 @@ export function useSizeBands(
     queryFn: () => sizeBands(generation, target),
     staleTime: Number.POSITIVE_INFINITY,
     enabled: enabled && generation !== GENERATION_NONE && node !== null && isRealNode(target),
+  });
+}
+
+/** How many files one expanded band lists. Matches the backend's own ceiling. */
+export const BAND_ENTRY_LIMIT = 250;
+
+/**
+ * The heaviest files inside one band.
+ *
+ * Fetched only while that band is expanded — this is an `O(subtree)` walk, and
+ * six of them running because six accordions exist would be six full passes
+ * over a twelve-million-node tree for rows nobody is looking at.
+ */
+export function useSizeBandEntries(
+  generation: number,
+  node: number | null,
+  band: number | null,
+): UseQueryResult<SizeBandEntryView[], Error> {
+  const target = node ?? -1;
+  return useQuery({
+    queryKey: queryKeys.sizeBandEntries(generation, target, band ?? -1),
+    queryFn: () => sizeBandEntries(generation, target, band ?? 0, BAND_ENTRY_LIMIT),
+    staleTime: Number.POSITIVE_INFINITY,
+    enabled: band !== null && generation !== GENERATION_NONE && node !== null && isRealNode(target),
   });
 }
 

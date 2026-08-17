@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rdirstat_core::{
     ActionError, CancelState, CatalogScanId, ChildPage, CommandError, CompletedScan, ConfirmationToken, Cursor,
     Details, DisplayPath, LayoutKind, NodeId, QueryError, ReportName, ReportParams, ScanErrorReport, ScanId,
-    ScanOptions, ScanStatus, SizeBandRow, Sort, StartError, TrashPreview, TrashReport, TreeGeneration, VolumeInfo,
+    ScanOptions, ScanStatus, SizeBandEntry, SizeBandRow, Sort, StartError, TrashPreview, TrashReport, TreeGeneration, VolumeInfo,
 };
 
 use crate::engine::{self, ScanOutcome, ScanRequest};
@@ -36,6 +36,14 @@ use crate::{actions, progress, query, relocate, volumes};
 /// [`MAX_DETAILED_ERRORS`](rdirstat_core::MAX_DETAILED_ERRORS) of them and a
 /// running one keeps far fewer, so this only ever truncates the finished case.
 const MAX_ERROR_SAMPLES: usize = 200;
+
+/// Ceiling on one band's breakdown list.
+///
+/// The "under 5 MiB" band on a boot volume holds ten million files. Expanding
+/// it must return the heaviest few hundred, not attempt the rest — the row
+/// already states the true count, and a ten-million-row payload is a file dump
+/// rather than a breakdown.
+const MAX_BAND_ENTRIES: usize = 250;
 
 fn now_unix_ms() -> i64 {
     SystemTime::now()
@@ -314,6 +322,36 @@ pub(crate) async fn size_bands(
     let scan = state.tree_for_query(generation)?;
     tauri::async_runtime::spawn_blocking(move || {
         rdirstat_core::bands::size_bands(&scan.tree, node).ok_or(QueryError::UnknownNode { node })
+    })
+    .await
+    .map_err(|error| QueryError::Internal(error.to_string()))?
+}
+
+
+/// The largest files inside one size band, for the breakdown accordion.
+///
+/// A leaderboard, not an enumeration: the smallest band on a boot volume holds
+/// ten million files, so `limit` is a hard ceiling and the caller already knows
+/// the true count from `size_bands`.
+///
+/// # Errors
+///
+/// [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+/// [`QueryError::UnknownNode`].
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn size_band_entries(
+    state: tauri::State<'_, AppState>,
+    generation: TreeGeneration,
+    node: NodeId,
+    band: u8,
+    limit: u32,
+) -> Result<Vec<SizeBandEntry>, QueryError> {
+    let scan = state.tree_for_query(generation)?;
+    let capped = (limit as usize).min(MAX_BAND_ENTRIES);
+    tauri::async_runtime::spawn_blocking(move || {
+        rdirstat_core::bands::size_band_entries(&scan.tree, node, usize::from(band), capped)
+            .ok_or(QueryError::UnknownNode { node })
     })
     .await
     .map_err(|error| QueryError::Internal(error.to_string()))?

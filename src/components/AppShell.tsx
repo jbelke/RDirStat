@@ -460,6 +460,8 @@ export function AppShell() {
               isLoading={sizeBands.isLoading}
               error={sizeBands.error}
               subtreeAllocated={rootDetails.data?.subtree?.allocated ?? null}
+              generation={generation}
+              root={currentRoot}
               className="min-h-0 flex-1"
             />
           )}
