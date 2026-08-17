@@ -334,9 +334,7 @@ mod tests {
         file(root, b"small.bin", 6 << 20, false);
 
         let sub_name = builder.intern(b"sub").expect("interns");
-        let sub = builder
-            .push_child(root, Node::directory(sub_name, 0))
-            .expect("links");
+        let sub = builder.push_child(root, Node::directory(sub_name, 0)).expect("links");
         builder.register_directory(sub, DirTotals::EMPTY).expect("registers");
 
         let mut file = |parent: NodeId, name: &[u8], bytes: u64, repeat: bool| {
@@ -386,10 +384,7 @@ mod tests {
 
         let banded: u64 = rows.iter().map(|row| row.allocated).sum();
         let expected = (1 << 10) + (6 << 20) + (600 << 20) + (60_u64 << 30);
-        assert_eq!(
-            banded, expected,
-            "band totals must partition the leaves exactly once"
-        );
+        assert_eq!(banded, expected, "band totals must partition the leaves exactly once");
     }
 
     #[test]

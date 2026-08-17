@@ -198,6 +198,12 @@ pub struct LayoutOptions {
     pub metric: SizeMetric,
     /// Backstop on emitted tiles.
     pub max_tiles: usize,
+    /// Content categories to keep, or `None` for everything.
+    ///
+    /// An empty set is treated as `None` by the walk: filtering everything out
+    /// is never what a click meant, and a layout of nothing is not a useful
+    /// answer to give back for one.
+    pub categories: Option<crate::filter::CategorySet>,
 }
 
 impl LayoutOptions {
@@ -213,6 +219,7 @@ impl LayoutOptions {
             min_px: MinPx::new(min_px)?,
             metric: SizeMetric::Allocated,
             max_tiles: DEFAULT_MAX_TILES,
+            categories: None,
         })
     }
 
@@ -227,6 +234,13 @@ impl LayoutOptions {
     #[must_use]
     pub const fn with_max_tiles(mut self, max_tiles: usize) -> Self {
         self.max_tiles = max_tiles;
+        self
+    }
+
+    /// Restricts the layout to `categories`, re-proportioning the areas.
+    #[must_use]
+    pub const fn with_categories(mut self, categories: Option<crate::filter::CategorySet>) -> Self {
+        self.categories = categories;
         self
     }
 }

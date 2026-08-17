@@ -67,6 +67,23 @@ pub(crate) struct SnapshotStore {
     root: PathBuf,
 }
 
+/// What is on disk for one root, without decoding it.
+///
+/// Enough to label a menu item honestly — "Restore scan from 14:32, 12.3M
+/// items" — and no more. A snapshot can be stale by any amount, so the time it
+/// was taken is not optional decoration: an interface that silently restores a
+/// two-week-old tree while the user believes they are looking at their disk is
+/// worse than one that costs five minutes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SnapshotInfo {
+    /// When the scan behind it finished, Unix milliseconds.
+    pub(crate) taken_unix_ms: i64,
+    /// Retained nodes, so the offer can say how much tree comes back.
+    pub(crate) nodes: u64,
+    /// Size of the file on disk.
+    pub(crate) bytes: u64,
+}
+
 /// Where a snapshot came from, for the log line and, later, the UI.
 ///
 /// Not `Clone`: it owns a whole arena, and duplicating one would double the
@@ -176,6 +193,66 @@ impl SnapshotStore {
             }
         }
         None
+    }
+
+    /// The newest snapshot for one specific root, decoded.
+    ///
+    /// This is what turns switching drives from "costs you a rescan" into a
+    /// file read. Same skip-and-delete policy as [`load_newest`](Self::load_newest):
+    /// a snapshot this build cannot read is litter, not a reason to fail.
+    pub(crate) fn load_for_root(&self, root: &Path, device: u64) -> Option<Restored> {
+        for path in self.newest_first(root, device) {
+            match Self::load(&path) {
+                Ok(restored) => return Some(restored),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "discarding an unloadable snapshot");
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+        None
+    }
+
+    /// What the newest snapshot for `root` says about itself, cheaply.
+    ///
+    /// Reads the header and metadata only — a few kilobytes — so a menu can be
+    /// labelled without paying for the arena it would restore. Returns `None`
+    /// when there is no snapshot, and also when there is one this build cannot
+    /// read: from the caller's point of view those are the same answer, which is
+    /// "restoring is not on offer here".
+    ///
+    /// Deliberately does NOT delete an unreadable file the way the loading paths
+    /// do. This runs while a menu is being drawn, and a menu opening must not
+    /// have side effects on disk.
+    pub(crate) fn snapshot_info(&self, root: &Path, device: u64) -> Option<SnapshotInfo> {
+        let path = self.newest_first(root, device).into_iter().next()?;
+        let file = File::open(&path).ok()?;
+        let bytes = file.metadata().map(|meta| meta.len()).unwrap_or_default();
+        let mut reader = BufReader::new(file);
+        let peeked = snapshot::peek(&mut reader, Limits::DESIGN_PROFILE).ok()?;
+        Some(SnapshotInfo {
+            taken_unix_ms: peeked.finished_unix_ms,
+            nodes: peeked.nodes,
+            bytes,
+        })
+    }
+
+    /// This root's snapshots, newest first.
+    ///
+    /// The filename begins with a zero-padded finish time, so this is
+    /// chronological from a directory listing without stat'ing anything.
+    fn newest_first(&self, root: &Path, device: u64) -> Vec<PathBuf> {
+        let dir = self.root.join(root_id_of(root, device));
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| is_snapshot(path))
+            .collect();
+        found.sort_unstable_by(|a, b| b.file_name().cmp(&a.file_name()));
+        found
     }
 
     /// Reads one snapshot file.
@@ -289,17 +366,25 @@ fn sync_dir(dir: &Path) {
 /// fixed forever; a hasher whose output can change between Rust releases would
 /// silently orphan every existing snapshot on a toolchain bump.
 fn root_id(scan: &CompletedScan) -> String {
+    root_id_of(&scan.root_path, scan.volume.device)
+}
+
+/// The same digest, from the parts alone.
+///
+/// Separate from [`root_id`] so a caller holding only a path and a device — the
+/// drive switcher deciding whether to offer "restore" — can find the directory
+/// without a `CompletedScan` it does not have and cannot cheaply obtain.
+fn root_id_of(root: &Path, device: u64) -> String {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
 
-    let bytes = path_bytes(&scan.root_path);
     let mut hash = OFFSET;
-    for byte in bytes {
+    for byte in path_bytes(root) {
         hash = (hash ^ u64::from(byte)).wrapping_mul(PRIME);
     }
     // The device number joins the digest so the same mount point on two
     // different volumes does not share a directory.
-    hash = (hash ^ scan.volume.device).wrapping_mul(PRIME);
+    hash = (hash ^ device).wrapping_mul(PRIME);
     format!("{hash:016x}")
 }
 
@@ -501,5 +586,89 @@ mod tests {
         fs::remove_file(&path).expect("removes");
 
         assert!(store.load_newest().is_none(), "a staging file was restored");
+    }
+
+    #[test]
+    fn a_snapshot_is_found_by_its_own_root_not_merely_the_newest() {
+        let first = tree_fixture();
+        let second = tree_fixture();
+        let home = tempfile::tempdir().expect("tempdir");
+        let store = store_in(&home);
+
+        let older = scan_of(first.path(), 1, 1_700_000_000_000);
+        let newer = scan_of(second.path(), 2, 1_700_000_900_000);
+        store.save(&older).expect("saves");
+        store.save(&newer).expect("saves");
+
+        // `load_newest` would answer with `second`; asking for `first` by name
+        // must not, or the drive switcher would restore the wrong volume.
+        let restored = store
+            .load_for_root(&older.root_path, older.volume.device)
+            .expect("restores the requested root");
+        assert_eq!(restored.scan.root_path, older.root_path);
+        assert_eq!(store.load_newest().expect("newest").scan.root_path, newer.root_path);
+    }
+
+    #[test]
+    fn a_root_with_no_snapshot_offers_nothing() {
+        let source = tree_fixture();
+        let home = tempfile::tempdir().expect("tempdir");
+        let store = store_in(&home);
+        assert!(store.load_for_root(source.path(), 12_345).is_none());
+        assert!(store.snapshot_info(source.path(), 12_345).is_none());
+    }
+
+    #[test]
+    fn snapshot_info_reads_the_label_without_the_arena() {
+        let source = tree_fixture();
+        let home = tempfile::tempdir().expect("tempdir");
+        let store = store_in(&home);
+        let scan = scan_of(source.path(), 1, 1_700_000_000_000);
+        store.save(&scan).expect("saves");
+
+        let info = store
+            .snapshot_info(&scan.root_path, scan.volume.device)
+            .expect("an info");
+        assert_eq!(info.taken_unix_ms, 1_700_000_000_000);
+        assert_eq!(info.nodes, scan.tree.len() as u64);
+        assert!(info.bytes > 0);
+    }
+
+    #[test]
+    fn the_same_mount_point_on_two_devices_does_not_collide() {
+        // Two volumes can both be mounted at paths that hash the same if the
+        // device is left out of the digest; it is not.
+        let source = tree_fixture();
+        let home = tempfile::tempdir().expect("tempdir");
+        let store = store_in(&home);
+        let scan = scan_of(source.path(), 1, 1_700_000_000_000);
+        store.save(&scan).expect("saves");
+
+        assert!(store.snapshot_info(&scan.root_path, scan.volume.device).is_some());
+        assert!(
+            store
+                .snapshot_info(&scan.root_path, scan.volume.device ^ 0xff)
+                .is_none(),
+            "a different device must not resolve to the same snapshot directory"
+        );
+    }
+
+    #[test]
+    fn opening_a_menu_does_not_delete_an_unreadable_snapshot() {
+        // `snapshot_info` runs while a menu is drawn. The loading paths prune
+        // litter deliberately; this one must not, because a menu opening with
+        // side effects on disk is a surprise.
+        let source = tree_fixture();
+        let home = tempfile::tempdir().expect("tempdir");
+        let store = store_in(&home);
+        let scan = scan_of(source.path(), 1, 1_700_000_000_000);
+        let path = store.save(&scan).expect("saves");
+
+        let mut bytes = fs::read(&path).expect("reads");
+        bytes[0] = b'X';
+        fs::write(&path, &bytes).expect("writes");
+
+        assert!(store.snapshot_info(&scan.root_path, scan.volume.device).is_none());
+        assert!(path.exists(), "peeking must not prune");
     }
 }

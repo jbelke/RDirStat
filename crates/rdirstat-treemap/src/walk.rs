@@ -12,6 +12,7 @@
 //! coordinates.
 
 use crate::error::LayoutError;
+use crate::filter::FilteredWeights;
 use crate::geom::{Rect, Slot, slice, sort_drawable_prefix, squarify};
 use crate::options::{
     ICICLE_MAX_ROW_PX, ICICLE_ROW_PX, LayoutOptions, SUNBURST_MAX_RING_PX, SUNBURST_RING_PX, SizeMetric,
@@ -77,6 +78,7 @@ const FULL_TURN: f64 = core::f64::consts::TAU;
 /// [`LayoutError::UnknownNode`] if `root` names neither a live node nor a
 /// virtual group whose owning directory exists.
 pub fn layout_tiles(tree: &Tree, root: NodeId, options: &LayoutOptions) -> Result<TileBuffer, LayoutError> {
+    let started = std::time::Instant::now();
     let plan = Plan::resolve(options);
     let root_frame = root_frame(tree, root, &plan, options.canvas.width(), options.canvas.height())?;
 
@@ -84,6 +86,13 @@ pub fn layout_tiles(tree: &Tree, root: NodeId, options: &LayoutOptions) -> Resul
     let mut stack: Vec<Frame> = Vec::with_capacity(64);
     let mut scratch: Vec<Slot> = Vec::new();
     stack.push(root_frame);
+
+    // One pass for the whole request, not one per frame. Absent without a
+    // filter, so an unfiltered layout pays nothing.
+    let weights = options
+        .categories
+        .filter(|set| !set.is_empty())
+        .map(|set| FilteredWeights::build(tree, root_frame.source, options.metric, set));
 
     let mut visited = 0_u32;
     let mut considered = 0_u64;
@@ -101,7 +110,14 @@ pub fn layout_tiles(tree: &Tree, root: NodeId, options: &LayoutOptions) -> Resul
             continue;
         }
 
-        let total = gather(tree, &frame, options.metric, &mut scratch, &mut considered);
+        let total = gather(
+            tree,
+            &frame,
+            options.metric,
+            weights.as_ref(),
+            &mut scratch,
+            &mut considered,
+        );
         if total <= 0.0 || scratch.is_empty() {
             continue;
         }
@@ -169,6 +185,11 @@ pub fn layout_tiles(tree: &Tree, root: NodeId, options: &LayoutOptions) -> Resul
         considered,
         max_depth = tiles.stats().max_depth,
         truncated,
+        // Measured, not estimated. A filtered layout pays for an extra
+        // O(subtree) pass, and whether that needs debouncing is a question
+        // about a real number rather than a feeling about one.
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        filtered = options.categories.is_some_and(|set| !set.is_empty()),
         min_px = options.min_px.get(),
         width = options.canvas.width(),
         height = options.canvas.height(),
@@ -327,7 +348,14 @@ fn root_frame(tree: &Tree, root: NodeId, plan: &Plan, width: f64, height: f64) -
 /// `scratch` is owned by the caller and reused across every frame, so the walk
 /// allocates once and then stays in the same buffer — no allocation in the hot
 /// loop.
-fn gather(tree: &Tree, frame: &Frame, metric: SizeMetric, scratch: &mut Vec<Slot>, considered: &mut u64) -> f64 {
+fn gather(
+    tree: &Tree,
+    frame: &Frame,
+    metric: SizeMetric,
+    filter: Option<&FilteredWeights>,
+    scratch: &mut Vec<Slot>,
+    considered: &mut u64,
+) -> f64 {
     scratch.clear();
     let mut total = 0.0_f64;
     for child in tree.children(frame.source) {
@@ -339,17 +367,36 @@ fn gather(tree: &Tree, frame: &Frame, metric: SizeMetric, scratch: &mut Vec<Slot
         if frame.files_only && directory {
             continue;
         }
-        // `Tree::{allocated_of, logical_of}` binary-search `DirIndex`, which is
-        // the right answer for a directory and pure overhead for a leaf. Files
-        // dominate the child links at the design profile, so the leaf branch
-        // reads the node it already has in hand. Both branches route through
-        // core's `contributed_*`, so the hard-link policy still lives in exactly
-        // one place.
-        let bytes = match (directory, metric) {
-            (true, SizeMetric::Allocated) => tree.allocated_of(child),
-            (true, _) => tree.logical_of(child),
-            (false, SizeMetric::Allocated) => node.contributed_alloc(),
-            (false, _) => node.contributed_size(),
+        let bytes = match filter {
+            // Filtered: a directory's weight is its matching descendants only,
+            // precomputed once for the whole request; a leaf weighs its own
+            // bytes or nothing at all. This is what makes filtering
+            // re-proportion rather than merely recolour.
+            Some(weights) if directory => weights.directory(tree, child),
+            Some(weights) => {
+                if weights.matches(node.category().get()) {
+                    match metric {
+                        SizeMetric::Allocated => node.contributed_alloc(),
+                        SizeMetric::Logical => node.contributed_size(),
+                    }
+                } else {
+                    0
+                }
+            }
+            // `Tree::{allocated_of, logical_of}` binary-search `DirIndex`, which
+            // is the right answer for a directory and pure overhead for a leaf.
+            // Files dominate the child links at the design profile, so the leaf
+            // branch reads the node it already has in hand. Both branches route
+            // through core's `contributed_*`, so the hard-link policy still
+            // lives in exactly one place.
+            None if directory => match metric {
+                SizeMetric::Allocated => tree.allocated_of(child),
+                SizeMetric::Logical => tree.logical_of(child),
+            },
+            None => match metric {
+                SizeMetric::Allocated => node.contributed_alloc(),
+                SizeMetric::Logical => node.contributed_size(),
+            },
         };
         if bytes == 0 {
             // Zero bytes is zero area. A repeated hard link lands here, because

@@ -296,10 +296,31 @@ impl AppState {
     ///
     /// The active slot is not claimed: nothing is scanning, so there is nothing
     /// to cancel and no progress to emit.
-    pub fn publish_restored(&self, mut scan: CompletedScan) -> Option<TreeGeneration> {
+    pub fn publish_restored_if_idle(&self, scan: CompletedScan) -> Option<TreeGeneration> {
+        self.publish_restored_inner(scan, false)
+    }
+
+    /// Publishes a restored tree at the user's explicit request, replacing
+    /// whatever is on screen.
+    ///
+    /// The difference from [`publish_restored_if_idle`](Self::publish_restored_if_idle)
+    /// is *who asked*. The launch path must never clobber, because the user may
+    /// have started a real scan while the file was still being read and live
+    /// observation outranks a cache. Switching drives is the opposite: the
+    /// current tree is precisely what the user asked to be rid of, so refusing
+    /// because one exists would make the command do nothing.
+    ///
+    /// A running scan still wins. Replacing the published tree out from under a
+    /// scan that is about to publish its own would leave the app showing one
+    /// volume and finalizing another.
+    pub fn publish_restored(&self, scan: CompletedScan) -> Option<TreeGeneration> {
+        self.publish_restored_inner(scan, true)
+    }
+
+    fn publish_restored_inner(&self, mut scan: CompletedScan, replace: bool) -> Option<TreeGeneration> {
         let generation = {
             let mut lifecycle = lock(&self.lifecycle);
-            if lifecycle.active.is_some() || !lifecycle.generation.is_none() {
+            if lifecycle.active.is_some() || (!replace && !lifecycle.generation.is_none()) {
                 return None;
             }
             let generation = TreeGeneration::from_raw(self.next_generation.fetch_add(1, Ordering::Relaxed));

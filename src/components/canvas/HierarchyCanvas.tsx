@@ -202,6 +202,10 @@ export function HierarchyCanvas({
     height: size.height,
     devicePixelRatio,
     minPx,
+    // Re-proportioning, not just recolouring: the backend drops filtered-out
+    // bytes from the areas, so a kept category fills the canvas instead of
+    // keeping the share it had in the unfiltered view.
+    categories: categoryFilter ?? null,
     fetchLayout,
     enabled: size.width > 0 && size.height > 0,
   });

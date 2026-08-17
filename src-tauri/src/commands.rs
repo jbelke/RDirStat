@@ -19,7 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rdirstat_core::{
     ActionError, CancelState, CatalogScanId, ChildPage, CommandError, CompletedScan, ConfirmationToken, Cursor,
     Details, DisplayPath, LayoutKind, NodeId, QueryError, ReportName, ReportParams, ScanErrorReport, ScanId,
-    ScanOptions, ScanStatus, SizeBandEntry, SizeBandRow, Sort, StartError, TrashPreview, TrashReport, TreeGeneration, VolumeInfo,
+    ScanOptions, ScanStatus, SizeBandEntry, SizeBandRow, SnapshotOffer, Sort, StartError, TrashPreview, TrashReport,
+    TreeGeneration, VolumeInfo,
 };
 
 use crate::engine::{self, ScanOutcome, ScanRequest};
@@ -327,7 +328,6 @@ pub(crate) async fn size_bands(
     .map_err(|error| QueryError::Internal(error.to_string()))?
 }
 
-
 /// The largest files inside one size band, for the breakdown accordion.
 ///
 /// A leaderboard, not an enumeration: the smallest band on a boot volume holds
@@ -355,6 +355,91 @@ pub(crate) async fn size_band_entries(
     })
     .await
     .map_err(|error| QueryError::Internal(error.to_string()))?
+}
+
+/// What is on disk for each mounted volume, so a switcher can offer a restore.
+///
+/// Cheap by construction: a directory listing plus a header-and-metadata read
+/// per volume, never an arena decode. This is called every time a menu opens.
+///
+/// A volume with no snapshot and a volume whose snapshot this build cannot read
+/// both report `has_snapshot: false` — from the caller's side they are the same
+/// answer, "restoring is not on offer here", and distinguishing them would put a
+/// failure in a menu that the user can do nothing about.
+///
+/// # Errors
+///
+/// Never fails: a store that cannot be resolved is reported as "no snapshots"
+/// rather than as an error, because the switcher still works without them.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn snapshot_offers(app: tauri::AppHandle) -> Result<Vec<SnapshotOffer>, CommandError> {
+    let offers = tauri::async_runtime::spawn_blocking(move || {
+        let Ok(store) = crate::snapshot_store::SnapshotStore::new(&app) else {
+            return Vec::new();
+        };
+        volumes::list()
+            .into_iter()
+            .map(|volume| {
+                let root = PathBuf::from(volume.mount_point.as_str());
+                let info = store.snapshot_info(&root, volume.device);
+                SnapshotOffer {
+                    mount_point: volume.mount_point,
+                    device: volume.device,
+                    has_snapshot: info.is_some(),
+                    // Stated, never implied. A snapshot can be stale by any
+                    // amount, and an interface that silently restores a
+                    // two-week-old tree while the user believes they are looking
+                    // at their disk is worse than one that costs a rescan.
+                    taken_unix_ms: info.map(|found| found.taken_unix_ms),
+                    nodes: info.map(|found| found.nodes),
+                    bytes: info.map(|found| found.bytes),
+                }
+            })
+            .collect()
+    })
+    .await
+    .map_err(|error| CommandError::Internal(error.to_string()))?;
+    Ok(offers)
+}
+
+/// Restores a previously saved scan for one volume, instead of rescanning it.
+///
+/// This is what makes switching drives cheap: a root that has been scanned
+/// before comes back as a file read rather than as minutes of traversal.
+///
+/// **A restore is not a rescan, and the caller must not present it as one.**
+/// The tree it publishes is as old as its snapshot, so anything created since
+/// is missing from it. `snapshot_offers` reports when each was taken precisely
+/// so the offer can say so.
+///
+/// # Errors
+///
+/// [`CommandError::Internal`] when there is no readable snapshot for that root,
+/// or when a scan is running — a scan about to publish its own tree must not
+/// have one replaced underneath it.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn restore_snapshot(
+    app: tauri::AppHandle,
+    root: String,
+    device: u64,
+) -> Result<TreeGeneration, CommandError> {
+    let requested = PathBuf::from(root);
+    let restored = tauri::async_runtime::spawn_blocking(move || {
+        let store = crate::snapshot_store::SnapshotStore::new(&app)
+            .map_err(|error| CommandError::Internal(error.to_string()))?;
+        let found = store
+            .load_for_root(&requested, device)
+            .ok_or_else(|| CommandError::Internal("no readable snapshot for that volume".to_owned()))?;
+        let state = tauri::Manager::state::<AppState>(&app);
+        state
+            .publish_restored(*found.scan)
+            .ok_or_else(|| CommandError::Internal("a scan is running; cancel it first".to_owned()))
+    })
+    .await
+    .map_err(|error| CommandError::Internal(error.to_string()))??;
+    Ok(restored)
 }
 
 /// The escaped full path of a node, for display and Copy Path only.
@@ -608,10 +693,30 @@ pub(crate) async fn layout(
     kind: LayoutKind,
     viewport: rdirstat_core::Viewport,
     min_px: f32,
+    categories: Option<Vec<u8>>,
 ) -> Result<tauri::ipc::Response, QueryError> {
     let scan = state.tree_for_query(generation)?;
     let response = tauri::async_runtime::spawn_blocking(move || {
-        rdirstat_treemap::layout(&scan.tree, generation, root, kind, viewport, min_px)
+        // The frontend sends CATEGORY IDS, never families. A family is a
+        // presentation grouping that can change without the arena changing, so
+        // it is expanded on the frontend and the backend never learns it exists.
+        //
+        // An empty list collapses to "no filter": filtering everything out is
+        // never what a click meant, and a blank canvas is not a useful answer to
+        // give back for one.
+        let filter = categories
+            .filter(|ids| !ids.is_empty())
+            .map(|ids| rdirstat_treemap::CategorySet::from_ids(&ids));
+        match filter {
+            None => rdirstat_treemap::layout(&scan.tree, generation, root, kind, viewport, min_px),
+            Some(set) => {
+                if !scan.tree.contains(root) {
+                    return Err(QueryError::UnknownNode { node: root });
+                }
+                let options = rdirstat_treemap::LayoutOptions::new(kind, viewport, min_px)?.with_categories(Some(set));
+                Ok(rdirstat_treemap::layout_with(&scan.tree, generation, root, &options)?)
+            }
+        }
     })
     .await
     .map_err(|error| QueryError::Internal(error.to_string()))??;

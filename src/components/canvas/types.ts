@@ -39,6 +39,18 @@ export interface LayoutRequest {
   readonly kind: LayoutKind;
   readonly viewport: Viewport;
   readonly minPx: number;
+  /**
+   * Content categories to keep, or `null` for everything.
+   *
+   * Always category ids, never families: a family is a presentation grouping
+   * that can change without the arena changing, so it is expanded before it
+   * reaches the wire and the backend never learns families exist.
+   *
+   * Sent explicitly as `null` rather than omitted — the command deserialises
+   * its arguments as a struct, and a missing field is a different thing from a
+   * present null.
+   */
+  readonly categories: readonly number[] | null;
 }
 
 /**

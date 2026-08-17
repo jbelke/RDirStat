@@ -91,6 +91,7 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod filter;
 mod geom;
 mod ipc;
 mod options;
@@ -98,6 +99,7 @@ mod tiles;
 mod walk;
 
 pub use crate::error::LayoutError;
+pub use crate::filter::CategorySet;
 pub use crate::ipc::{LAYOUT_COLUMN_TYPES, layout_schema, tiles_to_batch, tiles_to_ipc, tiles_to_response};
 pub use crate::options::{
     Canvas, DEFAULT_MAX_TILES, ICICLE_MAX_ROW_PX, ICICLE_ROW_PX, LayoutOptions, MAX_DEVICE_PIXEL_RATIO, MAX_MIN_PX,

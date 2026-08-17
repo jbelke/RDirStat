@@ -107,6 +107,41 @@ export const commands = {
 	 */
 	sizeBandEntries: (generation: TreeGeneration, node: NodeId, band: number, limit: number) => typedError<SizeBandEntry[], QueryError>(__TAURI_INVOKE("size_band_entries", { generation, node, band, limit })),
 	/**
+	 *  What is on disk for each mounted volume, so a switcher can offer a restore.
+	 * 
+	 *  Cheap by construction: a directory listing plus a header-and-metadata read
+	 *  per volume, never an arena decode. This is called every time a menu opens.
+	 * 
+	 *  A volume with no snapshot and a volume whose snapshot this build cannot read
+	 *  both report `has_snapshot: false` — from the caller's side they are the same
+	 *  answer, "restoring is not on offer here", and distinguishing them would put a
+	 *  failure in a menu that the user can do nothing about.
+	 * 
+	 *  # Errors
+	 * 
+	 *  Never fails: a store that cannot be resolved is reported as "no snapshots"
+	 *  rather than as an error, because the switcher still works without them.
+	 */
+	snapshotOffers: () => typedError<SnapshotOffer[], CommandError>(__TAURI_INVOKE("snapshot_offers")),
+	/**
+	 *  Restores a previously saved scan for one volume, instead of rescanning it.
+	 * 
+	 *  This is what makes switching drives cheap: a root that has been scanned
+	 *  before comes back as a file read rather than as minutes of traversal.
+	 * 
+	 *  **A restore is not a rescan, and the caller must not present it as one.**
+	 *  The tree it publishes is as old as its snapshot, so anything created since
+	 *  is missing from it. `snapshot_offers` reports when each was taken precisely
+	 *  so the offer can say so.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`CommandError::Internal`] when there is no readable snapshot for that root,
+	 *  or when a scan is running — a scan about to publish its own tree must not
+	 *  have one replaced underneath it.
+	 */
+	restoreSnapshot: (root: string, device: number) => typedError<TreeGeneration, CommandError>(__TAURI_INVOKE("restore_snapshot", { root, device })),
+	/**
 	 *  The chain from the scan root down to a node, for the breadcrumb.
 	 * 
 	 *  Cheap — `O(depth)` with no `stat` — so the shell can call it on every
@@ -1531,6 +1566,33 @@ export type SizeBandRow = {
 	 *  quantity band membership is decided on.
 	 */
 	allocated: number,
+};
+
+/**
+ *  Whether a volume has a restorable snapshot, and what it says about itself.
+ * 
+ *  Read from the snapshot's header and metadata only, so a menu can render this
+ *  for every mounted volume without decoding an arena.
+ */
+export type SnapshotOffer = {
+	/**  The volume's mount point, escaped for display. */
+	mount_point: DisplayPath,
+	/**  `st_dev`, which together with the mount point identifies the snapshot. */
+	device: number,
+	/**  Whether a restore is on offer at all. */
+	has_snapshot: boolean,
+	/**
+	 *  When the snapshot's scan finished, Unix milliseconds. `None` when there
+	 *  is no snapshot.
+	 * 
+	 *  Not optional decoration: a restore that does not say how old it is lets
+	 *  a stale tree pass for the current state of the disk.
+	 */
+	taken_unix_ms: number | null,
+	/**  Retained nodes in the snapshot. */
+	nodes: number | null,
+	/**  Size of the snapshot file on disk. */
+	bytes: number | null,
 };
 
 /**

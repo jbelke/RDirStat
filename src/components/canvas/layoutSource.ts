@@ -104,6 +104,10 @@ export const invokeLayout: LayoutFetcher = async (request: LayoutRequest, signal
       kind: serializeLayoutKind(request.kind),
       viewport,
       minPx: request.minPx,
+      // Explicitly null rather than omitted when unfiltered. A Tauri command
+      // deserialises its arguments as a struct, and a missing field is not the
+      // same thing as a present null.
+      categories: request.categories === null ? null : [...request.categories],
     });
     return toBinary(raw);
   } catch (cause) {

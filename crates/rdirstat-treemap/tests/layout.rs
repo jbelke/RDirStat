@@ -13,12 +13,12 @@
 
 use arrow::ipc::reader::StreamReader;
 use rdirstat_core::{
-    ARROW_META_GENERATION, ARROW_META_SCHEMA_NAME, ArenaError, DirTotals, Kind, LAYOUT_COLUMNS, LayoutKind, Node,
-    NodeId, Tree, TreeBuilder, TreeGeneration, Viewport,
+    ARROW_META_GENERATION, ARROW_META_SCHEMA_NAME, ArenaError, CategoryId, DirTotals, Kind, LAYOUT_COLUMNS, LayoutKind,
+    Node, NodeId, Tree, TreeBuilder, TreeGeneration, Viewport,
 };
 use rdirstat_treemap::{
-    ICICLE_ROW_PX, LayoutOptions, SUNBURST_RING_PX, SizeMetric, TREEMAP_DEPTH_CAP, Tile, TileBuffer, layout,
-    layout_tiles,
+    CategorySet, ICICLE_ROW_PX, LayoutOptions, SUNBURST_RING_PX, SizeMetric, TREEMAP_DEPTH_CAP, Tile, TileBuffer,
+    layout, layout_tiles,
 };
 use std::collections::HashMap;
 use tempfile::TempDir;
@@ -830,4 +830,118 @@ fn the_treemap_stops_at_the_depth_cap() {
         "treemap drew to depth {deepest}, past the cap of {TREEMAP_DEPTH_CAP}"
     );
     assert!(deepest > 0, "the fixture produced no children at all");
+}
+
+// ------------------------------------------------------------ category filter --
+
+/// ```text
+/// root
+///   media/     one 90 MB file, category 7
+///   code/      one 10 MB file, category 3
+/// ```
+///
+/// Deliberately lopsided so a filtered layout's proportions are unmistakable:
+/// unfiltered, media owns 90% of the area; filtered to code, code must own all
+/// of it rather than the 10% it started with.
+fn two_category_tree() -> Tree {
+    let mut builder = TreeBuilder::new();
+    let root = push_dir(&mut builder, None, b"root").expect("root");
+
+    let media = push_dir(&mut builder, Some(root), b"media").expect("media");
+    let name = builder.intern(b"clip.mkv").expect("interns");
+    let clip = Node::leaf(name, Kind::File, 90 << 20, 90 << 20, MTIME).with_category(CategoryId::from_raw(7));
+    builder.push_child(media, clip).expect("links");
+    if let Some(totals) = builder.dir_totals_mut(media) {
+        totals.absorb_direct_file(clip.contributed_size(), clip.contributed_alloc(), MTIME);
+    }
+
+    let code = push_dir(&mut builder, Some(root), b"code").expect("code");
+    let name = builder.intern(b"main.rs").expect("interns");
+    let source = Node::leaf(name, Kind::File, 10 << 20, 10 << 20, MTIME).with_category(CategoryId::from_raw(3));
+    builder.push_child(code, source).expect("links");
+    if let Some(totals) = builder.dir_totals_mut(code) {
+        totals.absorb_direct_file(source.contributed_size(), source.contributed_alloc(), MTIME);
+    }
+
+    builder.rollup().expect("rollup");
+    builder.finish().expect("finish")
+}
+
+fn area_of(tiles: &TileBuffer, tree: &Tree, name: &[u8]) -> f32 {
+    tiles
+        .iter()
+        .filter(|tile| tree.name_bytes(tile.node) == Some(name))
+        .map(|tile| tile.w * tile.h)
+        .sum()
+}
+
+/// The headline property: filtering RE-PROPORTIONS rather than merely recolours.
+#[test]
+fn a_filtered_layout_gives_the_kept_category_the_whole_canvas() {
+    let tree = two_category_tree();
+    let base = options(LayoutKind::Treemap, 800.0, 600.0, 2.0, 1.0);
+
+    let unfiltered = layout_tiles(&tree, tree.root(), &base).expect("a layout");
+    let media_before = area_of(&unfiltered, &tree, b"media");
+    let code_before = area_of(&unfiltered, &tree, b"code");
+    assert!(
+        media_before > code_before * 5.0,
+        "fixture is not lopsided: media {media_before}, code {code_before}"
+    );
+
+    let filtered = base.with_categories(Some(CategorySet::from_ids(&[3])));
+    let after = layout_tiles(&tree, tree.root(), &filtered).expect("a layout");
+    let media_after = area_of(&after, &tree, b"media");
+    let code_after = area_of(&after, &tree, b"code");
+
+    assert!(
+        code_after > code_before * 5.0,
+        "the kept category did not grow: {code_before} -> {code_after}"
+    );
+    assert!(media_after < f32::EPSILON, "a filtered-out subtree still occupied area");
+}
+
+#[test]
+fn an_empty_filter_is_the_same_as_no_filter() {
+    // "Filter everything out" is never what a click meant, and a blank canvas is
+    // not a useful answer to give back for one.
+    let tree = two_category_tree();
+    let base = options(LayoutKind::Treemap, 800.0, 600.0, 2.0, 1.0);
+
+    let unfiltered = layout_tiles(&tree, tree.root(), &base).expect("a layout");
+    let empty = base.with_categories(Some(CategorySet::EMPTY));
+    let with_empty = layout_tiles(&tree, tree.root(), &empty).expect("a layout");
+
+    assert_eq!(with_empty.len(), unfiltered.len());
+    assert!((area_of(&with_empty, &tree, b"media") - area_of(&unfiltered, &tree, b"media")).abs() < f32::EPSILON);
+}
+
+#[test]
+fn an_unfiltered_layout_is_unchanged_by_the_filter_machinery() {
+    // The filter must be free when unused: `None` takes no extra pass and must
+    // produce the identical geometry it always did.
+    let tree = sample_tree();
+    let base = options(LayoutKind::Treemap, 800.0, 600.0, 2.0, 3.0);
+    let a = layout_tiles(&tree, tree.root(), &base).expect("a layout");
+    let b = layout_tiles(&tree, tree.root(), &base.with_categories(None)).expect("a layout");
+    assert_eq!(by_node(&a).len(), by_node(&b).len());
+    for (node, tile) in by_node(&a) {
+        let other = by_node(&b).get(&node).copied().expect("same nodes");
+        assert!((tile.x - other.x).abs() < f32::EPSILON && (tile.w - other.w).abs() < f32::EPSILON);
+    }
+}
+
+#[test]
+fn a_filter_keeps_directories_that_only_match_deeper_down() {
+    // `media/` has no matching file of its own; its weight comes entirely from a
+    // descendant. A per-directory check rather than a subtree sum would drop it
+    // and take its matching contents with it.
+    let tree = two_category_tree();
+    let base = options(LayoutKind::Treemap, 800.0, 600.0, 2.0, 1.0).with_categories(Some(CategorySet::from_ids(&[7])));
+    let tiles = layout_tiles(&tree, tree.root(), &base).expect("a layout");
+    assert!(
+        area_of(&tiles, &tree, b"media") > 0.0,
+        "a directory whose match is a descendant was dropped"
+    );
+    assert!(area_of(&tiles, &tree, b"code") < f32::EPSILON);
 }

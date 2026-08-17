@@ -214,8 +214,8 @@ pub use crate::scan::{
 pub use crate::tree::{Children, MAX_TREE_DEPTH, Tree, TreeBuilder};
 pub use crate::wire::{
     BinaryResponse, ChildPage, ChildRow, ConfirmationToken, Cursor, CursorPayload, Details, DisplayPath, LayoutKind,
-    ReportName, ReportParams, ScanErrorReport, Sort, SortDirection, SortKey, TrashItemResult, TrashPreview,
-    TrashPreviewItem, TrashReport, Viewport, VolumeInfo,
+    ReportName, ReportParams, ScanErrorReport, SnapshotOffer, Sort, SortDirection, SortKey, TrashItemResult,
+    TrashPreview, TrashPreviewItem, TrashReport, Viewport, VolumeInfo,
 };
 
 /// Version of the IPC contract.

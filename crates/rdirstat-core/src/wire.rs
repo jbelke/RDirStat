@@ -631,6 +631,30 @@ pub struct TrashReport {
     pub items: Vec<TrashItemResult>,
 }
 
+/// Whether a volume has a restorable snapshot, and what it says about itself.
+///
+/// Read from the snapshot's header and metadata only, so a menu can render this
+/// for every mounted volume without decoding an arena.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct SnapshotOffer {
+    /// The volume's mount point, escaped for display.
+    pub mount_point: DisplayPath,
+    /// `st_dev`, which together with the mount point identifies the snapshot.
+    pub device: u64,
+    /// Whether a restore is on offer at all.
+    pub has_snapshot: bool,
+    /// When the snapshot's scan finished, Unix milliseconds. `None` when there
+    /// is no snapshot.
+    ///
+    /// Not optional decoration: a restore that does not say how old it is lets
+    /// a stale tree pass for the current state of the disk.
+    pub taken_unix_ms: Option<i64>,
+    /// Retained nodes in the snapshot.
+    pub nodes: Option<u64>,
+    /// Size of the snapshot file on disk.
+    pub bytes: Option<u64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -27,6 +27,8 @@ export interface UseLayoutBatchOptions {
   readonly devicePixelRatio: number;
   readonly minPx: number;
   readonly fetchLayout: LayoutFetcher;
+  /** Category ids to keep, or `null` for everything. Part of the request key. */
+  readonly categories?: readonly number[] | null;
   /** Suppress the request (no scan loaded, zero-sized container). */
   readonly enabled: boolean;
 }
@@ -41,13 +43,19 @@ export interface LayoutBatchState {
 }
 
 export function useLayoutBatch(options: UseLayoutBatchOptions): LayoutBatchState {
-  const { generation, root, kind, width, height, devicePixelRatio, minPx, fetchLayout, enabled } = options;
+  const { generation, root, kind, width, height, devicePixelRatio, minPx, categories = null, fetchLayout, enabled } =
+    options;
 
   const [batch, setBatch] = useState<LayoutBatch | null>(null);
   const [error, setError] = useState<LayoutError | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadMs, setLoadMs] = useState<number | null>(null);
   const [nonce, setNonce] = useState(0);
+  // A stable key for the filter. The array identity changes on every render, so
+  // depending on it directly would refetch the layout continuously; the joined
+  // ids change only when the filter actually does.
+  const categoriesKey = categories === null ? "" : [...categories].sort((a, b) => a - b).join(",");
+
   const fetcherRef = useRef(fetchLayout);
   fetcherRef.current = fetchLayout;
 
@@ -88,6 +96,7 @@ export function useLayoutBatch(options: UseLayoutBatchOptions): LayoutBatchState
             kind,
             viewport: { width, height, devicePixelRatio },
             minPx,
+            categories,
           },
           controller.signal,
         );
@@ -117,7 +126,7 @@ export function useLayoutBatch(options: UseLayoutBatchOptions): LayoutBatchState
       cancelled = true;
       controller.abort();
     };
-  }, [enabled, normalizedGeneration, generation, root, kind, width, height, devicePixelRatio, minPx, nonce]);
+  }, [categoriesKey, enabled, normalizedGeneration, generation, root, kind, width, height, devicePixelRatio, minPx, nonce]);
 
   const refetch = useRef(() => setNonce((value) => value + 1)).current;
 

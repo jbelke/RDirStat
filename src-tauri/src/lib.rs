@@ -71,6 +71,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::node_details,
             commands::size_bands,
             commands::size_band_entries,
+            commands::snapshot_offers,
+            commands::restore_snapshot,
             commands::ancestors,
             commands::path_of,
             commands::volumes,
@@ -208,7 +210,7 @@ fn restore_last_scan(app: tauri::AppHandle) {
             let root = restored.scan.root_path.clone();
 
             let state = tauri::Manager::state::<AppState>(&app);
-            if let Some(generation) = state.publish_restored(*restored.scan) {
+            if let Some(generation) = state.publish_restored_if_idle(*restored.scan) {
                 tracing::info!(
                     path = %path.display(),
                     bytes,
