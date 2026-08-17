@@ -31,6 +31,7 @@ import type { SortingState } from "@tanstack/react-table";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DetailsPanel } from "@/components/DetailsPanel";
+import { DriveSwitcher } from "@/components/DriveSwitcher";
 import { RelocateDialog } from "@/components/RelocateDialog";
 import { CategoryLegend } from "@/components/canvas/CategoryLegend";
 import {
@@ -65,6 +66,7 @@ import {
   useAncestors,
   useNodeDetails,
   useScanStatus,
+  useVolumes,
   useSizeBands,
 } from "@/lib/queries";
 import { cn } from "@/lib/utils";
@@ -116,6 +118,9 @@ export function AppShell() {
 
   const currentRoot = useCurrentRoot();
   const soleSelection = useSoleSelection();
+  // Also feeds the volume picker route; the query is shared and cached, so the
+  // drive switcher costs no extra IPC.
+  const volumes = useVolumes();
 
   const [sorting, setSorting] = useState<SortingState>([{ id: "logical", desc: true }]);
   const [starting, setStarting] = useState(false);
@@ -331,20 +336,49 @@ export function AppShell() {
   );
 
   // ⌘↑ is the Finder shortcut for "enclosing folder", so it is the one a macOS
-  // user will already try.
+  // user will already try; ⇧⌘↑ goes all the way back to the scan root.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!event.metaKey || event.key !== "ArrowUp" || navStack.length < 2) return;
       event.preventDefault();
-      navigateUpTo(navStack.length - 2);
+      navigateUpTo(event.shiftKey ? 0 : navStack.length - 2);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [navStack.length, navigateUpTo]);
 
+  /*
+   * Switching drives is a *new scan*, not a view change.
+   *
+   * It discards the tree on screen along with the selection and the navigation
+   * stack, and on a large volume it costs minutes. `handleScan` already refuses
+   * while one is running (the app runs exactly one), so the guard here is about
+   * not asking for work that would be thrown away rather than about safety.
+   */
+  const scanning = scanState === "scanning" || scanState === "cancelling" || scanState === "finalizing";
+  const handleSwitchDrive = useCallback(
+    (mountPoint: string) => {
+      void handleScan(mountPoint);
+    },
+    [handleScan],
+  );
+
   return (
     <div className="flex h-full flex-col">
-      <Titlebar crumbs={crumbs} onNavigate={handleCrumbNavigate}>
+      <Titlebar
+        crumbs={crumbs}
+        onNavigate={handleCrumbNavigate}
+        leadingActions={
+          generation !== GENERATION_NONE && (
+            <DriveSwitcher
+              volumes={volumes.data ?? []}
+              scanRootPath={summary?.rootPath ?? null}
+              busy={scanning || starting}
+              onSelect={handleSwitchDrive}
+            />
+          )
+        }
+      >
         {generation !== GENERATION_NONE && (
           <Button variant="ghost" size="sm" onClick={() => setRoute("volumes")}>
             Scan…
@@ -443,6 +477,12 @@ export function AppShell() {
                     </>
                   )}
                 </span>
+
+                {/* Top-right, on the toolbar line, and dismissible. These are
+                  * permanent facts about a boot-volume scan rather than news,
+                  * so as stacked banners between the chart and the table they
+                  * were a fixed tax on the main view for the whole session. */}
+                <ScanAlerts summary={summary} />
               </div>
 
               {/* The canvas owns its own `layout` fetch, decode, hit-test and
@@ -472,8 +512,6 @@ export function AppShell() {
                 * once the canvas reports which categories it actually drew,
                 * pass that set instead so the legend shrinks on drill-down. */}
               <CategoryLegend colorBy={colorBy} present={null} onColorByChange={setColorBy} />
-
-              <ScanAlerts summary={summary} className="p-3" />
 
               <TreeTable
                 generation={generation}

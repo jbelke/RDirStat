@@ -25,7 +25,7 @@
  * unlabeled toolbar icons."
  */
 
-import { ChevronRight, CornerLeftUp, Search, Settings } from "lucide-react";
+import { ChevronRight, ChevronUp, ChevronsUp, Search, Settings } from "lucide-react";
 import { Fragment, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -53,6 +53,12 @@ export interface TitlebarProps {
   onNavigate?: (node: number, index: number) => void;
   onOpenCommandPalette?: () => void;
   onOpenSettings?: () => void;
+  /**
+   * Rendered at the *start* of the trailing actions, before the Scan button —
+   * this is where the drive switcher goes. Kept as a slot rather than a prop
+   * bundle so the titlebar does not have to know what a volume is.
+   */
+  leadingActions?: React.ReactNode;
   /** Rendered between the breadcrumb and the trailing actions (e.g. a Scan button). */
   children?: React.ReactNode;
 }
@@ -75,6 +81,7 @@ export function Titlebar({
   onNavigate,
   onOpenCommandPalette,
   onOpenSettings,
+  leadingActions,
   children,
 }: TitlebarProps) {
   const [expanded, setExpanded] = useState(false);
@@ -96,6 +103,21 @@ export function Titlebar({
   const parent = crumbs.length >= 2 ? crumbs[crumbs.length - 2] : undefined;
   const upTarget = parent?.node ?? null;
 
+  /*
+   * Crumb 0 is the app name; crumb 1 is the scan root. So "go to the root of
+   * the drive" is a jump to index 1, and it is only offered when we are not
+   * already there.
+   *
+   * This exists because the trail was the *only* way back. That is fine at
+   * depth — the root crumb is right there — but the moment a user drills in via
+   * the canvas or a double-click, the way back is a small text link they have
+   * to notice, and there is no fixed affordance that is always in the same
+   * place. Drilling in is one gesture; getting out should not require reading.
+   */
+  const rootCrumb = crumbs.length >= 2 ? crumbs[1] : undefined;
+  const atRoot = crumbs.length <= 2;
+  const rootTarget = atRoot ? null : (rootCrumb?.node ?? null);
+
   return (
     <header
       data-tauri-drag-region
@@ -106,6 +128,19 @@ export function Titlebar({
       )}
       style={{ paddingLeft: "var(--traffic-light-inset)" }}
     >
+      {rootTarget !== null && onNavigate !== undefined && (
+        <button
+          type="button"
+          onClick={() => onNavigate(rootTarget, 1)}
+          aria-keyshortcuts="Meta+Shift+ArrowUp"
+          title={`Back to ${rootCrumb?.label ?? "the scan root"} (⇧⌘↑)`}
+          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <ChevronsUp aria-hidden className="size-4" />
+          <span className="sr-only">Back to the top of this drive</span>
+        </button>
+      )}
+
       {upTarget !== null && onNavigate !== undefined && (
         <button
           type="button"
@@ -114,7 +149,7 @@ export function Titlebar({
           title={`Up to ${parent?.label ?? "the parent"} (⌘↑)`}
           className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <CornerLeftUp aria-hidden className="size-4" />
+          <ChevronUp aria-hidden className="size-4" />
           <span className="sr-only">Up one level</span>
         </button>
       )}
@@ -184,6 +219,7 @@ export function Titlebar({
       </nav>
 
       <div className="flex shrink-0 items-center gap-1">
+        {leadingActions}
         {children}
         {onOpenCommandPalette !== undefined && (
           <Button
