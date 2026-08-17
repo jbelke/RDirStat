@@ -125,7 +125,21 @@ pub fn layout_tiles(tree: &Tree, root: NodeId, options: &LayoutOptions) -> Resul
             _ => squarify(&mut scratch, frame.region, total, plan.min_area),
         };
 
-        for slot in scratch.iter().take(placed) {
+        // Pushed smallest-first so the LIFO stack POPS largest-first.
+        //
+        // `scratch` is sorted descending, so iterating it forwards and pushing
+        // would put the smallest child on top of the stack and expand it first.
+        // That matters because `max_tiles` truncates whatever has not been
+        // reached yet: spending the budget smallest-first meant a 1M-node
+        // subtree drew thousands of pinhead tiles from its least significant
+        // corner and then ran out before subdividing the blocks the user can
+        // actually see. The budget belongs to the largest subtrees, which are
+        // the ones occupying enough pixels to be worth resolving.
+        //
+        // Paint order is unaffected: a parent is emitted when it is popped,
+        // before any of its children are pushed, so a node still always precedes
+        // its descendants whatever order its siblings are in.
+        for slot in scratch.iter().take(placed).rev() {
             if !plan.is_drawable(slot.rect) {
                 continue;
             }

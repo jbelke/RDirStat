@@ -718,3 +718,90 @@ fn the_cutoff_bounds_every_layout_kind_on_a_fifty_thousand_node_tree() {
         }
     }
 }
+
+// --------------------------------------------------- largest-subtree budget --
+
+/// `root` with one heavy subtree and one full of dust, both needing subdivision.
+///
+/// ```text
+/// root
+///   heavy/   3 files of 4 MB      (12 MB, ~92% of the tree)
+///   dust/    `dust` files of 1 KB
+/// ```
+fn lopsided_tree(dust: usize) -> Tree {
+    let mut builder = TreeBuilder::new();
+    let root = push_dir(&mut builder, None, b"root").expect("root");
+
+    let heavy = push_dir(&mut builder, Some(root), b"heavy").expect("heavy");
+    for index in 0..3_u32 {
+        push_file(&mut builder, heavy, format!("heavy{index}.bin").as_bytes(), 4 << 20).expect("heavy file");
+    }
+
+    let dusty = push_dir(&mut builder, Some(root), b"dust").expect("dust");
+    for index in 0..dust {
+        push_file(&mut builder, dusty, format!("d{index:05}.bin").as_bytes(), 1 << 10).expect("dust file");
+    }
+
+    builder.rollup().expect("rollup");
+    builder.finish().expect("finish")
+}
+
+/// Regression: the tile budget belongs to the largest subtrees.
+///
+/// Children are laid out sorted descending, then pushed onto a LIFO stack. Push
+/// them forwards and the stack pops the SMALLEST first, so `max_tiles` was spent
+/// resolving the least significant corner of the tree while the blocks big enough
+/// to see were left flat. On a real 1M-node scan of /Applications that rendered
+/// as a field of pinhead tiles with no large blocks at all.
+#[test]
+fn the_tile_budget_is_spent_on_the_largest_subtree_first() {
+    let tree = lopsided_tree(400);
+    // Far below `dust`'s 400 children, so the budget must be rationed and the
+    // walk's order decides who gets it.
+    let options = options(LayoutKind::Treemap, 800.0, 600.0, 2.0, 0.5).with_max_tiles(24);
+    let tiles = layout_tiles(&tree, tree.root(), &options).expect("a layout");
+
+    let names: Vec<&[u8]> = tiles.iter().filter_map(|tile| tree.name_bytes(tile.node)).collect();
+    let heavy_files = names.iter().filter(|name| name.starts_with(b"heavy")).count();
+
+    assert!(
+        heavy_files > 0,
+        "the heaviest subtree got no tiles at all; the budget went to the dust ({} tiles: {:?})",
+        tiles.len(),
+        names
+            .iter()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The user-visible half of the same property: a parent's children are emitted
+/// biggest first, so the buffer reads large-to-small rather than arbitrarily.
+#[test]
+fn treemap_siblings_are_emitted_largest_first() {
+    let tree = lopsided_tree(8);
+    let tiles = layout_tiles(
+        &tree,
+        tree.root(),
+        &options(LayoutKind::Treemap, 800.0, 600.0, 2.0, 0.5),
+    )
+    .expect("a layout");
+
+    // The two depth-1 tiles are `heavy` and `dust`; `heavy` is ~92% of the tree
+    // and must come first.
+    let depth_one: Vec<&[u8]> = tiles
+        .iter()
+        .filter(|tile| tile.depth == 1)
+        .filter_map(|tile| tree.name_bytes(tile.node))
+        .collect();
+
+    assert_eq!(
+        depth_one.first().map(|name| String::from_utf8_lossy(name).into_owned()),
+        Some("heavy".to_owned()),
+        "the heaviest child must be emitted first, got {:?}",
+        depth_one
+            .iter()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .collect::<Vec<_>>()
+    );
+}
