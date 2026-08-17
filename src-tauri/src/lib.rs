@@ -39,7 +39,6 @@ mod cursor;
 mod engine;
 mod events;
 mod fsident;
-mod layout;
 mod progress;
 mod query;
 mod state;

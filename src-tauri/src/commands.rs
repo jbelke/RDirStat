@@ -24,7 +24,7 @@ use rdirstat_core::{
 
 use crate::engine::{self, ScanOutcome, ScanRequest};
 use crate::state::AppState;
-use crate::{actions, layout, progress, query, volumes};
+use crate::{actions, progress, query, volumes};
 
 fn now_unix_ms() -> i64 {
     SystemTime::now()
@@ -305,10 +305,17 @@ pub(crate) async fn reveal_in_finder(
 
 /// The tile batch for one hierarchy view, as Arrow IPC.
 ///
+/// Geometry and serialization belong to `rdirstat-treemap`; this command only
+/// resolves the generation, moves the work off the async executor, and hands
+/// back the bytes.
+///
 /// # Errors
 ///
 /// [`QueryError::NoScan`], [`QueryError::StaleGeneration`],
-/// [`QueryError::UnknownNode`], or [`QueryError::VirtualGroup`].
+/// [`QueryError::UnknownNode`], or [`QueryError::Internal`] naming the
+/// offending viewport field. Note a `<Files>` group root is **not** an error:
+/// `rdirstat-treemap` lays the group out as its owner's direct files, so
+/// double-clicking a group row is not a dead end.
 #[tauri::command]
 pub(crate) async fn layout(
     state: tauri::State<'_, AppState>,
@@ -320,7 +327,7 @@ pub(crate) async fn layout(
 ) -> Result<tauri::ipc::Response, QueryError> {
     let scan = state.tree_for_query(generation)?;
     let response = tauri::async_runtime::spawn_blocking(move || {
-        layout::build(&scan.tree, generation, root, kind, viewport, min_px)
+        rdirstat_treemap::layout(&scan.tree, generation, root, kind, viewport, min_px)
     })
     .await
     .map_err(|error| QueryError::Internal(error.to_string()))??;

@@ -3536,9 +3536,9 @@ name = "rdirstat"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arrow",
  "crossbeam-channel",
  "rdirstat-core",
+ "rdirstat-treemap",
  "serde",
  "serde_json",
  "specta",

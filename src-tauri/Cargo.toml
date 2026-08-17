@@ -48,6 +48,11 @@ anyhow = { workspace = true }
 # --- the shared contract; every DTO and error crossing IPC lives here ---
 rdirstat-core = { workspace = true }
 
+# --- the `layout` command: squarified treemap / icicle / sunburst + the Arrow
+# IPC writer for the schema pinned in rdirstat_core::LAYOUT_COLUMNS. This crate
+# owns the tile geometry and the `BinaryResponse`; src-tauri only forwards.
+rdirstat-treemap = { workspace = true }
+
 # --- typed IPC: `specta` describes the DTOs, `tauri-specta` emits the client ---
 specta = { workspace = true }
 tauri-specta = { workspace = true }
@@ -58,10 +63,10 @@ tauri-specta = { workspace = true }
 # `LanguageExt` is implemented for.
 specta-typescript = "=0.0.12"
 
-# --- Arrow IPC for `layout` (and, in phase 6, `report`) ---
-# Only the `ipc` writer is used; the workspace pin already enables it by
-# default, and a member may not lower `default-features` on an inherited dep.
-arrow = { workspace = true, features = ["ipc"] }
+# NOTE: `arrow` is deliberately NOT a dependency here. The only Arrow writer in
+# the app is `rdirstat-treemap`'s, which hands back an already-serialized
+# `BinaryResponse`. Re-add it in the same change that makes src-tauri build a
+# batch of its own (phase 6 `report` is the likely one).
 
 # --- macOS actions: NSFileManager trashItem, never fs::remove_file ---
 trash = { workspace = true }
