@@ -45,7 +45,7 @@ use rdirstat_core::{
     CategoryId, CompletedScan, ConfigHash, DisplayPath, ExclusionRule, Kind, ScanError, ScanId, ScanOptions,
     ScanProgress, ScanState, StartError, TreeGeneration, flags,
 };
-use rdirstat_scan::{Categorizer as ScanCategorizer, ProgressSink, Scanner};
+use rdirstat_scan::{Categorizer as ScanCategorizer, ErrorSink, ProgressSink, Scanner};
 
 use crate::progress::ProgressCounters;
 use crate::state::CancelToken;
@@ -90,11 +90,17 @@ struct CounterSink {
 impl ProgressSink for CounterSink {
     fn publish(&self, progress: &ScanProgress) {
         let counters = &self.counters;
-        counters.observed_entries.store(progress.observed_entries, Ordering::Relaxed);
-        counters.retained_nodes.store(progress.retained_nodes, Ordering::Relaxed);
+        counters
+            .observed_entries
+            .store(progress.observed_entries, Ordering::Relaxed);
+        counters
+            .retained_nodes
+            .store(progress.retained_nodes, Ordering::Relaxed);
         counters.directories.store(progress.directories, Ordering::Relaxed);
         counters.logical_bytes.store(progress.logical_bytes, Ordering::Relaxed);
-        counters.allocated_bytes.store(progress.allocated_bytes, Ordering::Relaxed);
+        counters
+            .allocated_bytes
+            .store(progress.allocated_bytes, Ordering::Relaxed);
         counters.errors.store(progress.errors, Ordering::Relaxed);
         counters.mutations.store(progress.mutations, Ordering::Relaxed);
         counters.pending_dirs.store(progress.pending_dirs, Ordering::Relaxed);
@@ -112,6 +118,23 @@ impl ProgressSink for CounterSink {
 
         counters.set_state(progress.state);
         counters.offer_current_display(progress.current_dir.clone());
+    }
+}
+
+/// Mirrors every recorded failure into the shell's own bounded error log.
+///
+/// The scanner keeps the authoritative list in
+/// [`CompletedScan::errors`](rdirstat_core::CompletedScan::errors), but that
+/// only exists once the scan is over — and "what are these 334 errors" is a
+/// question asked *while* the counter is climbing. This is the live half:
+/// per-class counts and the first few failures in full, read by `scan_errors`.
+struct ErrorRecorder {
+    counters: Arc<ProgressCounters>,
+}
+
+impl ErrorSink for ErrorRecorder {
+    fn record(&self, error: &ScanError) {
+        self.counters.record_error(error);
     }
 }
 
@@ -203,6 +226,9 @@ pub(crate) fn run(request: ScanRequest) -> ScanOutcome {
         .with_engine(engine)
         .with_cancel(cancel.scan_token())
         .with_progress(Arc::new(CounterSink {
+            counters: Arc::clone(&counters),
+        }))
+        .with_error_sink(Arc::new(ErrorRecorder {
             counters: Arc::clone(&counters),
         }))
         .with_scan_id(scan_id)
@@ -349,6 +375,9 @@ mod tests {
         assert!(!scan_token.is_cancelled());
         token.request();
         assert!(token.is_cancelled(), "the shell's own flag is set");
-        assert!(scan_token.is_cancelled(), "and the scanner sees it with no bridge thread");
+        assert!(
+            scan_token.is_cancelled(),
+            "and the scanner sees it with no bridge thread"
+        );
     }
 }

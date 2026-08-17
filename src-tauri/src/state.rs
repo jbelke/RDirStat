@@ -162,6 +162,19 @@ impl AppState {
         read(&self.published).clone()
     }
 
+    /// The running scan's counters, if one is running.
+    ///
+    /// `scan_errors` answers from these while a scan is active and from the
+    /// published tree once it is not, which is the only way a user can ask
+    /// "what are those 334 errors" *while the number is still climbing*.
+    #[must_use]
+    pub fn active_counters(&self) -> Option<Arc<ProgressCounters>> {
+        lock(&self.lifecycle)
+            .active
+            .as_ref()
+            .map(|active| Arc::clone(&active.counters))
+    }
+
     /// The published tree, or the reason a read command cannot proceed.
     ///
     /// **A stale generation is rejected, never silently upgraded.** The
