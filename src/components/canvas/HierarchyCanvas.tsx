@@ -81,6 +81,12 @@ export interface HierarchyCanvasProps {
   readonly onSelectionChange?: (change: SelectionChange) => void;
 
   readonly onContextAction?: (request: ContextActionRequest) => void;
+  /**
+   * Whether "Move to Trash…" is offered at all. Defaults to `false`: the canvas
+   * is a view, and it does not get to decide that deletion is on. The shell
+   * owns the arming switch and passes it down.
+   */
+  readonly trashEnabled?: boolean;
   readonly onNavigate?: (node: number, stack: readonly number[]) => void;
   readonly onPaint?: (report: PaintReport) => void;
 
@@ -118,6 +124,7 @@ export function HierarchyCanvas({
   selectedNodes,
   onSelectionChange,
   onContextAction,
+  trashEnabled = false,
   onNavigate,
   onPaint,
   formatBytes = formatSi,
@@ -448,12 +455,14 @@ export function HierarchyCanvas({
       {
         action: "trash",
         label: "Move to Trash…",
-        disabled: virtualGroup || isScanRoot,
-        disabledReason: virtualGroup ? reason : isScanRoot ? "scan root" : undefined,
+        // `trashEnabled` is the app-wide arming switch. It is listed last of the
+        // three reasons so the more specific ones still explain themselves.
+        disabled: virtualGroup || isScanRoot || !trashEnabled,
+        disabledReason: virtualGroup ? reason : isScanRoot ? "scan root" : !trashEnabled ? "deletion off" : undefined,
         destructive: true,
       },
     ];
-  }, [menu, stack]);
+  }, [menu, stack, trashEnabled]);
 
   const canvasLabel =
     batch === null

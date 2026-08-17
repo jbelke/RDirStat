@@ -19,10 +19,13 @@
  */
 
 import { CircleAlert, Info, TriangleAlert } from "lucide-react";
+import { useState } from "react";
 
+import { ScanErrorList } from "@/components/ScanErrorList";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { formatCount } from "@/lib/format";
 import type { ScanSummaryView } from "@/lib/ipc";
+import { useScanErrors } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
 export interface ScanAlertsProps {
@@ -31,6 +34,11 @@ export interface ScanAlertsProps {
 }
 
 export function ScanAlerts({ summary, className }: ScanAlertsProps) {
+  // Unconditional: this component returns null on several paths below, and the
+  // hook order must not depend on which one.
+  const [detailOpen, setDetailOpen] = useState(false);
+  const errors = useScanErrors(detailOpen);
+
   if (summary === null) return null;
 
   const permissionDenied = summary.errorCounts
@@ -127,6 +135,32 @@ export function ScanAlerts({ summary, className }: ScanAlertsProps) {
           available.
         </AlertDescription>
       </Alert>,
+    );
+  }
+
+  // The failure list itself, one disclosure away from every alert above that
+  // counted something. The alerts say how many and what kind; this says which
+  // paths, and is not fetched until it is opened.
+  if (permissionDenied + otherErrors > 0) {
+    alerts.push(
+      <div key="detail" className="flex flex-col gap-2">
+        <button
+          type="button"
+          aria-expanded={detailOpen}
+          onClick={() => setDetailOpen((open) => !open)}
+          className="self-start text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+        >
+          {detailOpen ? "Hide the failed paths" : "Show the failed paths"}
+        </button>
+        {detailOpen && (
+          <ScanErrorList
+            report={errors.data}
+            isLoading={errors.isLoading}
+            error={errors.error}
+            className="rounded-md border border-border/60 p-3"
+          />
+        )}
+      </div>,
     );
   }
 

@@ -51,6 +51,12 @@ export interface TreeTableProps {
   onHover?: (node: number | null) => void;
   onReveal?: (node: number) => void;
   onTrash?: (node: number) => void;
+  /**
+   * Whether the row menu offers Trash. Defaults to `false` — the shell owns the
+   * arming switch, and a table that decided this for itself would be a second
+   * place deletion could turn on.
+   */
+  trashEnabled?: boolean;
 }
 
 export function TreeTable({
@@ -68,6 +74,7 @@ export function TreeTable({
   onHover,
   onReveal,
   onTrash,
+  trashEnabled = false,
 }: TreeTableProps) {
   const sort = useMemo(() => toBackendSort(sorting), [sorting]);
   const tree = useTreeRows({ generation, root, sort, rootLogical, rootAllocated });
@@ -218,11 +225,11 @@ export function TreeTable({
           <ContextMenuSeparator />
           <ContextMenuItem
             variant="destructive"
-            disabled={entry.row.isVirtualGroup || onTrash === undefined}
+            disabled={entry.row.isVirtualGroup || onTrash === undefined || !trashEnabled}
             onSelect={() => onTrash?.(entry.row.node)}
           >
-            <Trash2 aria-hidden />
-            Move to Trash…
+            {trashEnabled ? <Trash2 aria-hidden /> : <Lock aria-hidden />}
+            {trashEnabled ? "Move to Trash…" : "Move to Trash… (deletion off)"}
           </ContextMenuItem>
         </>
       )}

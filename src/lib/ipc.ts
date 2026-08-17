@@ -31,8 +31,11 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   commands,
   type CancelState,
+  type ErrorClass,
   type Kind,
   type LayoutKind,
+  type Operation,
+  type ScanError,
   type ScanOptions,
   type ScanState,
   type Sort,
@@ -41,7 +44,18 @@ import {
 } from "@/lib/bindings";
 import { MAX_CHILD_PAGE, num, SCAN_PROGRESS_EVENT, unwrap, type NumLike } from "@/lib/wire";
 
-export type { CancelState, Kind, LayoutKind, ScanOptions, ScanState, Sort, SortDirection, SortKey };
+export type {
+  CancelState,
+  ErrorClass,
+  Kind,
+  LayoutKind,
+  Operation,
+  ScanOptions,
+  ScanState,
+  Sort,
+  SortDirection,
+  SortKey,
+};
 
 // ---------------------------------------------------------------------------
 // Loose wire shapes.
@@ -143,8 +157,33 @@ export interface VolumeRow {
   readonly mountPoint: string;
   readonly device: number;
   readonly fsType: string;
+  /**
+   * Capacity of the *container*, on APFS. Every volume sharing a container
+   * reports the same number, which is why the picker groups them and states
+   * this once rather than per row.
+   */
   readonly totalBytes: number;
+  /** Free space in the container, on APFS. Shared, like `totalBytes`. */
   readonly availableBytes: number;
+  /**
+   * What this volume itself occupies. The only capacity number here that is
+   * private to the volume — never `totalBytes - availableBytes`, which on APFS
+   * is the whole container's usage.
+   */
+  readonly usedBytes: number;
+  /** `/dev/disk3s1s1`. */
+  readonly deviceNode: string;
+  /** APFS container reference (`disk3`), or the whole disk for non-APFS. */
+  readonly containerId: string | null;
+  /** The physical disk backing the container (`disk0`). */
+  readonly diskId: string | null;
+  /** Media name of that disk, e.g. `APPLE SSD AP1024Z`. */
+  readonly diskName: string | null;
+  /** Size of the physical disk, which is larger than any one container. */
+  readonly diskSizeBytes: number | null;
+  readonly isInternal: boolean;
+  /** A macOS-owned volume (`Preboot`, `VM`, `Update`, …), not a user volume. */
+  readonly isSystem: boolean;
   /**
    * macOS's "available for important usage" — larger than `availableBytes`
    * because it counts purgeable space the system would reclaim under pressure.
@@ -398,12 +437,145 @@ export async function volumes(): Promise<VolumeRow[]> {
     fsType: volume.fs_type,
     totalBytes: num(volume.total_bytes),
     availableBytes: num(volume.available_bytes),
+    usedBytes: num(volume.used_bytes),
+    deviceNode: volume.device_node,
+    containerId: volume.container_id,
+    diskId: volume.disk_id,
+    diskName: volume.disk_name,
+    diskSizeBytes: volume.disk_size_bytes === null ? null : num(volume.disk_size_bytes),
+    isInternal: volume.is_internal,
+    isSystem: volume.is_system,
     importantAvailableBytes:
       volume.important_available_bytes === null ? null : num(volume.important_available_bytes),
     isRootVolume: volume.is_root_volume,
     isRemovable: volume.is_removable,
     hasLocalSnapshots: volume.has_local_snapshots,
   }));
+}
+
+/**
+ * What a scan's recorded failures were.
+ *
+ * The counter in the status strip says *how many*; this is the only thing in
+ * the contract that says *what*. It answers from the running scan while one is
+ * active and from the published tree afterwards, so the affordance behaves the
+ * same in both states — `live` says which one you got.
+ *
+ * The samples are flattened here rather than in a component: `ScanError` is a
+ * tagged union whose variants carry different fields, and exactly one place
+ * should know that `vanished` has no `os_code` and `memory_limit` has no path.
+ */
+export interface ScanFailureRow {
+  readonly kind: string;
+  readonly errorClass: ErrorClass;
+  readonly operation: Operation | null;
+  /** `null` for the failures that are not about one path. */
+  readonly path: string | null;
+  readonly osCode: number | null;
+  /** A one-line rendering, for a row that has nothing better to show. */
+  readonly detail: string;
+}
+
+export interface ScanErrorsView {
+  readonly live: boolean;
+  readonly generation: number;
+  readonly total: number;
+  readonly counts: readonly {
+    readonly errorClass: ErrorClass;
+    readonly operation: Operation | null;
+    readonly count: number;
+  }[];
+  readonly samples: readonly ScanFailureRow[];
+  readonly truncated: boolean;
+}
+
+/** How many sample failures to ask for. The backend caps this at 200. */
+export const SCAN_ERROR_SAMPLE_LIMIT = 100;
+
+export async function scanErrors(limit: number = SCAN_ERROR_SAMPLE_LIMIT): Promise<ScanErrorsView> {
+  const report = await unwrap("scan_errors", commands.scanErrors(limit));
+  return {
+    live: report.live,
+    generation: num(report.generation),
+    total: num(report.total),
+    counts: report.counts.map((entry) => ({
+      errorClass: entry.class,
+      operation: entry.operation,
+      count: num(entry.count),
+    })),
+    samples: report.samples.map(toFailureRow),
+    truncated: report.truncated,
+  };
+}
+
+function toFailureRow(error: ScanError): ScanFailureRow {
+  switch (error.kind) {
+    case "permission_denied":
+      return {
+        kind: error.kind,
+        errorClass: "permission_denied",
+        operation: error.detail.operation,
+        path: error.detail.path,
+        osCode: num(error.detail.os_code),
+        detail: "macOS refused access",
+      };
+    case "vanished":
+      return {
+        kind: error.kind,
+        errorClass: "not_found",
+        operation: error.detail.operation,
+        path: error.detail.path,
+        osCode: null,
+        detail: "removed or renamed while it was being read",
+      };
+    case "invalid_name":
+      return {
+        kind: error.kind,
+        errorClass: "invalid_name",
+        operation: null,
+        path: error.detail.path,
+        osCode: null,
+        detail: "the name is not valid UTF-8; the bytes are kept, the text is escaped",
+      };
+    case "io":
+      return {
+        kind: error.kind,
+        errorClass: error.detail.class,
+        operation: error.detail.operation,
+        path: error.detail.path,
+        osCode: num(error.detail.os_code),
+        detail: `errno ${num(error.detail.os_code)}`,
+      };
+    case "memory_limit":
+      return {
+        kind: error.kind,
+        errorClass: "other",
+        operation: null,
+        path: null,
+        osCode: null,
+        detail: `projected ${num(error.detail.projected_bytes)} B over the ${num(error.detail.limit_bytes)} B limit`,
+      };
+    case "root_unavailable":
+      return {
+        kind: error.kind,
+        errorClass: error.detail.class,
+        operation: null,
+        path: error.detail.path,
+        osCode: null,
+        detail: error.detail.reason,
+      };
+    default:
+      // `ScanError` is `#[non_exhaustive]`: a variant added in Rust must show
+      // up as an unexplained row rather than crash the panel that lists it.
+      return {
+        kind: "unknown",
+        errorClass: "other",
+        operation: null,
+        path: null,
+        osCode: null,
+        detail: "an unrecognised failure kind",
+      };
+  }
 }
 
 /**

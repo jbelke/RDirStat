@@ -28,10 +28,12 @@ import {
 import {
   children,
   nodeDetails,
+  scanErrors,
   scanStatus,
   volumes,
   type ChildPageView,
   type DetailsView,
+  type ScanErrorsView,
   type ScanStatusView,
   type Sort,
   type VolumeRow,
@@ -61,6 +63,7 @@ export function createQueryClient(): QueryClient {
  */
 export const queryKeys = {
   scanStatus: () => ["scanStatus"] as const,
+  scanErrors: () => ["scanErrors"] as const,
   volumes: () => ["volumes"] as const,
   children: (generation: number, parent: number, sort: Sort) =>
     ["children", generation, parent, sort.key, sort.direction] as const,
@@ -99,6 +102,29 @@ export function useScanStatus(): UseQueryResult<ScanStatusView, Error> {
       const state = query.state.data?.state;
       return state === "scanning" || state === "cancelling" || state === "finalizing" ? 500 : false;
     },
+  });
+}
+
+/**
+ * What the recorded scan failures were.
+ *
+ * **Fetched only while something is showing them.** `enabled` is the disclosure
+ * state of the caller, because this is the one query in the app whose answer
+ * nothing renders until asked: the strip shows a count from the progress event
+ * and only reaches for the detail when the user opens it.
+ *
+ * While a scan is live the answer keeps changing, so it polls at 1 Hz — an
+ * order of magnitude slower than the progress event, because a list of paths is
+ * read, not watched. Once the scan is over the answer is final and the poll
+ * stops.
+ */
+export function useScanErrors(enabled: boolean): UseQueryResult<ScanErrorsView, Error> {
+  return useQuery({
+    queryKey: queryKeys.scanErrors(),
+    queryFn: () => scanErrors(),
+    enabled,
+    staleTime: 0,
+    refetchInterval: (query) => (enabled && query.state.data?.live === true ? 1_000 : false),
   });
 }
 

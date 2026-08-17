@@ -93,6 +93,8 @@ export function AppShell() {
   const setHovered = useUiStore((state) => state.setHovered);
   const setLayoutKind = useUiStore((state) => state.setLayoutKind);
   const setSizeMetric = useUiStore((state) => state.setSizeMetric);
+  const deletionArmed = useUiStore((state) => state.deletionArmed);
+  const setDeletionArmed = useUiStore((state) => state.setDeletionArmed);
 
   const currentRoot = useCurrentRoot();
   const soleSelection = useSoleSelection();
@@ -162,12 +164,25 @@ export function AppShell() {
   // preview command exists in the contract; the confirmation sheet does not
   // exist in this build, and issuing `move_to_trash` without showing the user
   // what a generation-bound token covers would be worse than not offering it.
-  const handleTrash = useCallback((nodes: number[]) => {
-    setActionError(
-      `Move to Trash is not wired up in this build (${nodes.length} item${nodes.length === 1 ? "" : "s"} selected). ` +
-        "The confirmation sheet that binds a token to this generation has not been built, and issuing the action without it is not acceptable.",
-    );
-  }, []);
+  //
+  // The arming check is here as well as on every control that can reach it.
+  // The controls disable themselves so the state is visible; this one is the
+  // one that would still refuse if a control forgot to.
+  const handleTrash = useCallback(
+    (nodes: number[]) => {
+      if (!deletionArmed) {
+        setActionError(
+          "Deletion is off. Switch it on in the details panel if you mean to move items to the Trash — it turns itself off again on the next scan.",
+        );
+        return;
+      }
+      setActionError(
+        `Move to Trash is not wired up in this build (${nodes.length} item${nodes.length === 1 ? "" : "s"} selected). ` +
+          "The confirmation sheet that binds a token to this generation has not been built, and issuing the action without it is not acceptable.",
+      );
+    },
+    [deletionArmed],
+  );
 
   // ---------------------------------------------------------------------
   // Canvas wiring.
@@ -334,6 +349,7 @@ export function AppShell() {
                 onSelectionChange={handleCanvasSelection}
                 onNavigate={navigateTo}
                 onContextAction={handleCanvasAction}
+                trashEnabled={deletionArmed}
                 describeNode={describeNode}
                 formatBytes={formatSI}
               />
@@ -355,6 +371,7 @@ export function AppShell() {
                 onHover={setHovered}
                 onReveal={handleReveal}
                 onTrash={(node) => handleTrash([node])}
+                trashEnabled={deletionArmed}
               />
             </div>
           )}
@@ -367,6 +384,8 @@ export function AppShell() {
           onReveal={handleReveal}
           onTrash={handleTrash}
           onTrashDropped={handleTrash}
+          deletionArmed={deletionArmed}
+          onArmDeletion={setDeletionArmed}
         />
       </div>
 

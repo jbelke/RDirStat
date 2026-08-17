@@ -20,9 +20,17 @@
  * 4. **The Trash drop zone is persistent**, per docs/05's "Deletion is a drop
  *    target", and it states scan-time bytes with the APFS caveat rather than
  *    promising recovered space.
+ * 5. **Deletion is off until it is armed.** The drop target is persistent, but
+ *    it is not *live* until the user flips the switch above it, and the switch
+ *    goes back off by itself on every new scan (see `state/store.ts`). A drop
+ *    zone that is always hot sits one careless drag away from moving a folder
+ *    the user only meant to inspect; the arming gesture is the effort that buys
+ *    the difference back. While disarmed the zone refuses the drag outright —
+ *    `dropEffect = "none"` — so the cursor says no before the mouse is
+ *    released.
  */
 
-import { CircleAlert, Eye, Loader, Package, Trash2 } from "lucide-react";
+import { CircleAlert, Eye, Loader, Lock, Package, Trash2 } from "lucide-react";
 import { useState } from "react";
 
 import { CategoryChip } from "@/components/cells/CategoryChip";
@@ -42,6 +50,10 @@ export interface DetailsPanelProps {
   onTrash?: (nodes: number[]) => void;
   /** Nodes dropped onto the trash zone. Same authority path as the button. */
   onTrashDropped?: (nodes: number[]) => void;
+  /** Whether the destructive actions are live. Off by default; see the store. */
+  deletionArmed?: boolean;
+  /** Flips the arming. Omitted means the switch is not offered at all. */
+  onArmDeletion?: (armed: boolean) => void;
   className?: string;
 }
 
@@ -52,6 +64,8 @@ export function DetailsPanel({
   onReveal,
   onTrash,
   onTrashDropped,
+  deletionArmed = false,
+  onArmDeletion,
   className,
 }: DetailsPanelProps) {
   const { data, error, isLoading } = useNodeDetails(generation, node);
@@ -173,18 +187,65 @@ export function DetailsPanel({
               variant="destructive"
               size="sm"
               className="flex-1"
-              disabled={onTrash === undefined || isVirtualGroup(data.node)}
+              disabled={onTrash === undefined || isVirtualGroup(data.node) || !deletionArmed}
+              title={
+                deletionArmed
+                  ? undefined
+                  : "Deletion is off. Arm it below to move items to the Trash."
+              }
               onClick={() => onTrash?.([data.node])}
             >
-              <Trash2 aria-hidden />
+              {deletionArmed ? <Trash2 aria-hidden /> : <Lock aria-hidden />}
               Trash…
             </Button>
           </div>
         </>
       )}
 
-      <TrashDropZone onDrop={onTrashDropped} />
+      <div className="mt-auto flex flex-col gap-2">
+        <DeletionArmSwitch armed={deletionArmed} onChange={onArmDeletion} />
+        <TrashDropZone armed={deletionArmed} onDrop={onTrashDropped} />
+      </div>
     </aside>
+  );
+}
+
+/**
+ * The arming switch for every destructive action in the app.
+ *
+ * A plain checkbox with a switch role rather than a shadcn `Switch`: the
+ * component set this build copied in does not include one, and the semantics
+ * that matter here — a real focusable control, a real checked state, a label
+ * that says what happens — are the input's, not the styling's.
+ */
+function DeletionArmSwitch({ armed, onChange }: { armed: boolean; onChange?: (armed: boolean) => void }) {
+  return (
+    <label
+      className={cn(
+        "flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2 transition-colors",
+        armed ? "border-destructive/60 bg-destructive/10" : "border-border",
+        onChange === undefined && "cursor-not-allowed opacity-60",
+      )}
+    >
+      <input
+        type="checkbox"
+        role="switch"
+        checked={armed}
+        disabled={onChange === undefined}
+        onChange={(event) => onChange?.(event.currentTarget.checked)}
+        className="size-4 shrink-0 accent-destructive"
+      />
+      <span className="min-w-0 flex-1">
+        <span className={cn("block text-xs font-medium", armed ? "text-destructive" : "text-foreground")}>
+          {armed ? "Deletion armed" : "Deletion off"}
+        </span>
+        <span className="block text-[10px] leading-tight text-muted-foreground">
+          {armed
+            ? "Trash and the drop target are live until the next scan."
+            : "Trash and the drop target are inert until you switch this on."}
+        </span>
+      </span>
+    </label>
   );
 }
 
@@ -224,16 +285,28 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
  * authority, and the backend re-validates each id against the generation before
  * it touches the filesystem. Dropping does not delete; it opens the
  * confirmation flow, which obtains a token bound to the current generation.
+ *
+ * **Persistent is not the same as live.** While `armed` is false the zone
+ * refuses the drag (`dropEffect = "none"`, no `preventDefault`), so the drop
+ * never fires and the cursor shows the refusal during the drag rather than
+ * after it. The zone stays visible either way: hiding it would make the
+ * capability feel missing instead of switched off.
  */
 export const NODE_DRAG_MIME = "application/x-rdirstat-nodes";
 
-function TrashDropZone({ onDrop }: { onDrop?: (nodes: number[]) => void }) {
+function TrashDropZone({ armed, onDrop }: { armed: boolean; onDrop?: (nodes: number[]) => void }) {
   const [active, setActive] = useState(false);
 
   return (
     <div
+      aria-disabled={!armed}
       onDragOver={(event) => {
         if (!event.dataTransfer.types.includes(NODE_DRAG_MIME)) return;
+        if (!armed) {
+          // No preventDefault: the browser's default is "reject this drop".
+          event.dataTransfer.dropEffect = "none";
+          return;
+        }
         event.preventDefault();
         event.dataTransfer.dropEffect = "move";
         setActive(true);
@@ -242,6 +315,7 @@ function TrashDropZone({ onDrop }: { onDrop?: (nodes: number[]) => void }) {
       onDrop={(event) => {
         event.preventDefault();
         setActive(false);
+        if (!armed) return;
         const raw = event.dataTransfer.getData(NODE_DRAG_MIME);
         if (raw.length === 0) return;
         try {
@@ -254,15 +328,22 @@ function TrashDropZone({ onDrop }: { onDrop?: (nodes: number[]) => void }) {
         }
       }}
       className={cn(
-        "mt-auto flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-6 text-center text-xs transition-colors",
-        active ? "border-destructive bg-destructive/10 text-destructive" : "border-border text-muted-foreground",
+        "flex flex-col items-center gap-1 rounded-lg border border-dashed px-4 py-6 text-center text-xs transition-colors",
+        !armed && "border-border/60 text-muted-foreground/50",
+        armed && !active && "border-border text-muted-foreground",
+        armed && active && "border-destructive bg-destructive/10 text-destructive",
       )}
     >
-      <Trash2 aria-hidden className="size-5" />
-      <span>Drag items here to move them to the Trash</span>
+      {armed ? <Trash2 aria-hidden className="size-5" /> : <Lock aria-hidden className="size-5" />}
+      <span>
+        {armed
+          ? "Drag items here to move them to the Trash"
+          : "Deletion is off — this target will not accept a drop"}
+      </span>
       <span className="text-[10px]">
-        Finder&rsquo;s Put Back keeps working. Recovered space can be smaller than the reported size
-        because APFS shares blocks.
+        {armed
+          ? "Finder’s Put Back keeps working. Recovered space can be smaller than the reported size because APFS shares blocks."
+          : "Switch deletion on above if you mean to remove something."}
       </span>
     </div>
   );

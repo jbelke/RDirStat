@@ -20,7 +20,20 @@
  * table, so the paint loop only ever does an array index.
  * ========================================================================== */
 
-import { categoryOf } from "../../lib/categories.ts";
+import { CATEGORIES, FAMILIES, categoryOf, familyKey } from "../../lib/categories.ts";
+
+/**
+ * What a tile's colour encodes.
+ *
+ * Twenty-five categories is past what a treemap can express. Once tiles are a
+ * few pixels wide, adjacent hues stop being tellable apart and the colour
+ * carries no information — it is just texture. `family` collapses the taxonomy
+ * onto docs/04's five headings, which stay distinguishable at tile size and
+ * survive a colour-vision deficiency; `category` keeps the full palette, which
+ * is the useful one once a drill-down has cut the categories on screen down to
+ * a handful.
+ */
+export type ColorBy = "category" | "family";
 
 /*
  * The index -> key -> label table is `src/lib/categories.ts`, which docs/05
@@ -54,6 +67,15 @@ const FALLBACK_COLORS: readonly string[] = [
   "#10b981", // library — emerald
   "#f472b6", // vm-disk — pink
   "#e879f9", // container-disk — fuchsia
+  // macOS additions, ids 19..24. Present in the compiled Rust table from the
+  // start; absent here until now, which is why a `node_modules` tile painted
+  // the golden-angle "I have never heard of this index" colour.
+  "#8e6fd0", // package — violet, the bundle family
+  "#2e8fa8", // media-library — deep cyan, media reads cool
+  "#c85a5a", // build-junk — dull red, build output is waste
+  "#d6714e", // cache — burnt orange, the most reclaimable thing on the disk
+  "#8e7cc3", // font — muted violet
+  "#7ca23c", // database — olive
 ];
 
 /** Maximum `CategoryId` count (`rdirstat_core::MAX_CATEGORIES`). */
@@ -61,9 +83,27 @@ const MAX_CATEGORIES = 256;
 
 const GOLDEN_ANGLE_DEGREES = 137.508;
 
+/** Fallback family fills, used when the theme defines no `--fam-<key>`. */
+const FALLBACK_FAMILY_COLORS: Readonly<Record<string, string>> = {
+  system: "#6b7280",
+  archives: "#d0a03e",
+  media: "#3e8ad1",
+  "documents-and-code": "#59bf7a",
+  "large-runtime-data": "#ce5b57",
+};
+
 export interface Palette {
-  /** 256 CSS colour strings, indexed by `CategoryId`. */
+  /**
+   * 256 CSS colour strings, indexed by `CategoryId`.
+   *
+   * Which encoding this holds depends on the `colorBy` the palette was
+   * resolved with: under `"family"` every category in a family maps to the
+   * same string, so the paint loop stays a single array index either way and
+   * needs to know nothing about the mode.
+   */
   readonly fills: readonly string[];
+  /** What `fills` encodes, so the legend can label itself honestly. */
+  readonly colorBy: ColorBy;
   /** Hairline between sibling tiles. */
   readonly border: string;
   /** Outline of a selected tile. */
@@ -78,6 +118,43 @@ export interface Palette {
 
 export function categoryLabel(index: number): string {
   return categoryOf(index).label;
+}
+
+export interface LegendEntry {
+  /** A `CategoryId` under `"category"`; a family name under `"family"`. */
+  readonly id: string;
+  readonly label: string;
+  /** The CSS `var()` reference, so the swatch follows the theme with no JS. */
+  readonly colorVar: string;
+}
+
+/**
+ * The rows a legend should show for a palette.
+ *
+ * Only categories actually present in the current view are worth listing — a
+ * legend enumerating all twenty-five is a wall of names, most of which are not
+ * on screen. `present` is the set of `CategoryId`s in the layout batch; pass
+ * `null` to list everything (the settings/help case).
+ */
+export function legendEntries(colorBy: ColorBy, present: ReadonlySet<number> | null): LegendEntry[] {
+  if (colorBy === "family") {
+    const families = new Set(
+      present === null
+        ? FAMILIES
+        : [...present].map((index) => categoryOf(index).family).filter((family) => family !== undefined),
+    );
+    return FAMILIES.filter((family) => families.has(family)).map((family) => ({
+      id: family,
+      label: family,
+      colorVar: `var(--fam-${familyKey(family)})`,
+    }));
+  }
+
+  return CATEGORIES.filter((category) => present === null || present.has(category.id)).map((category) => ({
+    id: String(category.id),
+    label: category.label,
+    colorVar: `var(--cat-${category.key})`,
+  }));
 }
 
 export function categoryKey(index: number): string {
@@ -124,7 +201,7 @@ let revisionCounter = 0;
  * Build the palette for the current theme. Call on mount and whenever the theme
  * changes — not per frame.
  */
-export function resolvePalette(element?: Element | null): Palette {
+export function resolvePalette(element?: Element | null, colorBy: ColorBy = "category"): Palette {
   const host = element ?? (typeof document === "undefined" ? null : document.documentElement);
   const styles = host !== null && typeof getComputedStyle === "function" ? getComputedStyle(host) : null;
   const isValid = makeColorValidator();
@@ -134,8 +211,13 @@ export function resolvePalette(element?: Element | null): Palette {
     // `categoryOf` maps an index the taxonomy has not claimed to `unknown`,
     // which the theme colours distinctly, so a version skew is visible rather
     // than silently painting VM disks in the audio colour.
-    const themed = readVar(styles, `--cat-${categoryOf(index).key}`);
-    const fallback = FALLBACK_COLORS.at(index) ?? generatedColor(index);
+    const category = categoryOf(index);
+    const token = colorBy === "family" ? `--fam-${familyKey(category.family)}` : `--cat-${category.key}`;
+    const themed = readVar(styles, token);
+    const fallback =
+      colorBy === "family"
+        ? (FALLBACK_FAMILY_COLORS[familyKey(category.family)] ?? FALLBACK_COLORS[0] ?? "#6b7280")
+        : (FALLBACK_COLORS.at(index) ?? generatedColor(index));
     fills[index] = themed !== null && isValid(themed) ? themed : fallback;
   }
 
@@ -147,6 +229,7 @@ export function resolvePalette(element?: Element | null): Palette {
   revisionCounter += 1;
   return {
     fills,
+    colorBy,
     border: isValid(border) ? border : "rgba(0, 0, 0, 0.35)",
     selection: isValid(selection) ? selection : "#ffffff",
     hover: isValid(hover) ? hover : "rgba(255, 255, 255, 0.85)",

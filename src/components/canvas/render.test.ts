@@ -88,6 +88,9 @@ const palette: Palette = {
   hover: "hover",
   background: "background",
   revision: 1,
+  // `Palette` gained `colorBy` when the legend landed; the renderer only reads
+  // `fills`, so the fixture pins the default encoding rather than a new mode.
+  colorBy: "category",
 };
 
 const treemap = decodeLayoutBatch(buildLayoutIpc(SAMPLE_TREEMAP_ROWS), { generation: "1", root: 0, kind: "treemap" });

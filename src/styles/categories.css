@@ -73,6 +73,24 @@
   --cat-vm-disk: oklch(0.54 0.15 345);
   --cat-container-disk: oklch(0.57 0.13 15);
 
+  /* macOS additions (ids 19..24). Reclaimable bulk reads warm and saturated —
+   * caches and build junk are the two things a user is actually hunting for —
+   * while bundles, fonts and libraries stay muted so they recede. */
+  --cat-package: oklch(0.54 0.1 285);
+  --cat-media-library: oklch(0.55 0.1 185);
+  --cat-build-junk: oklch(0.55 0.18 40);
+  --cat-cache: oklch(0.6 0.16 60);
+  --cat-font: oklch(0.56 0.08 310);
+  --cat-database: oklch(0.57 0.13 130);
+
+  /* Family fills, for "colour by family". Five hues, chosen far enough apart
+   * to survive both deuteranopia and a 3px tile. */
+  --fam-system: oklch(0.6 0.02 260);
+  --fam-archives: oklch(0.62 0.15 70);
+  --fam-media: oklch(0.56 0.13 210);
+  --fam-documents-and-code: oklch(0.57 0.14 145);
+  --fam-large-runtime-data: oklch(0.55 0.17 15);
+
   /* Anything the backend sends that this build does not know a key for. Kept
    * visually distinct from Uncategorized(0), which is a *decision*, whereas
    * this is a version skew between the category table and the UI. */
@@ -120,6 +138,19 @@
     --cat-vm-disk: oklch(0.66 0.14 345);
     --cat-container-disk: oklch(0.71 0.12 15);
 
+    --cat-package: oklch(0.73 0.09 285);
+    --cat-media-library: oklch(0.74 0.1 185);
+    --cat-build-junk: oklch(0.71 0.16 40);
+    --cat-cache: oklch(0.77 0.14 60);
+    --cat-font: oklch(0.74 0.07 310);
+    --cat-database: oklch(0.76 0.13 130);
+
+    --fam-system: oklch(0.66 0.02 260);
+    --fam-archives: oklch(0.79 0.13 70);
+    --fam-media: oklch(0.74 0.12 210);
+    --fam-documents-and-code: oklch(0.77 0.13 145);
+    --fam-large-runtime-data: oklch(0.68 0.16 15);
+
     --cat-unknown: oklch(0.55 0.02 300);
   }
 }
@@ -157,6 +188,19 @@
 
   --cat-vm-disk: oklch(0.66 0.14 345);
   --cat-container-disk: oklch(0.71 0.12 15);
+
+  --cat-package: oklch(0.73 0.09 285);
+  --cat-media-library: oklch(0.74 0.1 185);
+  --cat-build-junk: oklch(0.71 0.16 40);
+  --cat-cache: oklch(0.77 0.14 60);
+  --cat-font: oklch(0.74 0.07 310);
+  --cat-database: oklch(0.76 0.13 130);
+
+  --fam-system: oklch(0.66 0.02 260);
+  --fam-archives: oklch(0.79 0.13 70);
+  --fam-media: oklch(0.74 0.12 210);
+  --fam-documents-and-code: oklch(0.77 0.13 145);
+  --fam-large-runtime-data: oklch(0.68 0.16 15);
 
   --cat-unknown: oklch(0.55 0.02 300);
 }

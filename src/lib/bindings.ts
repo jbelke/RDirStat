@@ -42,6 +42,21 @@ export const commands = {
 	 */
 	scanStatus: () => typedError<ScanStatus, CommandError>(__TAURI_INVOKE("scan_status")),
 	/**
+	 *  What the scan's recorded failures actually were.
+	 * 
+	 *  Answers from the **running** scan's live counters when one is active, and
+	 *  from the published tree otherwise, so the same affordance works while the
+	 *  error count is still climbing and after it has stopped. `limit` bounds the
+	 *  sample list; the per-class counts are uncapped, and
+	 *  [`ScanErrorReport::truncated`] says when there were more.
+	 * 
+	 *  # Errors
+	 * 
+	 *  Never fails. No scan and no published tree is an empty report, not an
+	 *  error: "nothing has gone wrong yet" is an answer.
+	 */
+	scanErrors: (limit: number) => typedError<ScanErrorReport, CommandError>(__TAURI_INVOKE("scan_errors", { limit })),
+	/**
 	 *  One bounded page of children. `limit` is clamped to
 	 *  [`MAX_CHILD_PAGE`](rdirstat_core::MAX_CHILD_PAGE).
 	 * 
@@ -939,6 +954,50 @@ export type ScanError =
 	/**  The stable class. */
 	class: ErrorClass,
 } };
+
+/**
+ *  The recorded failures of a scan, for the "N errors" affordance.
+ * 
+ *  A scan reports a single error count while it runs and per-class counts when
+ *  it finishes, and neither answers the only question a user actually asks:
+ *  *what* failed. The scanner already knows — it classifies every failure and
+ *  keeps the first [`MAX_DETAILED_ERRORS`](crate::MAX_DETAILED_ERRORS) in full
+ *  — so this is that knowledge crossing IPC.
+ * 
+ *  Bounded like every other payload: [`counts`](Self::counts) has one row per
+ *  class and operation, and [`samples`](Self::samples) is capped by the caller
+ *  with [`truncated`](Self::truncated) saying so. A scan with ten million
+ *  unreadable paths returns the same size of answer as one with three.
+ */
+export type ScanErrorReport = {
+	/**
+	 *  Whether these are the counters of a running scan. A live report grows;
+	 *  a report for the published tree is final.
+	 */
+	live: boolean,
+	/**
+	 *  The tree these errors belong to, or [`TreeGeneration::NONE`] while the
+	 *  scan that is recording them has not published one.
+	 */
+	generation: TreeGeneration,
+	/**  Every recorded failure, uncapped, however many samples were returned. */
+	total: number,
+	/**
+	 *  Uncapped counts by class and operation.
+	 * 
+	 *  While a scan is live the operation is `None`: the running counters are
+	 *  per class only, because a fixed array of atomics is what the scan path
+	 *  is allowed to write and a per-(class, operation) map is not.
+	 */
+	counts: ErrorClassCount[],
+	/**
+	 *  The retained failures, in the order they were recorded, capped by the
+	 *  caller's `limit`.
+	 */
+	samples: ScanError[],
+	/**  Whether more failures were recorded than are in `samples`. */
+	truncated: boolean,
+};
 
 /**
  *  Monotonically increasing identifier for one scan attempt.

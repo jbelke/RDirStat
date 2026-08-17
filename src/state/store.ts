@@ -68,6 +68,19 @@ export interface UiState {
   sizeMetric: SizeMetric;
   detailsOpen: boolean;
 
+  /**
+   * Whether the destructive actions are live.
+   *
+   * **Off by default, and it is never persisted.** Moving items to the Trash is
+   * the one thing this app does that the user cannot undo from inside it, so it
+   * costs a deliberate gesture to switch on and it goes back off by itself:
+   * `syncGeneration` disarms on every new tree, because the selection that was
+   * armed against the old generation no longer means anything. A preference
+   * that survived a relaunch would turn "I armed this once" into "this app
+   * deletes on drop, forever".
+   */
+  deletionArmed: boolean;
+
   setRoute: (route: Route) => void;
   /** Drop everything id-shaped when the live tree is replaced. */
   syncGeneration: (generation: number, root?: number) => void;
@@ -80,6 +93,8 @@ export interface UiState {
   setLayoutKind: (kind: LayoutKind) => void;
   setSizeMetric: (metric: SizeMetric) => void;
   toggleDetails: () => void;
+  /** Arms or disarms Trash. Only ever called from an explicit user gesture. */
+  setDeletionArmed: (armed: boolean) => void;
 }
 
 const EMPTY_SELECTION: ReadonlySet<number> = new Set<number>();
@@ -94,6 +109,7 @@ export const useUiStore = create<UiState>((set) => ({
   layoutKind: "treemap",
   sizeMetric: "allocated",
   detailsOpen: true,
+  deletionArmed: false,
 
   setRoute: (route) => set({ route }),
 
@@ -108,6 +124,9 @@ export const useUiStore = create<UiState>((set) => ({
         focused: null,
         hovered: null,
         route: loaded ? "tree" : "volumes",
+        // A new tree is a new set of ids. Whatever the user armed deletion for
+        // is gone, so the arming goes with it.
+        deletionArmed: false,
       };
     }),
 
@@ -146,6 +165,7 @@ export const useUiStore = create<UiState>((set) => ({
   setLayoutKind: (layoutKind) => set({ layoutKind }),
   setSizeMetric: (sizeMetric) => set({ sizeMetric }),
   toggleDetails: () => set((state) => ({ detailsOpen: !state.detailsOpen })),
+  setDeletionArmed: (deletionArmed) => set({ deletionArmed }),
 }));
 
 /** The subtree currently being viewed, or `null` before a scan is loaded. */
