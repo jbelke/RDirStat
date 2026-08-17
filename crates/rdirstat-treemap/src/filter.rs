@@ -85,8 +85,13 @@ impl CategorySet {
 }
 
 /// Per-directory subtree bytes, counting only files whose category matches.
+///
+/// Public so a caller can compute it once and reuse it: it depends on
+/// `(tree, root, metric, set)` and **not** on the viewport, so every layout in a
+/// window resize can share one. That is the difference between paying the
+/// `O(subtree)` pass once and paying it on every drag step.
 #[derive(Debug)]
-pub(crate) struct FilteredWeights {
+pub struct FilteredWeights {
     /// Indexed by `DirId::slot()`. Directories outside the walked subtree stay
     /// zero, which is the correct answer for them: they contribute no area to
     /// a layout rooted elsewhere.
@@ -97,7 +102,8 @@ pub(crate) struct FilteredWeights {
 
 impl FilteredWeights {
     /// Computes filtered subtree bytes for every directory under `root`.
-    pub(crate) fn build(tree: &Tree, root: NodeId, metric: SizeMetric, set: CategorySet) -> Self {
+    #[must_use]
+    pub fn build(tree: &Tree, root: NodeId, metric: SizeMetric, set: CategorySet) -> Self {
         let mut dirs = vec![0_u64; tree.dirs().len()];
 
         // Pass 1 — directories in pre-order, parents before descendants.
@@ -150,6 +156,16 @@ impl FilteredWeights {
     /// Whether a leaf's category survives the filter.
     pub(crate) const fn matches(&self, category: u8) -> bool {
         self.set.contains(category)
+    }
+
+    /// The category set these weights were built for.
+    ///
+    /// A cache needs this to answer "does the stored entry still apply", and
+    /// deriving it from the entry rather than storing it separately is what
+    /// stops the two drifting apart.
+    #[must_use]
+    pub const fn set(&self) -> CategorySet {
+        self.set
     }
 
     /// Filtered bytes for a directory, or `0` if it is not one.

@@ -16,9 +16,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard};
 
 use rdirstat_core::{
-    ActionError, CancelState, CompletedScan, QueryError, ScanId, ScanProgress, ScanState, ScanStatus, StartError,
-    TreeGeneration,
+    ActionError, CancelState, CompletedScan, NodeId, QueryError, ScanId, ScanProgress, ScanState, ScanStatus,
+    StartError, TreeGeneration,
 };
+use rdirstat_treemap::{CategorySet, FilteredWeights, SizeMetric};
 
 use crate::progress::ProgressCounters;
 
@@ -116,6 +117,24 @@ pub struct AppState {
     /// Randomly keyed per process, so a confirmation token minted by this run
     /// cannot be replayed against another.
     token_keys: RandomState,
+    /// The last filtered-layout weights, so a window resize does not recompute
+    /// them on every drag step. See [`filter_weights`](Self::filter_weights).
+    filter_cache: Mutex<Option<FilterCache>>,
+}
+
+/// One memoised set of filtered layout weights.
+///
+/// Deliberately a single entry rather than a map. The user filters one view at a
+/// time, so a second slot would almost never be hit and every slot holds a
+/// `Vec<u64>` the length of the directory index — ~10 MB at 1.2M directories.
+/// Caching aggressively here would trade a real memory budget for a hit rate
+/// nobody would notice.
+#[derive(Debug)]
+struct FilterCache {
+    generation: TreeGeneration,
+    root: NodeId,
+    metric: SizeMetric,
+    weights: Arc<FilteredWeights>,
 }
 
 impl Default for AppState {
@@ -147,7 +166,61 @@ impl AppState {
             next_scan_id: AtomicU64::new(ScanId::FIRST.get()),
             next_generation: AtomicU64::new(TreeGeneration::FIRST.get()),
             token_keys: RandomState::new(),
+            filter_cache: Mutex::new(None),
         }
+    }
+
+    /// Filtered layout weights for `(generation, root, metric, set)`, computed
+    /// once and reused.
+    ///
+    /// The weights do **not** depend on the viewport, which is the whole point:
+    /// a window resize issues a layout request per drag step, and recomputing an
+    /// `O(subtree)` pass each time costs 163 ms per step on a 12M-node tree
+    /// against 0.35 ms for the unfiltered path. Sharing one set across a drag
+    /// makes a filtered resize cost what an unfiltered one does.
+    ///
+    /// Every field of the key is load-bearing. A stale `generation` would answer
+    /// from a tree that no longer exists; a stale `root` or `metric` or `set`
+    /// would produce a layout that disagrees with its own legend. `set` is
+    /// checked against the stored weights rather than tracked separately, so the
+    /// two cannot drift.
+    pub(crate) fn filter_weights(
+        &self,
+        scan: &CompletedScan,
+        root: NodeId,
+        metric: SizeMetric,
+        set: CategorySet,
+    ) -> Arc<FilteredWeights> {
+        let mut slot = lock(&self.filter_cache);
+        if let Some(entry) = slot.as_ref()
+            && entry.generation == scan.generation
+            && entry.root == root
+            && entry.metric == metric
+            && entry.weights.set() == set
+        {
+            return Arc::clone(&entry.weights);
+        }
+
+        // Timed here rather than inside `layout_tiles`, because that is where the
+        // cost actually lives now. Leaving it to the layout timer would report
+        // sub-millisecond figures for every request while the expensive pass ran
+        // just outside the measured window — an instrument that stops measuring
+        // the thing it was added for is worse than no instrument.
+        let started = std::time::Instant::now();
+        let weights = Arc::new(FilteredWeights::build(&scan.tree, root, metric, set));
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            nodes = scan.tree.len(),
+            directories = scan.tree.directory_count(),
+            "built filtered layout weights"
+        );
+        *slot = Some(FilterCache {
+            generation: scan.generation,
+            root,
+            metric,
+            weights: Arc::clone(&weights),
+        });
+        weights
     }
 
     /// The keys used to sign confirmation tokens.

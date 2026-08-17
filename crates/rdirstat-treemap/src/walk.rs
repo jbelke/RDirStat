@@ -78,6 +78,30 @@ const FULL_TURN: f64 = core::f64::consts::TAU;
 /// [`LayoutError::UnknownNode`] if `root` names neither a live node nor a
 /// virtual group whose owning directory exists.
 pub fn layout_tiles(tree: &Tree, root: NodeId, options: &LayoutOptions) -> Result<TileBuffer, LayoutError> {
+    layout_tiles_with(tree, root, options, None)
+}
+
+/// [`layout_tiles`], reusing filtered weights the caller already has.
+///
+/// The weights depend on `(tree, root, metric, set)` and not on the viewport, so
+/// a resize can compute them once and hand the same ones to every layout in the
+/// drag. Passing `None` computes them, which is what [`layout_tiles`] does.
+///
+/// A caller that supplies weights built for a **different** filter than
+/// `options.categories` would get a layout that disagrees with itself, so the
+/// mismatch is checked here rather than trusted: weights whose set does not
+/// match are ignored and rebuilt.
+///
+/// # Errors
+///
+/// [`LayoutError::UnknownNode`] if `root` names neither a live node nor a
+/// virtual group whose owning directory exists.
+pub fn layout_tiles_with(
+    tree: &Tree,
+    root: NodeId,
+    options: &LayoutOptions,
+    reuse: Option<&FilteredWeights>,
+) -> Result<TileBuffer, LayoutError> {
     let started = std::time::Instant::now();
     let plan = Plan::resolve(options);
     let root_frame = root_frame(tree, root, &plan, options.canvas.width(), options.canvas.height())?;
@@ -89,10 +113,23 @@ pub fn layout_tiles(tree: &Tree, root: NodeId, options: &LayoutOptions) -> Resul
 
     // One pass for the whole request, not one per frame. Absent without a
     // filter, so an unfiltered layout pays nothing.
-    let weights = options
-        .categories
-        .filter(|set| !set.is_empty())
-        .map(|set| FilteredWeights::build(tree, root_frame.source, options.metric, set));
+    let wanted = options.categories.filter(|set| !set.is_empty());
+    let owned = wanted.and_then(|set| {
+        // Reuse only weights built for the same filter. A stale set would
+        // silently produce a layout that disagrees with its own legend, which is
+        // worse than recomputing.
+        if reuse.is_some_and(|weights| weights.set() == set) {
+            None
+        } else {
+            Some(FilteredWeights::build(tree, root_frame.source, options.metric, set))
+        }
+    });
+    let weights: Option<&FilteredWeights> = match (&owned, reuse) {
+        (Some(built), _) => Some(built),
+        (None, Some(cached)) if wanted.is_some() => Some(cached),
+        _ => None,
+    };
+    let reused = owned.is_none() && weights.is_some();
 
     let mut visited = 0_u32;
     let mut considered = 0_u64;
@@ -110,14 +147,7 @@ pub fn layout_tiles(tree: &Tree, root: NodeId, options: &LayoutOptions) -> Resul
             continue;
         }
 
-        let total = gather(
-            tree,
-            &frame,
-            options.metric,
-            weights.as_ref(),
-            &mut scratch,
-            &mut considered,
-        );
+        let total = gather(tree, &frame, options.metric, weights, &mut scratch, &mut considered);
         if total <= 0.0 || scratch.is_empty() {
             continue;
         }
@@ -189,7 +219,10 @@ pub fn layout_tiles(tree: &Tree, root: NodeId, options: &LayoutOptions) -> Resul
         // O(subtree) pass, and whether that needs debouncing is a question
         // about a real number rather than a feeling about one.
         elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
-        filtered = options.categories.is_some_and(|set| !set.is_empty()),
+        filtered = wanted.is_some(),
+        // Distinguishes "the filtered pass ran" from "a cached one was reused",
+        // so a timing figure can be read without guessing which it was.
+        reused,
         min_px = options.min_px.get(),
         width = options.canvas.width(),
         height = options.canvas.height(),

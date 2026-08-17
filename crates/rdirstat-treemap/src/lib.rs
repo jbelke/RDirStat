@@ -99,14 +99,14 @@ mod tiles;
 mod walk;
 
 pub use crate::error::LayoutError;
-pub use crate::filter::CategorySet;
+pub use crate::filter::{CategorySet, FilteredWeights};
 pub use crate::ipc::{LAYOUT_COLUMN_TYPES, layout_schema, tiles_to_batch, tiles_to_ipc, tiles_to_response};
 pub use crate::options::{
     Canvas, DEFAULT_MAX_TILES, ICICLE_MAX_ROW_PX, ICICLE_ROW_PX, LayoutOptions, MAX_DEVICE_PIXEL_RATIO, MAX_MIN_PX,
     MAX_VIEWPORT_PX, MinPx, SUNBURST_MAX_RING_PX, SUNBURST_RING_PX, SizeMetric, TREEMAP_DEPTH_CAP,
 };
 pub use crate::tiles::{LayoutStats, Tile, TileBuffer};
-pub use crate::walk::layout_tiles;
+pub use crate::walk::{layout_tiles, layout_tiles_with};
 
 use rdirstat_core::{BinaryResponse, LayoutKind, NodeId, QueryError, Tree, TreeGeneration, Viewport};
 

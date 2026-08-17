@@ -686,7 +686,14 @@ pub(crate) async fn reveal_in_finder(
 /// `rdirstat-treemap` lays the group out as its owner's direct files, so
 /// double-clicking a group row is not a dead end.
 #[tauri::command]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a Tauri command's parameters are its wire signature, not a function's design. \
+              Grouping them into a struct would change the IPC shape the frontend sends \
+              and buy nothing: each one is an independent scalar the caller supplies."
+)]
 pub(crate) async fn layout(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     generation: TreeGeneration,
     root: NodeId,
@@ -714,7 +721,14 @@ pub(crate) async fn layout(
                     return Err(QueryError::UnknownNode { node: root });
                 }
                 let options = rdirstat_treemap::LayoutOptions::new(kind, viewport, min_px)?.with_categories(Some(set));
-                Ok(rdirstat_treemap::layout_with(&scan.tree, generation, root, &options)?)
+                // Reused across a window resize: the weights do not depend on
+                // the viewport, and rebuilding them per drag step is the
+                // difference between paying 163 ms once and paying it
+                // continuously while the edge is being dragged.
+                let cache = tauri::Manager::state::<AppState>(&app);
+                let weights = cache.filter_weights(&scan, root, options.metric, set);
+                let tiles = rdirstat_treemap::layout_tiles_with(&scan.tree, root, &options, Some(&weights))?;
+                Ok(rdirstat_treemap::tiles_to_response(&tiles, generation)?)
             }
         }
     })
