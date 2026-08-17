@@ -1397,6 +1397,19 @@ export type VolumeId = {
  *  Volume capacity is shown **beside** a scan's tree total, never silently
  *  reconciled into it: clones, snapshots, purgeable space, exclusions,
  *  unreadable data, and concurrent mutation all create legitimate deltas.
+ * 
+ *  # Capacity on APFS is a container property, not a volume property
+ * 
+ *  Every APFS volume in one container reports that **container's** size and
+ *  free space, so `total_bytes` and `available_bytes` are identical across all
+ *  of them and `total_bytes - available_bytes` is the container's usage, not
+ *  this volume's. Presenting that difference per volume is how five volumes of
+ *  one Mac end up each claiming to have used 968 GB of a 995 GB disk.
+ * 
+ *  [`used_bytes`](Self::used_bytes) is the per-volume number, and
+ *  [`container_id`](Self::container_id) / [`disk_id`](Self::disk_id) say which
+ *  volumes are sharing the capacity, so the UI can state the shared numbers
+ *  once per container and the private number once per volume.
  */
 export type VolumeInfo = {
 	/**  Display name, e.g. `Macintosh HD`. */
@@ -1407,10 +1420,41 @@ export type VolumeInfo = {
 	device: number,
 	/**  Filesystem type, e.g. `apfs`. */
 	fs_type: string,
-	/**  Total capacity in bytes. */
+	/**  Total capacity in bytes. **Container-wide on APFS.** */
 	total_bytes: number,
-	/**  Ordinary available capacity in bytes. */
+	/**  Ordinary available capacity in bytes. **Container-wide on APFS.** */
 	available_bytes: number,
+	/**
+	 *  Bytes this volume itself occupies, as reported for this mount rather
+	 *  than derived from `total - available`. This is the only capacity number
+	 *  here that is private to the volume.
+	 */
+	used_bytes: number,
+	/**  The device node backing the mount, e.g. `/dev/disk3s1s1`. */
+	device_node: string,
+	/**
+	 *  The APFS container reference (`disk3`), or the whole disk for a
+	 *  non-APFS filesystem (`disk4`). `None` when the topology could not be
+	 *  read — grouping then degrades to one group per volume rather than to a
+	 *  wrong grouping.
+	 */
+	container_id: string | null,
+	/**  The physical whole disk backing the container, e.g. `disk0`. */
+	disk_id: string | null,
+	/**  Media name of that physical disk, e.g. `APPLE SSD AP1024Z`. */
+	disk_name: string | null,
+	/**
+	 *  Size of that physical disk in bytes, which is larger than a container:
+	 *  it includes the other partitions.
+	 */
+	disk_size_bytes: number | null,
+	/**  Whether the backing disk is on an internal bus. */
+	is_internal: boolean,
+	/**
+	 *  Whether macOS considers this volume part of the OS install rather than
+	 *  somewhere a user keeps files (`/System/Volumes/*`, Preboot, VM, …).
+	 */
+	is_system: boolean,
 	/**
 	 *  Foundation's "available for important usage", where macOS supplies it.
 	 *  It can include purgeable capacity and is labelled as such.
