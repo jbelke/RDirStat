@@ -103,20 +103,23 @@ export function DriveSwitcher({
   // is measured from the same instant.
   const nowMs = Date.now();
   /*
-   * Matched on the mount-point string, which is safe *because of where both
-   * sides come from*: `snapshot_offers` iterates `volumes::list()` and copies
-   * `volume.mount_point` through verbatim, so it is the same string the
-   * `volumes` command returns, not an independently derived one.
+   * Matched on `device`, not on the mount-point string.
    *
-   * Worth stating because the safety is structural rather than defensive. If
-   * offers are ever built from the snapshot's own stored root path instead,
-   * the two can diverge — `/` versus `/System/Volumes/Data` is the obvious way
-   * — and this match would silently find nothing, so every drive would quietly
-   * lose its restore option with no error anywhere. Match on `device` as well,
-   * or keep the single source.
+   * The string match worked, but only by luck: `snapshot_offers` happens to
+   * iterate `volumes::list()` and copy `volume.mount_point` through verbatim,
+   * so both sides emit the same string because they come from the same call —
+   * nothing enforces it. Build offers from the snapshot's own stored root
+   * instead and `/` versus `/System/Volumes/Data` diverge, this returns
+   * nothing, every drive quietly loses its restore option, and NOTHING errors.
+   * A feature that disappears without complaining is worse than one that
+   * breaks loudly.
+   *
+   * `st_dev` is the identity the snapshot store already keys on, so matching
+   * it makes the join structural. The mount point stays what it should be: a
+   * label to show the user, not a key.
    */
-  const offerFor = (mountPoint: string): SnapshotOfferView | undefined =>
-    offers.find((offer) => offer.hasSnapshot && offer.mountPoint === mountPoint);
+  const offerFor = (volume: VolumeRow): SnapshotOfferView | undefined =>
+    offers.find((offer) => offer.hasSnapshot && offer.device === volume.device);
 
   // Nothing to switch between: one drive is not a choice, and an empty list
   // means `volumes` has not resolved yet. Either way a disabled dropdown would
@@ -143,7 +146,7 @@ export function DriveSwitcher({
         title={
           busy
             ? "A scan is already running. Cancel it before switching drives."
-            : "Switch which drive is being inventoried — this starts a new scan"
+            : "Switch which drive is being inventoried"
         }
         className={cn(
           "flex shrink-0 items-center gap-1.5 rounded px-2 py-1 text-sm transition-colors",
@@ -178,7 +181,7 @@ export function DriveSwitcher({
 
             {rows.map((volume) => {
               const isCurrent = volume.mountPoint === current?.mountPoint;
-              const offer = offerFor(volume.mountPoint);
+              const offer = offerFor(volume);
               const age = describeAge(offer?.takenUnixMs ?? null, nowMs);
               return (
                 <div key={volume.mountPoint} className="px-1 pb-1">
