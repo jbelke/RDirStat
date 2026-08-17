@@ -218,7 +218,20 @@ export function Titlebar({
         })}
       </nav>
 
-      <div className="flex shrink-0 items-center gap-1">
+      {/* Explicitly OUT of the drag region, as a container rather than relying
+        * on the per-element `button` opt-out in index.css.
+        *
+        * That opt-out is enough for a plain `onClick` button, which fires on
+        * mouseup — the root and up-one-level buttons above work fine. It is
+        * NOT enough for anything that opens on `pointerdown`: Radix's menu
+        * triggers do, and the drag region consumes pointerdown before the
+        * trigger sees it, so the menu silently never opens while `:hover` and
+        * the tooltip still work perfectly. That combination reads exactly like
+        * a dead handler and is why this cost an hour to find.
+        *
+        * Marking the whole actions container means the next control dropped in
+        * here inherits the fix instead of rediscovering the bug. */}
+      <div data-tauri-drag-region="false" className="flex shrink-0 items-center gap-1">
         {leadingActions}
         {children}
         {onOpenCommandPalette !== undefined && (
