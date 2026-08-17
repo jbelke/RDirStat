@@ -33,6 +33,7 @@ import {
   scanStatus,
   sizeBandEntries,
   sizeBands,
+  snapshotOffers,
   volumes,
   type AncestorRow,
   type ChildPageView,
@@ -41,6 +42,7 @@ import {
   type ScanStatusView,
   type SizeBandEntryView,
   type SizeBandView,
+  type SnapshotOfferView,
   type Sort,
   type VolumeRow,
 } from "@/lib/ipc";
@@ -71,6 +73,7 @@ export const queryKeys = {
   scanStatus: () => ["scanStatus"] as const,
   scanErrors: () => ["scanErrors"] as const,
   volumes: () => ["volumes"] as const,
+  snapshotOffers: () => ["snapshotOffers"] as const,
   children: (generation: number, parent: number, sort: Sort) =>
     ["children", generation, parent, sort.key, sort.direction] as const,
   details: (generation: number, node: number) => ["details", generation, node] as const,
@@ -168,6 +171,22 @@ export function useScanErrors(enabled: boolean): UseQueryResult<ScanErrorsView, 
  * Mounted volumes. `statfs` is cheap but not free and the numbers move, so this
  * one is allowed to go stale and refetch on demand.
  */
+/**
+ * Which drives could be restored from a snapshot rather than rescanned.
+ *
+ * Cheap by construction — the backend reads each snapshot's header and stops —
+ * so this refetches on the same footing as the volume list. `staleTime` is
+ * short rather than infinite because a scan that finishes writes a new
+ * snapshot, which changes the answer.
+ */
+export function useSnapshotOffers(): UseQueryResult<SnapshotOfferView[], Error> {
+  return useQuery({
+    queryKey: queryKeys.snapshotOffers(),
+    queryFn: snapshotOffers,
+    staleTime: 15_000,
+  });
+}
+
 export function useVolumes(): UseQueryResult<VolumeRow[], Error> {
   return useQuery({
     queryKey: queryKeys.volumes(),

@@ -691,6 +691,56 @@ export async function revealInFinder(generation: number, node: number): Promise<
 }
 
 // ---------------------------------------------------------------------------
+// Snapshots
+// ---------------------------------------------------------------------------
+
+export interface SnapshotOfferView {
+  readonly mountPoint: string;
+  readonly device: number;
+  readonly hasSnapshot: boolean;
+  /**
+   * When the snapshot's scan finished, Unix ms. `null` when there is none.
+   *
+   * The UI must always show this rather than just offering "restore": a
+   * snapshot can be stale by any amount, and a restore that does not say how
+   * old it is lets a two-week-old tree pass for the state of the disk.
+   */
+  readonly takenUnixMs: number | null;
+  readonly nodes: number | null;
+  readonly bytes: number | null;
+}
+
+/**
+ * Which volumes could be restored instead of rescanned.
+ *
+ * Header-and-metadata only — no arena is decoded — so this is safe to call
+ * every time a menu opens.
+ */
+export async function snapshotOffers(): Promise<SnapshotOfferView[]> {
+  const offers = await unwrap("snapshot_offers", commands.snapshotOffers());
+  return offers.map((offer) => ({
+    mountPoint: offer.mount_point,
+    device: num(offer.device),
+    hasSnapshot: offer.has_snapshot,
+    takenUnixMs: offer.taken_unix_ms === null ? null : num(offer.taken_unix_ms),
+    nodes: offer.nodes === null ? null : num(offer.nodes),
+    bytes: offer.bytes === null ? null : num(offer.bytes),
+  }));
+}
+
+/**
+ * Publish a stored snapshot as the live tree, replacing what is on screen.
+ *
+ * Errors while a scan is running rather than silently doing nothing —
+ * replacing the tree under a scan that is about to publish its own would leave
+ * the app showing one volume and finalizing another.
+ */
+export async function restoreSnapshot(root: string, device: number): Promise<number> {
+  const generation = await unwrap("restore_snapshot", commands.restoreSnapshot(root, device));
+  return num(generation);
+}
+
+// ---------------------------------------------------------------------------
 // Breadcrumb
 // ---------------------------------------------------------------------------
 

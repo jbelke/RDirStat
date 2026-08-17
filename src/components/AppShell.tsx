@@ -56,6 +56,7 @@ import {
   nodeDetails,
   revealInFinder,
   scanCancel,
+  restoreSnapshot,
   scanStart,
   type LayoutKind,
   type RelocateReportView,
@@ -66,6 +67,7 @@ import {
   useAncestors,
   useNodeDetails,
   useScanStatus,
+  useSnapshotOffers,
   useVolumes,
   useSizeBands,
 } from "@/lib/queries";
@@ -121,6 +123,9 @@ export function AppShell() {
   // Also feeds the volume picker route; the query is shared and cached, so the
   // drive switcher costs no extra IPC.
   const volumes = useVolumes();
+  // Which drives can be restored rather than rescanned. Header-only on the
+  // backend, so this is cheap enough to keep fresh alongside the volume list.
+  const offers = useSnapshotOffers();
 
   const [sorting, setSorting] = useState<SortingState>([{ id: "logical", desc: true }]);
   const [starting, setStarting] = useState(false);
@@ -377,6 +382,27 @@ export function AppShell() {
     [handleScan],
   );
 
+  /*
+   * Restoring is the cheap path: the tree comes off disk rather than off the
+   * filesystem, so a drive scanned before switches in about a second.
+   *
+   * The backend refuses while a scan is running rather than replacing a tree
+   * that scan is about to publish over, so the error is surfaced rather than
+   * swallowed — a switch that silently did nothing would be worse than one
+   * that explains itself.
+   */
+  const handleRestoreDrive = useCallback(
+    (mountPoint: string, device: number) => {
+      setActionError(null);
+      restoreSnapshot(mountPoint, device)
+        .then(() => client.invalidateQueries({ queryKey: queryKeys.scanStatus() }))
+        .catch((cause: unknown) => {
+          setActionError(cause instanceof Error ? cause.message : String(cause));
+        });
+    },
+    [client],
+  );
+
   return (
     <div className="flex h-full flex-col">
       <Titlebar
@@ -386,9 +412,11 @@ export function AppShell() {
           generation !== GENERATION_NONE && (
             <DriveSwitcher
               volumes={volumes.data ?? []}
+              offers={offers.data ?? []}
               scanRootPath={summary?.rootPath ?? null}
               busy={scanning || starting}
               onSelect={handleSwitchDrive}
+              onRestore={handleRestoreDrive}
             />
           )
         }
