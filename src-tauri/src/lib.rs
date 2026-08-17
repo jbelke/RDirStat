@@ -45,6 +45,7 @@ mod query;
 mod relocate;
 mod snapshot_store;
 mod state;
+mod storage;
 mod token;
 mod tray;
 mod volumes;
@@ -71,6 +72,12 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::node_details,
             commands::size_bands,
             commands::size_band_entries,
+            commands::category_totals,
+            commands::category_entries,
+            commands::age_buckets,
+            commands::age_bucket_entries,
+            commands::duplicate_candidates,
+            commands::scan_diff,
             commands::snapshot_offers,
             commands::restore_snapshot,
             commands::ancestors,
@@ -93,6 +100,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         .typ::<rdirstat_core::QueryError>()
         .constant("PROTOCOL_VERSION", rdirstat_core::PROTOCOL_VERSION)
         .constant("MAX_CHILD_PAGE", rdirstat_core::MAX_CHILD_PAGE)
+        .constant("MAX_REPORT_ENTRIES", rdirstat_core::MAX_REPORT_ENTRIES)
         .constant("MIN_TILE_PX", rdirstat_core::MIN_TILE_PX)
         .constant("PROGRESS_MAX_HZ", rdirstat_core::PROGRESS_MAX_HZ)
         .constant("SCAN_PROGRESS_EVENT", rdirstat_core::SCAN_PROGRESS_EVENT)

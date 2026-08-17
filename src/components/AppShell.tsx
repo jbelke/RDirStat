@@ -43,7 +43,11 @@ import {
 } from "@/components/canvas";
 import type { ColorBy } from "@/components/canvas/palette";
 import { ScanAlerts } from "@/components/ScanAlerts";
+import { AgesRoute, pinnedNowUnixSeconds } from "@/components/AgesRoute";
+import { DiffRoute } from "@/components/DiffRoute";
+import { DupesRoute } from "@/components/DupesRoute";
 import { SizeBands } from "@/components/SizeBands";
+import { TypesRoute } from "@/components/TypesRoute";
 import { ScanProgressStrip, useScanProgress } from "@/components/ScanProgressStrip";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { Titlebar, type Crumb } from "@/components/Titlebar";
@@ -59,14 +63,22 @@ import {
   scanCancel,
   restoreSnapshot,
   scanStart,
+  type DiffMetricKind,
   type LayoutKind,
   type RelocateReportView,
 } from "@/lib/ipc";
 import {
   dropStaleGenerations,
+  MAX_REPORT_ENTRIES,
   queryKeys,
+  useAgeBucketEntries,
+  useAgeBuckets,
   useAncestors,
+  useCategoryEntries,
+  useCategoryTotals,
+  useDuplicateCandidates,
   useNodeDetails,
+  useScanDiff,
   useScanStatus,
   useSnapshotOffers,
   useVolumes,
@@ -77,7 +89,20 @@ import { GENERATION_NONE, isRealNode } from "@/lib/wire";
 import { useCurrentRoot, useSoleSelection, useUiStore, type Route } from "@/state/store";
 import { CircleAlert, X } from "lucide-react";
 
-const CATALOG_ROUTES: readonly { id: string; label: string }[] = [
+/**
+ * The report routes, all of them live.
+ *
+ * These were disabled buttons captioned "requires a completed catalog scan".
+ * That turned out to be an assumption rather than a constraint: every one of
+ * them is a single `O(subtree)` pass over an arena that is already in memory.
+ * Types and Ages count files, Dupes groups them by size, and Diff compares the
+ * published tree against the previous *.rdstat snapshot — no Parquet partition
+ * is involved in any of it.
+ *
+ * The catalog still has a job (many scans, cross-scan queries, retention), but
+ * it was never what these five needed.
+ */
+const REPORT_ROUTES: readonly { id: Route; label: string }[] = [
   { id: "types", label: "Types" },
   { id: "ages", label: "Ages" },
   { id: "diff", label: "Diff" },
@@ -116,6 +141,7 @@ export function AppShell() {
   const selectMany = useUiStore((state) => state.selectMany);
   const clearSelection = useUiStore((state) => state.clearSelection);
   const setHovered = useUiStore((state) => state.setHovered);
+  const setFocused = useUiStore((state) => state.setFocused);
   const setLayoutKind = useUiStore((state) => state.setLayoutKind);
   const setSizeMetric = useUiStore((state) => state.setSizeMetric);
   const deletionArmed = useUiStore((state) => state.deletionArmed);
@@ -136,6 +162,19 @@ export function AppShell() {
   const [actionError, setActionError] = useState<string | null>(null);
   /** The root of the scan in flight, for the progress panel's denominator. */
   const [scanRoot, setScanRoot] = useState<string | null>(null);
+  /** Which report row is expanded. One per route; they are independent views. */
+  const [expandedCategory, setExpandedCategory] = useState<number | null>(null);
+  const [expandedAgeBucket, setExpandedAgeBucket] = useState<number | null>(null);
+  const [diffMetric, setDiffMetric] = useState<DiffMetricKind>("allocated");
+  /**
+   * "Now" for the Ages report, pinned once per session.
+   *
+   * It is part of the query key, and `Date.now()` changes every second — which
+   * would be one full O(subtree) walk per second over a twelve-million-node
+   * tree. The buckets are day-scale, so hour granularity is invisible in the
+   * answer and the difference in cost is total.
+   */
+  const [nowUnixSeconds] = useState(pinnedNowUnixSeconds);
   /**
    * The nodes the move dialog is open on. Empty means closed.
    *
@@ -335,6 +374,13 @@ export function AppShell() {
   const rootDetails = useNodeDetails(generation, currentRoot);
   // Only while the route is showing: this is an O(subtree) walk on the backend.
   const sizeBands = useSizeBands(generation, currentRoot, route === "sizes");
+  // Each report is an O(subtree) walk, so each is gated on its own route.
+  const categoryTotals = useCategoryTotals(generation, currentRoot, route === "types");
+  const categoryEntries = useCategoryEntries(generation, currentRoot, expandedCategory);
+  const ageBuckets = useAgeBuckets(generation, currentRoot, nowUnixSeconds, route === "ages");
+  const ageEntries = useAgeBucketEntries(generation, currentRoot, nowUnixSeconds, expandedAgeBucket);
+  const dupes = useDuplicateCandidates(generation, currentRoot, route === "dupes");
+  const scanDiff = useScanDiff(generation, diffMetric, route === "diff");
   const relocatingDetails = useNodeDetails(generation, relocating.length === 1 ? relocating[0] : null);
 
   // A completed relocation makes the tree on screen wrong: the subtree that
@@ -469,16 +515,15 @@ export function AppShell() {
             onSelect={setRoute}
             disabled={generation === GENERATION_NONE}
           />
-          {CATALOG_ROUTES.map((entry) => (
-            <button
+          {REPORT_ROUTES.map((entry) => (
+            <RailButton
               key={entry.id}
-              type="button"
-              disabled
-              title="Requires a completed catalog scan. The catalog (DuckDB/Parquet) is not part of this build."
-              className="rounded px-2 py-1 text-left text-sm text-muted-foreground/40"
-            >
-              {entry.label}
-            </button>
+              id={entry.id}
+              label={entry.label}
+              route={route}
+              onSelect={setRoute}
+              disabled={generation === GENERATION_NONE}
+            />
           ))}
         </nav>
 
@@ -506,6 +551,79 @@ export function AppShell() {
 
           {route === "volumes" && <VolumePicker onScan={(root) => void handleScan(root)} busy={starting} />}
 
+          {route === "types" && currentRoot !== null && (
+            <TypesRoute
+              rows={categoryTotals.data}
+              isLoading={categoryTotals.isLoading}
+              error={categoryTotals.error}
+              subtreeAllocated={rootDetails.data?.subtree?.allocated ?? null}
+              expanded={expandedCategory}
+              onExpandedChange={setExpandedCategory}
+              entries={categoryEntries.data}
+              entriesLoading={categoryEntries.isLoading}
+              entriesError={categoryEntries.error}
+              entryLimit={MAX_REPORT_ENTRIES}
+              onReveal={handleReveal}
+              onTrash={(node) => handleTrash([node])}
+              trashEnabled={deletionArmed}
+              className="min-h-0 flex-1"
+            />
+          )}
+
+          {route === "ages" && currentRoot !== null && (
+            <AgesRoute
+              rows={ageBuckets.data}
+              isLoading={ageBuckets.isLoading}
+              error={ageBuckets.error}
+              subtreeAllocated={rootDetails.data?.subtree?.allocated ?? null}
+              nowUnixSeconds={nowUnixSeconds}
+              expandedBucket={expandedAgeBucket}
+              onExpandedBucketChange={setExpandedAgeBucket}
+              entries={ageEntries.data}
+              entriesLoading={ageEntries.isLoading}
+              entriesError={ageEntries.error}
+              entryLimit={MAX_REPORT_ENTRIES}
+              onReveal={handleReveal}
+              onTrash={(node) => handleTrash([node])}
+              trashEnabled={deletionArmed}
+              className="min-h-0 flex-1"
+            />
+          )}
+
+          {route === "dupes" && currentRoot !== null && (
+            <DupesRoute
+              report={dupes.data}
+              isLoading={dupes.isLoading}
+              error={dupes.error}
+              onReveal={handleReveal}
+              onTrash={(node) => handleTrash([node])}
+              trashEnabled={deletionArmed}
+              className="min-h-0 flex-1"
+            />
+          )}
+
+          {route === "diff" && (
+            <DiffRoute
+              report={scanDiff.data}
+              isLoading={scanDiff.isLoading}
+              // "There has only ever been one scan of this volume" is not an
+              // error, it is the honest answer to "what changed since last
+              // time". The backend says so in the message; surfacing it as a
+              // red failure would read as a bug in the app.
+              error={scanDiff.error?.message.includes("only one saved scan") === true ? null : scanDiff.error}
+              unavailableReason={
+                scanDiff.error?.message.includes("only one saved scan") === true
+                  ? "This volume has only been scanned once, so there is nothing to compare against yet. Scan it again and the previous scan becomes the baseline."
+                  : (scanDiff.error?.message ?? null)
+              }
+              onMetricChange={setDiffMetric}
+              onReveal={handleReveal}
+              onTrash={(node) => handleTrash([node])}
+              trashEnabled={deletionArmed}
+              className="min-h-0 flex-1"
+            />
+          )}
+
           {route === "sizes" && currentRoot !== null && (
             <SizeBands
               rows={sizeBands.data}
@@ -517,6 +635,10 @@ export function AppShell() {
               onReveal={handleReveal}
               onTrash={(node) => handleTrash([node])}
               trashEnabled={deletionArmed}
+              selection={selection}
+              onSelect={select}
+              onFocusNode={setFocused}
+              onHover={setHovered}
               className="min-h-0 flex-1"
             />
           )}

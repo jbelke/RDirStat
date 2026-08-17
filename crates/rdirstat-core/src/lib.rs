@@ -201,6 +201,13 @@ mod tree;
 mod wire;
 
 pub use crate::bands::{SIZE_BAND_COUNT, SIZE_BAND_EDGES, SizeBandEntry, SizeBandRow};
+pub use crate::by_age::{AGE_BUCKET_COUNT, AGE_BUCKET_EDGES, AgeBucketEntry, AgeBucketRow};
+pub use crate::by_category::{CategoryEntry, CategoryRow};
+pub use crate::diff::{DiffMetric, DiffReport, MAX_DIFF_ENTRIES};
+pub use crate::dupes::{
+    DuplicateCandidateCluster, DuplicateCandidateMember, DuplicateCandidateReport, MAX_CLUSTER_MEMBERS,
+    MAX_DUPLICATE_CLUSTERS,
+};
 pub use crate::dirs::{DirIndex, DirTotals};
 pub use crate::error::{
     ActionError, ArenaError, CommandError, ErrorClass, ErrorClassCount, Operation, QueryError, ScanError, StartError,
@@ -241,6 +248,18 @@ pub const MAX_CHILD_PAGE: u32 = 500;
 /// Beyond this only [`ErrorClassCount`] rows grow, so a volume with ten million
 /// unreadable paths cannot exhaust memory through its own error log.
 pub const MAX_DETAILED_ERRORS: usize = 10_000;
+
+/// Ceiling on the rows any one report's breakdown returns.
+///
+/// Every report here — size bands, categories, ages — answers a question about
+/// a whole subtree and then offers to show *which files*. A band on a boot
+/// volume holds ten million of them, so that list is a leaderboard, never an
+/// enumeration.
+///
+/// Defined once, here, because it had begun to exist independently in the
+/// command layer, in the query layer, and in each report: four copies of one
+/// number, each free to drift, none of them wrong until one of them was.
+pub const MAX_REPORT_ENTRIES: usize = 250;
 
 /// Ceiling on progress event frequency, in hertz.
 pub const PROGRESS_MAX_HZ: u32 = 10;

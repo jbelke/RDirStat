@@ -19,6 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rdirstat_core::{
     ActionError, CancelState, CatalogScanId, ChildPage, CommandError, CompletedScan, ConfirmationToken, Cursor,
     Details, DisplayPath, LayoutKind, NodeId, QueryError, ReportName, ReportParams, ScanErrorReport, ScanId,
+    AgeBucketEntry, AgeBucketRow, CategoryEntry, CategoryId, CategoryRow, DuplicateCandidateReport,
+    DiffMetric, DiffReport,
     ScanOptions, ScanStatus, SizeBandEntry, SizeBandRow, SnapshotOffer, Sort, StartError, TrashPreview, TrashReport,
     TreeGeneration, VolumeInfo,
 };
@@ -38,13 +40,17 @@ use crate::{actions, progress, query, relocate, volumes};
 /// running one keeps far fewer, so this only ever truncates the finished case.
 const MAX_ERROR_SAMPLES: usize = 200;
 
-/// Ceiling on one band's breakdown list.
+/// Ceiling on any report's breakdown list.
 ///
 /// The "under 5 MiB" band on a boot volume holds ten million files. Expanding
 /// it must return the heaviest few hundred, not attempt the rest — the row
 /// already states the true count, and a ten-million-row payload is a file dump
 /// rather than a breakdown.
-const MAX_BAND_ENTRIES: usize = 250;
+///
+/// Re-exported from core rather than redefined: this number had started to
+/// exist separately in three places, which is three chances for one of them to
+/// move alone.
+use rdirstat_core::MAX_REPORT_ENTRIES as MAX_BAND_ENTRIES;
 
 fn now_unix_ms() -> i64 {
     SystemTime::now()
@@ -440,6 +446,237 @@ pub(crate) async fn restore_snapshot(
     .await
     .map_err(|error| CommandError::Internal(error.to_string()))??;
     Ok(restored)
+}
+
+
+/// Content-category totals for a subtree — the Types report.
+///
+/// `O(subtree)`, so it runs on the blocking pool and the caller fetches it only
+/// while the route is showing.
+///
+/// Categories with no files are omitted. `rdirstat-core` cannot enumerate the
+/// category table — that lives in `rdirstat-classify`, which depends on core,
+/// not the other way round — so "every category" would mean 256 rows of which
+/// most name nothing.
+///
+/// # Errors
+///
+/// [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+/// [`QueryError::UnknownNode`].
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn category_totals(
+    state: tauri::State<'_, AppState>,
+    generation: TreeGeneration,
+    node: NodeId,
+) -> Result<Vec<CategoryRow>, QueryError> {
+    let scan = state.tree_for_query(generation)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        rdirstat_core::by_category::category_totals(&scan.tree, node).ok_or(QueryError::UnknownNode { node })
+    })
+    .await
+    .map_err(|error| QueryError::Internal(error.to_string()))?
+}
+
+/// The largest files in one content category.
+///
+/// A leaderboard, not an enumeration; see [`MAX_BAND_ENTRIES`].
+///
+/// # Errors
+///
+/// [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+/// [`QueryError::UnknownNode`].
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn category_entries(
+    state: tauri::State<'_, AppState>,
+    generation: TreeGeneration,
+    node: NodeId,
+    category: CategoryId,
+    limit: u32,
+) -> Result<Vec<CategoryEntry>, QueryError> {
+    let scan = state.tree_for_query(generation)?;
+    let capped = usize::try_from(limit).unwrap_or(MAX_BAND_ENTRIES).min(MAX_BAND_ENTRIES);
+    tauri::async_runtime::spawn_blocking(move || {
+        rdirstat_core::by_category::category_entries(&scan.tree, node, category, capped)
+            .ok_or(QueryError::UnknownNode { node })
+    })
+    .await
+    .map_err(|error| QueryError::Internal(error.to_string()))?
+}
+
+/// Age buckets for a subtree — the Ages report.
+///
+/// `now_unix_seconds` is supplied by the caller rather than read from the clock
+/// here, because a function whose answer depends on the wall clock cannot be
+/// tested and because the *same* value has to reach both this command and
+/// [`age_bucket_entries`]. A mismatch is not detectable by the backend and would
+/// silently produce a file list that disagrees with the count above it.
+///
+/// # Errors
+///
+/// [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+/// [`QueryError::UnknownNode`].
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn age_buckets(
+    state: tauri::State<'_, AppState>,
+    generation: TreeGeneration,
+    node: NodeId,
+    now_unix_seconds: i64,
+) -> Result<Vec<AgeBucketRow>, QueryError> {
+    let scan = state.tree_for_query(generation)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        rdirstat_core::by_age::age_buckets(&scan.tree, node, now_unix_seconds).ok_or(QueryError::UnknownNode { node })
+    })
+    .await
+    .map_err(|error| QueryError::Internal(error.to_string()))?
+}
+
+/// The largest files in one age bucket.
+///
+/// # Errors
+///
+/// [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+/// [`QueryError::UnknownNode`].
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn age_bucket_entries(
+    state: tauri::State<'_, AppState>,
+    generation: TreeGeneration,
+    node: NodeId,
+    now_unix_seconds: i64,
+    bucket: u8,
+    limit: u32,
+) -> Result<Vec<AgeBucketEntry>, QueryError> {
+    let scan = state.tree_for_query(generation)?;
+    let capped = usize::try_from(limit).unwrap_or(MAX_BAND_ENTRIES).min(MAX_BAND_ENTRIES);
+    tauri::async_runtime::spawn_blocking(move || {
+        rdirstat_core::by_age::age_bucket_entries(&scan.tree, node, now_unix_seconds, usize::from(bucket), capped)
+            .ok_or(QueryError::UnknownNode { node })
+    })
+    .await
+    .map_err(|error| QueryError::Internal(error.to_string()))?
+}
+
+/// Same-size file groups — the Dupes report.
+///
+/// **Candidates, not duplicates.** Nothing is opened and no content is hashed,
+/// so this reports files that share a logical size and says so in the payload:
+/// `content_verified` is always false at this stage, and the recovery figure is
+/// an upper bound rather than a promise. Same-size is not same-content, and on
+/// APFS two copies may already be clones sharing their storage.
+///
+/// # Errors
+///
+/// [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+/// [`QueryError::UnknownNode`].
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn duplicate_candidates(
+    state: tauri::State<'_, AppState>,
+    generation: TreeGeneration,
+    node: NodeId,
+    max_clusters: u32,
+    max_members: u32,
+) -> Result<DuplicateCandidateReport, QueryError> {
+    let scan = state.tree_for_query(generation)?;
+    // Zero means "use the backend ceiling", which is what the frontend sends.
+    let clusters = usize::try_from(max_clusters).unwrap_or(0);
+    let members = usize::try_from(max_members).unwrap_or(0);
+    tauri::async_runtime::spawn_blocking(move || {
+        rdirstat_core::dupes::duplicate_candidates(&scan.tree, node, clusters, members)
+            .ok_or(QueryError::UnknownNode { node })
+    })
+    .await
+    .map_err(|error| QueryError::Internal(error.to_string()))?
+}
+
+
+/// Compares the published scan against the previous snapshot of the same root.
+///
+/// **Both halves of the comparison are chosen here, not by the caller.** The
+/// frontend picks the metric and the row cap; it does not get to say which two
+/// scans are being compared, because a diff whose labels can disagree with its
+/// data is worse than no diff.
+///
+/// ## Why it can refuse
+///
+/// docs/06-DATA.md requires compatible detail thresholds. Two scans taken with
+/// different aggregation or different exclusion rules are not comparable: every
+/// entry the stricter scan dropped shows up as thousands of spurious
+/// "removed" rows, and the result looks like a catastrophe rather than a
+/// configuration difference. Refusing with a reason is the honest answer; the
+/// UI shows it instead of a wrong diff.
+///
+/// Memory: this holds TWO arenas at once, which at the design profile is twice
+/// the node array against a 5.0 GiB ceiling. The previous tree is dropped as
+/// soon as the report is built and is deliberately never cached.
+///
+/// # Errors
+///
+/// [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+/// [`QueryError::Internal`] carrying the reason no comparison is possible.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn scan_diff(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    generation: TreeGeneration,
+    metric: DiffMetric,
+    limit: u32,
+) -> Result<DiffReport, QueryError> {
+    let live = state.tree_for_query(generation)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = crate::snapshot_store::SnapshotStore::new(&app)
+            .map_err(|error| QueryError::Internal(error.to_string()))?;
+        let previous = store
+            .load_previous_for_root(&live.root_path, live.volume.device)
+            .ok_or_else(|| QueryError::Internal("only one saved scan for this volume".to_owned()))?;
+
+        // The check that stops a configuration difference from reading as a
+        // catastrophe. Compared before any work is done, because the walk
+        // itself would succeed and produce a confidently wrong answer.
+        let before = &previous.scan;
+        if before.options.aggregate_below_bytes != live.options.aggregate_below_bytes {
+            return Err(QueryError::Internal(
+                "the two scans used different aggregation thresholds, so entries one of them omitted \
+                 would appear as changes"
+                    .to_owned(),
+            ));
+        }
+        if before.exclusion_hash != live.exclusion_hash {
+            return Err(QueryError::Internal(
+                "the two scans used different exclusion rules, so paths one of them skipped would \
+                 appear as changes"
+                    .to_owned(),
+            ));
+        }
+
+        let describe = |scan: &CompletedScan| rdirstat_core::diff::DiffScanInfo {
+            root: DisplayPath::from_bytes(path_as_bytes(&scan.root_path)),
+            taken_unix_ms: Some(scan.finished_unix_ms),
+            nodes: u64::try_from(scan.tree.len()).unwrap_or(u64::MAX),
+        };
+        let options = rdirstat_core::diff::DiffOptions::new(describe(before), describe(&live))
+            .with_metric(metric)
+            .with_limit(usize::try_from(limit).unwrap_or(rdirstat_core::diff::MAX_DIFF_ENTRIES));
+
+        let report = rdirstat_core::diff::diff_trees(&before.tree, before.root, &live.tree, live.root, options);
+        // Explicit: the previous arena is the largest thing this command holds,
+        // and it must not outlive the report it was needed for.
+        drop(previous);
+        report
+    })
+    .await
+    .map_err(|error| QueryError::Internal(error.to_string()))?
+}
+
+/// A scan root as filesystem bytes, for display only.
+#[cfg(unix)]
+fn path_as_bytes(path: &Path) -> &[u8] {
+    use std::os::unix::ffi::OsStrExt as _;
+    path.as_os_str().as_bytes()
 }
 
 /// The escaped full path of a node, for display and Copy Path only.

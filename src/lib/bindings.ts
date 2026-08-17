@@ -107,6 +107,100 @@ export const commands = {
 	 */
 	sizeBandEntries: (generation: TreeGeneration, node: NodeId, band: number, limit: number) => typedError<SizeBandEntry[], QueryError>(__TAURI_INVOKE("size_band_entries", { generation, node, band, limit })),
 	/**
+	 *  Content-category totals for a subtree — the Types report.
+	 * 
+	 *  `O(subtree)`, so it runs on the blocking pool and the caller fetches it only
+	 *  while the route is showing.
+	 * 
+	 *  Categories with no files are omitted. `rdirstat-core` cannot enumerate the
+	 *  category table — that lives in `rdirstat-classify`, which depends on core,
+	 *  not the other way round — so "every category" would mean 256 rows of which
+	 *  most name nothing.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+	 *  [`QueryError::UnknownNode`].
+	 */
+	categoryTotals: (generation: TreeGeneration, node: NodeId) => typedError<CategoryRow[], QueryError>(__TAURI_INVOKE("category_totals", { generation, node })),
+	/**
+	 *  The largest files in one content category.
+	 * 
+	 *  A leaderboard, not an enumeration; see [`MAX_BAND_ENTRIES`].
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+	 *  [`QueryError::UnknownNode`].
+	 */
+	categoryEntries: (generation: TreeGeneration, node: NodeId, category: CategoryId, limit: number) => typedError<CategoryEntry[], QueryError>(__TAURI_INVOKE("category_entries", { generation, node, category, limit })),
+	/**
+	 *  Age buckets for a subtree — the Ages report.
+	 * 
+	 *  `now_unix_seconds` is supplied by the caller rather than read from the clock
+	 *  here, because a function whose answer depends on the wall clock cannot be
+	 *  tested and because the *same* value has to reach both this command and
+	 *  [`age_bucket_entries`]. A mismatch is not detectable by the backend and would
+	 *  silently produce a file list that disagrees with the count above it.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+	 *  [`QueryError::UnknownNode`].
+	 */
+	ageBuckets: (generation: TreeGeneration, node: NodeId, nowUnixSeconds: number) => typedError<AgeBucketRow[], QueryError>(__TAURI_INVOKE("age_buckets", { generation, node, nowUnixSeconds })),
+	/**
+	 *  The largest files in one age bucket.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+	 *  [`QueryError::UnknownNode`].
+	 */
+	ageBucketEntries: (generation: TreeGeneration, node: NodeId, nowUnixSeconds: number, bucket: number, limit: number) => typedError<AgeBucketEntry[], QueryError>(__TAURI_INVOKE("age_bucket_entries", { generation, node, nowUnixSeconds, bucket, limit })),
+	/**
+	 *  Same-size file groups — the Dupes report.
+	 * 
+	 *  **Candidates, not duplicates.** Nothing is opened and no content is hashed,
+	 *  so this reports files that share a logical size and says so in the payload:
+	 *  `content_verified` is always false at this stage, and the recovery figure is
+	 *  an upper bound rather than a promise. Same-size is not same-content, and on
+	 *  APFS two copies may already be clones sharing their storage.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+	 *  [`QueryError::UnknownNode`].
+	 */
+	duplicateCandidates: (generation: TreeGeneration, node: NodeId, maxClusters: number, maxMembers: number) => typedError<DuplicateCandidateReport, QueryError>(__TAURI_INVOKE("duplicate_candidates", { generation, node, maxClusters, maxMembers })),
+	/**
+	 *  Compares the published scan against the previous snapshot of the same root.
+	 * 
+	 *  **Both halves of the comparison are chosen here, not by the caller.** The
+	 *  frontend picks the metric and the row cap; it does not get to say which two
+	 *  scans are being compared, because a diff whose labels can disagree with its
+	 *  data is worse than no diff.
+	 * 
+	 *  ## Why it can refuse
+	 * 
+	 *  docs/06-DATA.md requires compatible detail thresholds. Two scans taken with
+	 *  different aggregation or different exclusion rules are not comparable: every
+	 *  entry the stricter scan dropped shows up as thousands of spurious
+	 *  "removed" rows, and the result looks like a catastrophe rather than a
+	 *  configuration difference. Refusing with a reason is the honest answer; the
+	 *  UI shows it instead of a wrong diff.
+	 * 
+	 *  Memory: this holds TWO arenas at once, which at the design profile is twice
+	 *  the node array against a 5.0 GiB ceiling. The previous tree is dropped as
+	 *  soon as the report is built and is deliberately never cached.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`QueryError::NoScan`], [`QueryError::StaleGeneration`], or
+	 *  [`QueryError::Internal`] carrying the reason no comparison is possible.
+	 */
+	scanDiff: (generation: TreeGeneration, metric: DiffMetric, limit: number) => typedError<DiffReport, QueryError>(__TAURI_INVOKE("scan_diff", { generation, metric, limit })),
+	/**
 	 *  What is on disk for each mounted volume, so a switcher can offer a restore.
 	 * 
 	 *  Cheap by construction: a directory listing plus a header-and-metadata read
@@ -246,6 +340,8 @@ export const LAYOUT_SCHEMA_VERSION = 1 as const;
 
 export const MAX_CHILD_PAGE = 500 as const;
 
+export const MAX_REPORT_ENTRIES = 250 as const;
+
 export const MIN_TILE_PX = 8.0 as const;
 
 export const PROGRESS_MAX_HZ = 10 as const;
@@ -324,6 +420,61 @@ export type ActionError =
 } } | 
 /**  Anything unexpected, already logged with its full source chain. */
 { kind: "internal"; detail: string };
+
+/**
+ *  One file inside an age bucket, for the breakdown.
+ * 
+ *  Carries its resolved path because the whole point of expanding a bucket is
+ *  to find out *which* files are in it; a list of node ids would make the
+ *  caller issue one `path_of` per row.
+ */
+export type AgeBucketEntry = {
+	/**  The arena node, so a row can be selected or revealed. */
+	node: NodeId,
+	/**  Full path, escaped for display. */
+	path: DisplayPath,
+	/**
+	 *  Allocated bytes, after hard-link policy. The quantity this list is
+	 *  ordered by.
+	 */
+	allocated: number,
+	/**  Logical bytes, after hard-link policy. */
+	logical: number,
+	/**
+	 *  Modification time in whole Unix seconds. The quantity that placed the
+	 *  file in this bucket, shipped raw so the front end can render both the
+	 *  date and the age from one number.
+	 */
+	mtime: number,
+	/**  Content category index. */
+	category: number,
+};
+
+/**
+ *  One row of the age histogram.
+ * 
+ *  Carries the edges in seconds rather than a rendered label, for the same
+ *  reason [`SizeBandRow`](crate::SizeBandRow) does: the front end formats them
+ *  with its own conventions instead of the backend shipping display text that
+ *  cannot then be re-styled or localised.
+ */
+export type AgeBucketRow = {
+	/**  Bucket index, `0` newest. Stable for a given [`AGE_BUCKET_EDGES`]. */
+	bucket: number,
+	/**  Inclusive lower age bound in seconds; `0` for the newest bucket. */
+	lower_seconds: number,
+	/**  Exclusive upper age bound in seconds; `None` for the oldest bucket. */
+	upper_seconds: number | null,
+	/**
+	 *  Files in this bucket. Counted even when they contribute no bytes, so a
+	 *  hard-link repeat is still visible as a name that exists.
+	 */
+	files: number,
+	/**  Logical bytes of those files, after hard-link policy. */
+	logical: number,
+	/**  Allocated bytes of those files, after hard-link policy. */
+	allocated: number,
+};
 
 /**
  *  One step on the path from the scan root down to a node.
@@ -422,6 +573,36 @@ export type CancelState =
 export type CatalogScanId = number;
 
 /**
+ *  One file inside a category, for the breakdown.
+ * 
+ *  Carries its resolved path because the whole point of expanding a category is
+ *  to find out *which* files are in it; a list of node ids would make the caller
+ *  issue one `path_of` per row.
+ * 
+ *  There is deliberately no `category` field. It would be the same value on
+ *  every row of the list — it is the argument that produced the list — and a
+ *  constant column is not data.
+ */
+export type CategoryEntry = {
+	/**  The arena node, so a row can be selected, revealed, or trashed. */
+	node: NodeId,
+	/**
+	 *  Full path, escaped for display. Never action authority: Reveal and Trash
+	 *  reconstruct the path in Rust (see [`DisplayPath`](crate::DisplayPath)).
+	 */
+	path: DisplayPath,
+	/**
+	 *  Allocated bytes, after hard-link policy. The quantity this list is
+	 *  ordered by.
+	 */
+	allocated: number,
+	/**  Logical bytes, after hard-link policy. */
+	logical: number,
+	/**  Modification time in whole Unix seconds. */
+	mtime: number,
+};
+
+/**
  *  Primary content category of a node, as assigned by `rdirstat-classify`.
  * 
  *  Defined here rather than in `rdirstat-classify` because
@@ -430,6 +611,31 @@ export type CatalogScanId = number;
  *  define a second one.
  */
 export type CategoryId = number;
+
+/**
+ *  One row of the Types report: everything of one category in the subtree.
+ * 
+ *  Carries the category *index*, never a label or a colour. docs/05-UI.md is
+ *  explicit that Rust sends indices and the frontend resolves the rest, which is
+ *  what keeps the palette themeable and the labels localisable without an IPC
+ *  round trip.
+ */
+export type CategoryRow = {
+	/**  The category, as assigned by `rdirstat-classify`. */
+	category: CategoryId,
+	/**
+	 *  Files of this category in the subtree. Includes files that contribute
+	 *  zero bytes, such as empty files and repeated hard links.
+	 */
+	files: number,
+	/**  Logical bytes of those files, after hard-link policy. */
+	logical: number,
+	/**
+	 *  Allocated bytes of those files, after hard-link policy. This is the
+	 *  quantity the rows are ordered by.
+	 */
+	allocated: number,
+};
 
 /**  One bounded page of children. */
 export type ChildPage = {
@@ -588,6 +794,220 @@ export type Details = {
 };
 
 /**
+ *  How one entry differs between the two scans.
+ * 
+ *  There is deliberately no `MetadataChanged` variant. A metadata change has no
+ *  magnitude, so it cannot be ranked among size movers, and a variant that the
+ *  producer never emits is a lie in the generated TypeScript union. Metadata
+ *  changes are counted in [`DiffSummary::metadata_changed`] instead.
+ */
+export type DiffChange = 
+/**  Present in the after scan, absent from the before scan. */
+"added" | 
+/**  Present in the before scan, absent from the after scan. */
+"removed" | 
+/**  Present in both; the selected metric rose. */
+"grown" | 
+/**  Present in both; the selected metric fell. */
+"shrunk";
+
+/**
+ *  Signed totals for one change class.
+ * 
+ *  The deltas are **signed sums**, not magnitudes, and they are separate per
+ *  metric. A row classified `Grown` by allocated bytes may carry a negative
+ *  logical delta; folding that into an absolute value would make the class
+ *  totals stop summing to the root delta.
+ */
+export type DiffClassTotals = {
+	/**  Entries in this class, uncapped — the list beside it is capped. */
+	entries: number,
+	/**  Sum of logical deltas over the class, in bytes. */
+	logical_delta: number,
+	/**  Sum of allocated deltas over the class, in bytes. */
+	allocated_delta: number,
+};
+
+/**
+ *  One change, resolved for display.
+ * 
+ *  Paths are reconstructed only for rows that survive the cap, which is what
+ *  keeps the report `O(limit)` in string work rather than `O(changes)`.
+ */
+export type DiffEntry = {
+	/**  How this entry differs. */
+	change: DiffChange,
+	/**  Which tree [`DiffEntry::node`] indexes. */
+	side: DiffSide,
+	/**  The arena node, in the tree named by [`DiffEntry::side`]. */
+	node: NodeId,
+	/**  Full path, escaped for display. */
+	path: DisplayPath,
+	/**  Kind on the side this row is addressed to. */
+	kind: Kind,
+	/**  Whether the kind differs between the two scans. */
+	kind_changed: boolean,
+	/**
+	 *  Filesystem entries this one row covers, including the node itself. `1`
+	 *  for a leaf; the whole subtree for an added or removed directory.
+	 */
+	entries: number,
+	/**  Logical bytes before. Zero for an added entry. */
+	before_logical: number,
+	/**  Allocated bytes before. Zero for an added entry. */
+	before_allocated: number,
+	/**  Logical bytes after. Zero for a removed entry. */
+	after_logical: number,
+	/**  Allocated bytes after. Zero for a removed entry. */
+	after_allocated: number,
+	/**  `after_logical - before_logical`, signed. */
+	logical_delta: number,
+	/**
+	 *  `after_allocated - before_allocated`, signed. Never summed with the
+	 *  logical delta.
+	 */
+	allocated_delta: number,
+	/**  Modification time in the before scan, whole Unix seconds. */
+	before_mtime: number | null,
+	/**  Modification time in the after scan, whole Unix seconds. */
+	after_mtime: number | null,
+	/**  Content category index, from the side this row is addressed to. */
+	category: number,
+};
+
+/**
+ *  Which size orders and classifies the comparison.
+ * 
+ *  The rows always carry *both* deltas; this only decides which one decides
+ *  "grown" from "shrunk" and which one sorts the leaderboard. It exists so the
+ *  diff honours the same logical/allocated toggle the rest of the interface
+ *  has, rather than silently picking one.
+ */
+export type DiffMetric = 
+/**  `st_size` — what the files claim. The default, matching the UI default. */
+"logical" | 
+/**
+ *  `st_blocks * 512` — what the filesystem spent. On APFS this disagrees
+ *  with logical for sparse, compressed, and cloned files.
+ */
+"allocated";
+
+/**  The whole comparison. */
+export type DiffReport = {
+	/**  The earlier scan. */
+	before: DiffScanInfo,
+	/**  The later scan. */
+	after: DiffScanInfo,
+	/**  Which size ordered and classified the rows. */
+	metric: DiffMetric,
+	/**
+	 *  The per-list cap actually applied, after clamping to
+	 *  [`MAX_DIFF_ENTRIES`]. The UI compares it against the summary counts to
+	 *  say "showing 500 of 41,220".
+	 */
+	limit: number,
+	/**  Uncapped counts and totals. */
+	summary: DiffSummary,
+	/**  Biggest additions first. */
+	added: DiffEntry[],
+	/**  Biggest removals first. */
+	removed: DiffEntry[],
+	/**  Biggest growth first. */
+	grown: DiffEntry[],
+	/**  Biggest shrinkage first. */
+	shrunk: DiffEntry[],
+};
+
+/**
+ *  Which two scans a report compares.
+ * 
+ *  Supplied by the caller, because a [`Tree`] does not know when it was taken.
+ *  It is a required part of [`DiffOptions`] rather than an optional decoration:
+ *  a diff that does not say what it is diffing is unreadable, and making the
+ *  labels structurally mandatory is cheaper than remembering to attach them.
+ * 
+ *  [`Default`] is derived for tests and renders as an empty root with no time,
+ *  which the UI shows as "unknown" — a visible gap rather than a silent one.
+ */
+export type DiffScanInfo = {
+	/**  The scan root, escaped for display. Never action authority. */
+	root: DisplayPath,
+	/**  When the scan finished, Unix milliseconds. `None` when unknown. */
+	taken_unix_ms: number | null,
+	/**
+	 *  Retained nodes in that scan's arena, so the header can say how much tree
+	 *  each side is.
+	 */
+	nodes: number,
+};
+
+/**
+ *  Which tree a [`DiffEntry::node`] indexes.
+ * 
+ *  Stated rather than inferred from [`DiffChange`]. A removed entry's node id
+ *  belongs to the *before* tree, which is not the published generation and
+ *  names a path that no longer exists, so Reveal and Trash must be refused for
+ *  it. Making the caller derive that from the change kind is exactly the tribal
+ *  knowledge this codebase does not accept.
+ */
+export type DiffSide = 
+/**  The earlier scan. Its node ids are not addressable by the live commands. */
+"before" | 
+/**  The later scan. */
+"after";
+
+/**  Everything the comparison found, in counts. Never truncated. */
+export type DiffSummary = {
+	/**  Entries present only in the after scan. */
+	added: DiffClassTotals,
+	/**  Entries present only in the before scan. */
+	removed: DiffClassTotals,
+	/**  Entries in both whose selected metric rose. */
+	grown: DiffClassTotals,
+	/**  Entries in both whose selected metric fell. */
+	shrunk: DiffClassTotals,
+	/**
+	 *  Entries in both with identical logical *and* allocated bytes, but a
+	 *  different mtime, kind, or flag set. Counted, not listed: see
+	 *  [`DiffChange`].
+	 */
+	metadata_changed: number,
+	/**
+	 *  Entries in both whose [`Kind`] differs — a file replaced by a directory
+	 *  of the same name, or a path that became a symlink. Overlaps the other
+	 *  counters on purpose: a kind change usually also changes size, and it is
+	 *  worth surfacing either way.
+	 */
+	kind_changed: number,
+	/**  Entries in both with nothing at all to report. */
+	unchanged: number,
+	/**  `(parent, name)` keys examined — added plus removed plus common. */
+	compared: number,
+	/**  Directory pairs the walk descended into. */
+	descended: number,
+	/**  Logical bytes at the before root. */
+	before_logical: number,
+	/**  Allocated bytes at the before root. */
+	before_allocated: number,
+	/**  Logical bytes at the after root. */
+	after_logical: number,
+	/**  Allocated bytes at the after root. */
+	after_allocated: number,
+	/**
+	 *  `after_logical - before_logical`. The four class `logical_delta` values
+	 *  sum to exactly this.
+	 */
+	logical_delta: number,
+	/**  `after_allocated - before_allocated`, on the same basis. */
+	allocated_delta: number,
+	/**
+	 *  The walk hit its traversal budget and stopped early, which only happens
+	 *  on an arena that escaped [`Tree::validate`]. The counts are a floor.
+	 */
+	truncated: boolean,
+};
+
+/**
  *  Aggregated data for one directory.
  * 
  *  Exactly 56 bytes; with the 4-byte [`NodeId`] beside it that is 60 bytes per
@@ -654,6 +1074,131 @@ export type DirTotals = {
  *    matching and rendering only.
  */
 export type DisplayPath = string;
+
+/**
+ *  A set of files sharing one logical size — a group worth comparing, not a
+ *  group known to match.
+ */
+export type DuplicateCandidateCluster = {
+	/**
+	 *  The logical size every member reports, in bytes. The only thing they are
+	 *  known to have in common.
+	 */
+	logical_bytes: number,
+	/**
+	 *  How many candidate files carry this size. Exact, and independent of how
+	 *  many are listed in [`Self::members`].
+	 */
+	member_count: number,
+	/**
+	 *  The lowest node ids in the cluster, ascending — arena order, capped at
+	 *  the call's member limit.
+	 */
+	members: DuplicateCandidateMember[],
+	/**
+	 *  Members not listed: the cap, plus any whose path could not be
+	 *  reconstructed.
+	 */
+	members_omitted: number,
+	/**
+	 *  Floor of the recovery range: **zero**, always, at this stage. No byte of
+	 *  any member has been read, so it is entirely possible that no two of them
+	 *  match and nothing here is deletable. The field exists so the UI renders a
+	 *  range instead of a single number that reads like a promise.
+	 */
+	potential_recovery_lower_bytes: number,
+	/**
+	 *  Ceiling of the recovery range: `logical_bytes × (member_count − 1)`,
+	 *  i.e. what would come back if every member but one were an identical,
+	 *  independently-stored copy. Never present this as recovered space; see the
+	 *  module docs.
+	 */
+	potential_recovery_upper_bytes: number,
+};
+
+/**
+ *  One file that *might* be a duplicate of the others in its cluster.
+ * 
+ *  The logical size is not repeated here: it is the cluster's grouping key and
+ *  identical for every member by construction, and two size columns on one row
+ *  is an invitation to display the wrong one.
+ */
+export type DuplicateCandidateMember = {
+	/**  The arena node, so a row can be revealed or trashed. */
+	node: NodeId,
+	/**
+	 *  Full path, escaped for display. Not action authority; see
+	 *  [`DisplayPath`].
+	 */
+	path: DisplayPath,
+	/**
+	 *  Filesystem-allocated bytes. Kept per member because, unlike the logical
+	 *  size, it genuinely differs across a cluster — a sparse, compressed, or
+	 *  cloned copy allocates less. It is still not proof of independent
+	 *  physical allocation.
+	 */
+	allocated: number,
+	/**  Modification time in whole Unix seconds. */
+	mtime: number,
+	/**  Content category index. */
+	category: number,
+	/**
+	 *  `nlink > 1`: this content is reachable by more than one name, and at
+	 *  least one of those names was not seen in this scan. Deleting this member
+	 *  may free nothing at all.
+	 */
+	hard_linked: boolean,
+};
+
+/**  The bounded result of one candidate pass over a subtree. */
+export type DuplicateCandidateReport = {
+	/**
+	 *  Clusters, ranked by [`DuplicateCandidateCluster::potential_recovery_upper_bytes`]
+	 *  descending, then by size descending.
+	 */
+	clusters: DuplicateCandidateCluster[],
+	/**  Clusters found before the cluster cap was applied. */
+	clusters_found: number,
+	/**  Clusters found but not returned, i.e. the ranked tail. */
+	clusters_omitted: number,
+	/**  Candidate files across every cluster found, not only the returned ones. */
+	files_in_clusters: number,
+	/**
+	 *  Upper bound summed over every cluster **found**, so the headline number
+	 *  does not shrink when the list is truncated. Still an upper bound; see
+	 *  [`DuplicateCandidateCluster::potential_recovery_upper_bytes`].
+	 */
+	potential_recovery_upper_bytes: number,
+	/**
+	 *  Whether any file content was compared to produce this report.
+	 * 
+	 *  **Always `false` here** — stages 3–5 of the pipeline do not exist yet.
+	 *  It is a field rather than a constant so the UI branches on data instead
+	 *  of on a hard-coded assumption, and starts telling the truth on its own
+	 *  the day content hashing lands.
+	 */
+	content_verified: boolean,
+	/**  The cluster cap actually applied, after clamping. */
+	cluster_limit: number,
+	/**  The per-cluster member cap actually applied, after clamping. */
+	member_limit: number,
+	/**
+	 *  Zero-length files skipped. Reported so their absence is visible: every
+	 *  one of them is the same size and none of them can recover a byte.
+	 */
+	empty_files_skipped: number,
+	/**
+	 *  Repeated hard-link names skipped — a second name for content already
+	 *  counted, which recovers nothing when deleted.
+	 */
+	hard_link_repeats_skipped: number,
+	/**
+	 *  Files not grouped because [`MAX_TRACKED_SIZES`] distinct sizes were
+	 *  already being tracked. Non-zero means clusters may be **missing**; the
+	 *  ones reported are still exact.
+	 */
+	files_ungrouped: number,
+};
 
 /**
  *  A stable, coarse classification of an OS error.

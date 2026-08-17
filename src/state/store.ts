@@ -27,7 +27,7 @@ import type { LayoutKind } from "@/lib/bindings";
 import { GENERATION_NONE, NODE_ID_ROOT } from "@/lib/wire";
 
 /** Left-rail routes. Only the two that exist in this build are reachable. */
-export type Route = "volumes" | "overview" | "tree" | "sizes";
+export type Route = "volumes" | "overview" | "tree" | "sizes" | "types" | "ages" | "diff" | "dupes";
 
 /**
  * Which byte count the size columns and the canvas show.

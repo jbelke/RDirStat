@@ -26,9 +26,15 @@ import {
 } from "@tanstack/react-query";
 
 import {
+  ageBucketEntries,
+  ageBuckets,
   ancestors,
+  categoryEntries,
+  categoryTotals,
   children,
+  duplicateCandidates,
   nodeDetails,
+  scanDiff,
   scanErrors,
   scanStatus,
   sizeBandEntries,
@@ -39,6 +45,13 @@ import {
   type ChildPageView,
   type DetailsView,
   type ScanErrorsView,
+  type AgeBucketEntryView,
+  type AgeBucketView,
+  type CategoryEntryView,
+  type CategoryRowView,
+  type DiffMetricKind,
+  type DiffReportView,
+  type DupesReportView,
   type ScanStatusView,
   type SizeBandEntryView,
   type SizeBandView,
@@ -46,6 +59,7 @@ import {
   type Sort,
   type VolumeRow,
 } from "@/lib/ipc";
+import { MAX_REPORT_ENTRIES as BINDINGS_MAX_REPORT_ENTRIES } from "@/lib/bindings";
 import { GENERATION_NONE, isRealNode, isVirtualGroup, MAX_CHILD_PAGE } from "@/lib/wire";
 
 export function createQueryClient(): QueryClient {
@@ -81,6 +95,15 @@ export const queryKeys = {
   sizeBands: (generation: number, node: number) => ["sizeBands", generation, node] as const,
   sizeBandEntries: (generation: number, node: number, band: number) =>
     ["sizeBandEntries", generation, node, band] as const,
+  categoryTotals: (generation: number, node: number) => ["categoryTotals", generation, node] as const,
+  categoryEntries: (generation: number, node: number, category: number) =>
+    ["categoryEntries", generation, node, category] as const,
+  ageBuckets: (generation: number, node: number, now: number) =>
+    ["ageBuckets", generation, node, now] as const,
+  ageBucketEntries: (generation: number, node: number, now: number, bucket: number) =>
+    ["ageBucketEntries", generation, node, now, bucket] as const,
+  dupes: (generation: number, node: number) => ["dupes", generation, node] as const,
+  scanDiff: (generation: number, metric: DiffMetricKind) => ["scanDiff", generation, metric] as const,
 } as const;
 
 /**
@@ -101,7 +124,13 @@ export function dropStaleGenerations(client: QueryClient, live: number): void {
         scope !== "details" &&
         scope !== "ancestors" &&
         scope !== "sizeBands" &&
-        scope !== "sizeBandEntries"
+        scope !== "sizeBandEntries" &&
+        scope !== "categoryTotals" &&
+        scope !== "categoryEntries" &&
+        scope !== "ageBuckets" &&
+        scope !== "ageBucketEntries" &&
+        scope !== "dupes" &&
+        scope !== "scanDiff"
       ) {
         return false;
       }
@@ -273,8 +302,16 @@ export function useSizeBands(
   });
 }
 
-/** How many files one expanded band lists. Matches the backend's own ceiling. */
-export const BAND_ENTRY_LIMIT = 250;
+/**
+ * How many files any report's breakdown lists.
+ *
+ * Imported from the generated bindings rather than restated, because this
+ * number had begun to exist independently in the command layer, here, and in
+ * each report — four copies, each free to drift.
+ */
+export const MAX_REPORT_ENTRIES = BINDINGS_MAX_REPORT_ENTRIES;
+/** @deprecated Use {@link MAX_REPORT_ENTRIES}; kept so existing imports resolve. */
+export const BAND_ENTRY_LIMIT = MAX_REPORT_ENTRIES;
 
 /**
  * The heaviest files inside one band.
@@ -294,6 +331,114 @@ export function useSizeBandEntries(
     queryFn: () => sizeBandEntries(generation, target, band ?? 0, BAND_ENTRY_LIMIT),
     staleTime: Number.POSITIVE_INFINITY,
     enabled: band !== null && generation !== GENERATION_NONE && node !== null && isRealNode(target),
+  });
+}
+
+/**
+ * The report routes.
+ *
+ * Every one of these is an `O(subtree)` walk on the backend, so all of them are
+ * gated on their own route being visible. Six of them running because six routes
+ * exist would be six full passes over a twelve-million-node tree for answers
+ * nobody is looking at.
+ *
+ * All are generation-keyed and `staleTime: Infinity` for the usual reason: a
+ * published arena is frozen, so the answer for a given key cannot change.
+ */
+export function useCategoryTotals(
+  generation: number,
+  node: number | null,
+  enabled = true,
+): UseQueryResult<CategoryRowView[], Error> {
+  const target = node ?? -1;
+  return useQuery({
+    queryKey: queryKeys.categoryTotals(generation, target),
+    queryFn: () => categoryTotals(generation, target),
+    staleTime: Number.POSITIVE_INFINITY,
+    enabled: enabled && generation !== GENERATION_NONE && node !== null && isRealNode(target),
+  });
+}
+
+export function useCategoryEntries(
+  generation: number,
+  node: number | null,
+  category: number | null,
+): UseQueryResult<CategoryEntryView[], Error> {
+  const target = node ?? -1;
+  return useQuery({
+    queryKey: queryKeys.categoryEntries(generation, target, category ?? -1),
+    queryFn: () => categoryEntries(generation, target, category ?? 0, MAX_REPORT_ENTRIES),
+    staleTime: Number.POSITIVE_INFINITY,
+    enabled: category !== null && generation !== GENERATION_NONE && node !== null && isRealNode(target),
+  });
+}
+
+export function useAgeBuckets(
+  generation: number,
+  node: number | null,
+  nowUnixSeconds: number,
+  enabled = true,
+): UseQueryResult<AgeBucketView[], Error> {
+  const target = node ?? -1;
+  return useQuery({
+    queryKey: queryKeys.ageBuckets(generation, target, nowUnixSeconds),
+    queryFn: () => ageBuckets(generation, target, nowUnixSeconds),
+    staleTime: Number.POSITIVE_INFINITY,
+    enabled: enabled && generation !== GENERATION_NONE && node !== null && isRealNode(target),
+  });
+}
+
+export function useAgeBucketEntries(
+  generation: number,
+  node: number | null,
+  nowUnixSeconds: number,
+  bucket: number | null,
+): UseQueryResult<AgeBucketEntryView[], Error> {
+  const target = node ?? -1;
+  return useQuery({
+    queryKey: queryKeys.ageBucketEntries(generation, target, nowUnixSeconds, bucket ?? -1),
+    // The SAME `nowUnixSeconds` the bucket totals used. A mismatch is not
+    // detectable by the backend and would silently produce a file list that
+    // disagrees with the count above it.
+    queryFn: () => ageBucketEntries(generation, target, nowUnixSeconds, bucket ?? 0, MAX_REPORT_ENTRIES),
+    staleTime: Number.POSITIVE_INFINITY,
+    enabled: bucket !== null && generation !== GENERATION_NONE && node !== null && isRealNode(target),
+  });
+}
+
+export function useDuplicateCandidates(
+  generation: number,
+  node: number | null,
+  enabled = true,
+): UseQueryResult<DupesReportView, Error> {
+  const target = node ?? -1;
+  return useQuery({
+    queryKey: queryKeys.dupes(generation, target),
+    // Zero means "use the backend's own ceilings" rather than duplicating them here.
+    queryFn: () => duplicateCandidates(generation, target, 0, 0),
+    staleTime: Number.POSITIVE_INFINITY,
+    enabled: enabled && generation !== GENERATION_NONE && node !== null && isRealNode(target),
+  });
+}
+
+/**
+ * The Diff report.
+ *
+ * Not keyed on a node: a diff is always whole-scan against whole-scan. It is
+ * also the one report that can legitimately be unavailable — there may only
+ * ever have been one scan of this volume — so the caller distinguishes that
+ * from an error rather than showing an empty diff.
+ */
+export function useScanDiff(
+  generation: number,
+  metric: DiffMetricKind,
+  enabled = true,
+): UseQueryResult<DiffReportView, Error> {
+  return useQuery({
+    queryKey: queryKeys.scanDiff(generation, metric),
+    queryFn: () => scanDiff(generation, metric, MAX_REPORT_ENTRIES),
+    staleTime: Number.POSITIVE_INFINITY,
+    enabled: enabled && generation !== GENERATION_NONE,
   });
 }
 

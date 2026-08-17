@@ -651,6 +651,323 @@ export async function sizeBandEntries(
   }));
 }
 
+/** One content-category row of the Types report. */
+export interface CategoryRowView {
+  readonly category: number;
+  readonly files: number;
+  readonly logical: number;
+  readonly allocated: number;
+}
+
+/** One file inside a category. A leaderboard row, not an enumeration. */
+export interface CategoryEntryView {
+  readonly node: number;
+  readonly path: string;
+  readonly allocated: number;
+  readonly logical: number;
+  readonly mtime: number;
+}
+
+export async function categoryTotals(generation: number, node: number): Promise<CategoryRowView[]> {
+  const rows = await unwrap("category_totals", commands.categoryTotals(toWireU64(generation), node));
+  return rows.map((row) => ({
+    category: num(row.category),
+    files: num(row.files),
+    logical: num(row.logical),
+    allocated: num(row.allocated),
+  }));
+}
+
+export async function categoryEntries(
+  generation: number,
+  node: number,
+  category: number,
+  limit: number,
+): Promise<CategoryEntryView[]> {
+  const rows = await unwrap(
+    "category_entries",
+    commands.categoryEntries(toWireU64(generation), node, category, limit),
+  );
+  return rows.map((row) => ({
+    node: num(row.node),
+    path: row.path,
+    allocated: num(row.allocated),
+    logical: num(row.logical),
+    mtime: num(row.mtime),
+  }));
+}
+
+/** One age bucket of the Ages report. */
+export interface AgeBucketView {
+  readonly bucket: number;
+  readonly lowerSeconds: number;
+  /** `null` on the open-ended oldest bucket. */
+  readonly upperSeconds: number | null;
+  readonly files: number;
+  readonly logical: number;
+  readonly allocated: number;
+}
+
+export interface AgeBucketEntryView {
+  readonly node: number;
+  readonly path: string;
+  readonly allocated: number;
+  readonly logical: number;
+  readonly mtime: number;
+  readonly category: number;
+}
+
+export async function ageBuckets(
+  generation: number,
+  node: number,
+  nowUnixSeconds: number,
+): Promise<AgeBucketView[]> {
+  const rows = await unwrap("age_buckets", commands.ageBuckets(toWireU64(generation), node, nowUnixSeconds));
+  return rows.map((row) => ({
+    bucket: num(row.bucket),
+    lowerSeconds: num(row.lower_seconds),
+    upperSeconds: row.upper_seconds === null ? null : num(row.upper_seconds),
+    files: num(row.files),
+    logical: num(row.logical),
+    allocated: num(row.allocated),
+  }));
+}
+
+export async function ageBucketEntries(
+  generation: number,
+  node: number,
+  nowUnixSeconds: number,
+  bucket: number,
+  limit: number,
+): Promise<AgeBucketEntryView[]> {
+  const rows = await unwrap(
+    "age_bucket_entries",
+    commands.ageBucketEntries(toWireU64(generation), node, nowUnixSeconds, bucket, limit),
+  );
+  return rows.map((row) => ({
+    node: num(row.node),
+    path: row.path,
+    allocated: num(row.allocated),
+    logical: num(row.logical),
+    mtime: num(row.mtime),
+    category: num(row.category),
+  }));
+}
+
+/**
+ * The Dupes report: files that share a logical size.
+ *
+ * CANDIDATES, not duplicates. Nothing was opened and no content was hashed, so
+ * `contentVerified` is always false at this stage and the recovery figure is an
+ * upper bound rather than a promise. Same size is not same content, and on APFS
+ * two copies may already be clones sharing their storage.
+ */
+export interface DupesMemberView {
+  readonly node: number;
+  readonly path: string;
+  readonly allocated: number;
+  readonly mtime: number;
+  readonly category: number;
+  readonly hardLinked: boolean;
+}
+
+export interface DupesClusterView {
+  readonly logicalBytes: number;
+  readonly memberCount: number;
+  readonly members: readonly DupesMemberView[];
+  readonly membersOmitted: number;
+  readonly potentialRecoveryLowerBytes: number;
+  readonly potentialRecoveryUpperBytes: number;
+}
+
+export interface DupesReportView {
+  readonly clusters: readonly DupesClusterView[];
+  readonly clustersFound: number;
+  readonly clustersOmitted: number;
+  readonly filesInClusters: number;
+  readonly potentialRecoveryUpperBytes: number;
+  readonly contentVerified: boolean;
+  readonly clusterLimit: number;
+  readonly memberLimit: number;
+  readonly emptyFilesSkipped: number;
+  readonly hardLinkRepeatsSkipped: number;
+  readonly filesUngrouped: number;
+}
+
+export async function duplicateCandidates(
+  generation: number,
+  node: number,
+  maxClusters: number,
+  maxMembers: number,
+): Promise<DupesReportView> {
+  const report = await unwrap(
+    "duplicate_candidates",
+    commands.duplicateCandidates(toWireU64(generation), node, maxClusters, maxMembers),
+  );
+  return {
+    clusters: report.clusters.map((cluster) => ({
+      logicalBytes: num(cluster.logical_bytes),
+      memberCount: num(cluster.member_count),
+      members: cluster.members.map((member) => ({
+        node: num(member.node),
+        path: member.path,
+        allocated: num(member.allocated),
+        mtime: num(member.mtime),
+        category: num(member.category),
+        hardLinked: member.hard_linked,
+      })),
+      membersOmitted: num(cluster.members_omitted),
+      potentialRecoveryLowerBytes: num(cluster.potential_recovery_lower_bytes),
+      potentialRecoveryUpperBytes: num(cluster.potential_recovery_upper_bytes),
+    })),
+    clustersFound: num(report.clusters_found),
+    clustersOmitted: num(report.clusters_omitted),
+    filesInClusters: num(report.files_in_clusters),
+    potentialRecoveryUpperBytes: num(report.potential_recovery_upper_bytes),
+    contentVerified: report.content_verified,
+    clusterLimit: num(report.cluster_limit),
+    memberLimit: num(report.member_limit),
+    emptyFilesSkipped: num(report.empty_files_skipped),
+    hardLinkRepeatsSkipped: num(report.hard_link_repeats_skipped),
+    filesUngrouped: num(report.files_ungrouped),
+  };
+}
+
+/** The Diff report: what changed between the previous scan and this one. */
+export type DiffMetricKind = "logical" | "allocated";
+export type DiffChangeKind = "added" | "removed" | "grown" | "shrunk";
+export type DiffSideKind = "before" | "after";
+
+export interface DiffScanRef {
+  readonly root: string;
+  readonly takenUnixMs: number | null;
+  readonly nodes: number;
+}
+
+export interface DiffClassTotalsView {
+  readonly entries: number;
+  readonly logicalDelta: number;
+  readonly allocatedDelta: number;
+}
+
+export interface DiffEntryView {
+  readonly change: DiffChangeKind;
+  readonly side: DiffSideKind;
+  readonly node: number;
+  readonly path: string;
+  readonly kind: Kind;
+  readonly kindChanged: boolean;
+  readonly entries: number;
+  readonly beforeLogical: number;
+  readonly beforeAllocated: number;
+  readonly afterLogical: number;
+  readonly afterAllocated: number;
+  readonly logicalDelta: number;
+  readonly allocatedDelta: number;
+  readonly beforeMtime: number | null;
+  readonly afterMtime: number | null;
+  readonly category: number;
+}
+
+export interface DiffSummaryView {
+  readonly added: DiffClassTotalsView;
+  readonly removed: DiffClassTotalsView;
+  readonly grown: DiffClassTotalsView;
+  readonly shrunk: DiffClassTotalsView;
+  readonly metadataChanged: number;
+  readonly kindChanged: number;
+  readonly unchanged: number;
+  readonly compared: number;
+  readonly descended: number;
+  readonly beforeLogical: number;
+  readonly beforeAllocated: number;
+  readonly afterLogical: number;
+  readonly afterAllocated: number;
+  readonly logicalDelta: number;
+  readonly allocatedDelta: number;
+  readonly truncated: boolean;
+}
+
+export interface DiffReportView {
+  readonly before: DiffScanRef;
+  readonly after: DiffScanRef;
+  readonly metric: DiffMetricKind;
+  readonly limit: number;
+  readonly summary: DiffSummaryView;
+  readonly added: readonly DiffEntryView[];
+  readonly removed: readonly DiffEntryView[];
+  readonly grown: readonly DiffEntryView[];
+  readonly shrunk: readonly DiffEntryView[];
+}
+
+export async function scanDiff(
+  generation: number,
+  metric: DiffMetricKind,
+  limit: number,
+): Promise<DiffReportView> {
+  const report = await unwrap("scan_diff", commands.scanDiff(toWireU64(generation), metric, limit));
+  const scanRef = (side: { root: string; taken_unix_ms: number | null; nodes: number }): DiffScanRef => ({
+    root: side.root,
+    takenUnixMs: side.taken_unix_ms === null ? null : num(side.taken_unix_ms),
+    nodes: num(side.nodes),
+  });
+  const totals = (value: {
+    entries: number;
+    logical_delta: number;
+    allocated_delta: number;
+  }): DiffClassTotalsView => ({
+    entries: num(value.entries),
+    logicalDelta: num(value.logical_delta),
+    allocatedDelta: num(value.allocated_delta),
+  });
+  const entry = (row: (typeof report.added)[number]): DiffEntryView => ({
+    change: row.change,
+    side: row.side,
+    node: num(row.node),
+    path: row.path,
+    kind: row.kind,
+    kindChanged: row.kind_changed,
+    entries: num(row.entries),
+    beforeLogical: num(row.before_logical),
+    beforeAllocated: num(row.before_allocated),
+    afterLogical: num(row.after_logical),
+    afterAllocated: num(row.after_allocated),
+    logicalDelta: num(row.logical_delta),
+    allocatedDelta: num(row.allocated_delta),
+    beforeMtime: row.before_mtime === null ? null : num(row.before_mtime),
+    afterMtime: row.after_mtime === null ? null : num(row.after_mtime),
+    category: num(row.category),
+  });
+  return {
+    before: scanRef(report.before),
+    after: scanRef(report.after),
+    metric: report.metric,
+    limit: num(report.limit),
+    summary: {
+      added: totals(report.summary.added),
+      removed: totals(report.summary.removed),
+      grown: totals(report.summary.grown),
+      shrunk: totals(report.summary.shrunk),
+      metadataChanged: num(report.summary.metadata_changed),
+      kindChanged: num(report.summary.kind_changed),
+      unchanged: num(report.summary.unchanged),
+      compared: num(report.summary.compared),
+      descended: num(report.summary.descended),
+      beforeLogical: num(report.summary.before_logical),
+      beforeAllocated: num(report.summary.before_allocated),
+      afterLogical: num(report.summary.after_logical),
+      afterAllocated: num(report.summary.after_allocated),
+      logicalDelta: num(report.summary.logical_delta),
+      allocatedDelta: num(report.summary.allocated_delta),
+      truncated: report.summary.truncated,
+    },
+    added: report.added.map(entry),
+    removed: report.removed.map(entry),
+    grown: report.grown.map(entry),
+    shrunk: report.shrunk.map(entry),
+  };
+}
+
 export async function sizeBands(generation: number, node: number): Promise<SizeBandView[]> {
   const rows = await unwrap("size_bands", commands.sizeBands(toWireU64(generation), node));
   return rows.map((row) => ({

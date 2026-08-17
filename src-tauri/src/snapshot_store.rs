@@ -48,10 +48,23 @@ use rdirstat_core::snapshot::{self, Limits, SnapshotError};
 
 /// How many snapshots to keep per scanned root.
 ///
-/// Small on purpose: each one is the size of the arena, and this is a cache
-/// that makes launch fast, not the cross-scan history. History — and therefore
-/// diffing — is the Parquet catalog's job (docs/01-ARCHITECTURE.md#persistence),
-/// and it stores rows, not arenas.
+/// Two, not one, and the second one is load-bearing.
+///
+/// This started as a launch cache — one snapshot per root, so the app reopens
+/// on the last tree. Keeping the previous one as well turns out to buy the Diff
+/// report: `load_previous_for_root` hands a comparison the scan before the one
+/// on screen, so "what changed since last time" needs no Parquet partition.
+///
+/// That is a deliberate narrowing of what docs/01-ARCHITECTURE.md#persistence
+/// assigns to the catalog. The catalog still owns *history* — many scans, cross
+/// scan queries, retention policy, aggregate reports over rows. This owns
+/// exactly two arenas and answers exactly one question with them. The line is
+/// arena-versus-rows, not diff-versus-no-diff: a two-arena comparison is
+/// affordable and a twelve-scan one is not, because each arena is the whole
+/// tree in memory rather than a column of it.
+///
+/// Do not raise this number to make more history available. Each entry is a
+/// full arena, and a diff already holds two at once against a 5.0 GiB RSS gate.
 const KEEP_PER_ROOT: usize = 2;
 
 /// Prefix marking a partially written file. Never a load candidate.
@@ -202,6 +215,33 @@ impl SnapshotStore {
     /// a snapshot this build cannot read is litter, not a reason to fail.
     pub(crate) fn load_for_root(&self, root: &Path, device: u64) -> Option<Restored> {
         for path in self.newest_first(root, device) {
+            match Self::load(&path) {
+                Ok(restored) => return Some(restored),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "discarding an unloadable snapshot");
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+        None
+    }
+
+    /// The snapshot BEFORE the newest one for `root`, decoded.
+    ///
+    /// This is what makes a diff possible without the Parquet catalog. The
+    /// newest snapshot for a root is normally the scan that is already
+    /// published, so diffing against it would compare a tree with itself;
+    /// index 1 is the one before it.
+    ///
+    /// `KEEP_PER_ROOT` is 2, so index 1 is exactly "the previous scan" and
+    /// index 2 never exists. If retention ever grows, this still means
+    /// "previous" rather than "oldest", which is the useful comparison.
+    ///
+    /// Returns `None` when only one scan has ever been saved for this root —
+    /// the honest answer to "what changed since last time" when there is no
+    /// last time.
+    pub(crate) fn load_previous_for_root(&self, root: &Path, device: u64) -> Option<Restored> {
+        for path in self.newest_first(root, device).into_iter().skip(1) {
             match Self::load(&path) {
                 Ok(restored) => return Some(restored),
                 Err(error) => {
