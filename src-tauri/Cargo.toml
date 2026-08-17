@@ -86,6 +86,10 @@ trash = { workspace = true }
 crossbeam-channel = { workspace = true }
 
 tracing = { workspace = true }
+# Without a subscriber every `tracing::warn!` in this crate is discarded, which
+# makes the snapshot store's failure modes — no store, a full disk, an
+# unreadable file — completely invisible. `run` installs one.
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

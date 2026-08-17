@@ -1,10 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Capability for the main window. `core:window:allow-start-dragging` is listed explicitly because `core:window:default` does NOT include it: with `titleBarStyle: Overlay` the native title area is gone, so `data-tauri-drag-region` is the only thing that moves the window, and it calls `startDragging()` — which the ACL denies silently, leaving a window that cannot be moved. The `-webkit-app-region` rules in src/index.css do not substitute for this; that is a Chromium mechanism and is inert under WKWebView.",
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "opener:default"
+    "opener:default",
+    "core:window:allow-start-dragging"
   ]
 }

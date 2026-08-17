@@ -3586,6 +3586,7 @@ dependencies = [
  "tauri-specta",
  "tempfile",
  "tracing",
+ "tracing-subscriber",
  "trash",
 ]
 

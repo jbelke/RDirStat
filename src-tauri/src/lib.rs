@@ -18,6 +18,7 @@
 //! | [`query`] | child paging and node details against a frozen tree |
 //! | [`actions`] | Reveal and Trash, including identity revalidation |
 //! | [`fsident`] | path reconstruction, `lstat`, and error classification |
+//! | [`snapshot_store`] | where `*.rdstat` files live, atomic writes, retention, restore-at-launch |
 //! | [`volumes`] | the launch screen's volume list |
 //! | [`engine`] | **integration seam** — the temporary home of `rdirstat-scan` |
 //! | [`layout`] | **integration seam** — the temporary home of `rdirstat-treemap` |
@@ -42,6 +43,7 @@ mod fsident;
 mod progress;
 mod query;
 mod relocate;
+mod snapshot_store;
 mod state;
 mod token;
 mod tray;
@@ -137,6 +139,94 @@ pub fn export_bindings(path: &std::path::Path) -> Result<(), specta_typescript::
     )
 }
 
+/// Installs the `tracing` subscriber, once.
+///
+/// Until this existed the app emitted no diagnostics at all: every
+/// `tracing::info!`/`warn!` in this crate went to a subscriber that was never
+/// registered. That is tolerable for a scan, whose outcome the user can see,
+/// and not tolerable for the snapshot store, whose whole contract is "fail
+/// quietly and let the app carry on" — a failure nobody can observe is
+/// indistinguishable from the feature not being wired up at all.
+///
+/// `RUST_LOG` overrides the default. Errors are ignored deliberately: a second
+/// call, or a host that has already set a global subscriber, is not a reason to
+/// refuse to start.
+fn install_tracing() {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("rdirstat=info,warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .try_init();
+}
+
+/// Reads the newest `*.rdstat` snapshot and publishes it, off the UI thread.
+///
+/// This is what makes launch cheap. A full-volume scan of a working machine is
+/// millions of entries and minutes of wall clock; the snapshot is the same
+/// arena as a file, so the app can open on the last tree instead of on an empty
+/// volume picker.
+///
+/// Deliberately fire-and-forget on its own thread:
+///
+/// - **It must not block `setup`.** The window has to appear immediately. A
+///   multi-gigabyte arena takes a moment to read, and none of it is needed to
+///   draw the first frame.
+/// - **Every failure is survivable.** No store, no snapshots, an unreadable
+///   file, or a scan the user started first all mean the same thing — the app
+///   behaves exactly as it did before snapshots existed. Nothing here is on the
+///   path to a working app; it only ever removes a wait.
+///
+/// The frontend needs no signal: it polls `scan_status` while nothing is
+/// published, and this turns that poll into `Ready` with a generation, which is
+/// the same transition a finished scan produces.
+fn restore_last_scan(app: tauri::AppHandle) {
+    let spawned = std::thread::Builder::new()
+        .name("rdirstat-restore".to_owned())
+        .spawn(move || {
+            let store = match snapshot_store::SnapshotStore::new(&app) {
+                Ok(store) => store,
+                Err(error) => {
+                    tracing::warn!(%error, "no snapshot store; the previous scan cannot be restored");
+                    return;
+                }
+            };
+            let Some(restored) = store.load_newest() else {
+                // Logged, not silent: "no snapshot yet" and "the restore never
+                // ran" look identical from the outside, and only one of them is
+                // a bug.
+                tracing::info!("no snapshot to restore; the first scan will create one");
+                return;
+            };
+
+            let path = restored.path.clone();
+            let bytes = restored.bytes;
+            let nodes = restored.scan.tree.len();
+            let root = restored.scan.root_path.clone();
+
+            let state = tauri::Manager::state::<AppState>(&app);
+            if let Some(generation) = state.publish_restored(*restored.scan) {
+                tracing::info!(
+                    path = %path.display(),
+                    bytes,
+                    nodes,
+                    root = %root.display(),
+                    generation = generation.get(),
+                    "restored the previous scan from a snapshot"
+                );
+            } else {
+                // The user got there first. Their scan is live observation and
+                // this is a cache; the cache loses.
+                tracing::debug!("a scan was already published; discarding the restored snapshot");
+            }
+        });
+
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "could not spawn the snapshot restore thread");
+    }
+}
+
 /// Starts the desktop application and blocks until its event loop exits.
 ///
 /// # Errors
@@ -145,6 +235,7 @@ pub fn export_bindings(path: &std::path::Path) -> Result<(), specta_typescript::
 /// event loop terminates abnormally.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> tauri::Result<()> {
+    install_tracing();
     let builder = specta_builder();
 
     #[cfg(debug_assertions)]
@@ -168,6 +259,7 @@ pub fn run() -> tauri::Result<()> {
             if let Err(error) = tray::build(app.handle()) {
                 tracing::error!(%error, "could not create the tray icon; continuing without a menu-bar presence");
             }
+            restore_last_scan(app.handle().clone());
             Ok(())
         })
         // Closing the main window hides it — the app stays in the menu bar and

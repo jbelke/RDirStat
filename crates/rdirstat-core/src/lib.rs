@@ -191,6 +191,7 @@ mod id;
 mod name;
 mod node;
 mod scan;
+pub mod snapshot;
 mod tree;
 mod wire;
 

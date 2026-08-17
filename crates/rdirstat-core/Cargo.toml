@@ -16,7 +16,12 @@ workspace = true
 serde     = { workspace = true }
 specta    = { workspace = true }
 thiserror = { workspace = true }
+# The `*.rdstat` metadata section. The arena travels as fixed-width binary
+# sections; only the scan's scalars go through serde, where being
+# self-describing is worth more than being compact. This does not make the
+# crate an I/O crate: `snapshot` reads and writes `std::io` traits and never
+# names a path.
+serde_json = { workspace = true }
 
 [dev-dependencies]
-proptest   = { workspace = true }
-serde_json = { workspace = true }
+proptest = { workspace = true }

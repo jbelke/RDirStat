@@ -95,7 +95,20 @@ export function dropStaleGenerations(client: QueryClient, live: number): void {
  * event drives the numbers, and this exists for the *transition* (the contract
  * is explicit that completion is a supervisor state change, never inferred
  * from a gap in progress events).
+ *
+ * It also polls, far more slowly, while the app is `idle`. At launch the shell
+ * restores the previous scan from a `*.rdstat` snapshot on a background thread;
+ * that read finishes some seconds after the window appears and turns `idle`
+ * into `ready` with a generation. Without a poll in `idle` the restored tree
+ * would sit in memory unnoticed until the user did something.
+ *
+ * `idle` means *nothing has ever been published*, so this poll stops for good
+ * the moment a tree exists — either the restore landed or a scan produced one.
+ * It is an `O(1)` status read, not a tree query.
  */
+const IDLE_POLL_MS = 1000;
+const ACTIVE_POLL_MS = 500;
+
 export function useScanStatus(): UseQueryResult<ScanStatusView, Error> {
   return useQuery({
     queryKey: queryKeys.scanStatus(),
@@ -103,7 +116,10 @@ export function useScanStatus(): UseQueryResult<ScanStatusView, Error> {
     staleTime: 0,
     refetchInterval: (query) => {
       const state = query.state.data?.state;
-      return state === "scanning" || state === "cancelling" || state === "finalizing" ? 500 : false;
+      if (state === "scanning" || state === "cancelling" || state === "finalizing") {
+        return ACTIVE_POLL_MS;
+      }
+      return state === "idle" ? IDLE_POLL_MS : false;
     },
   });
 }

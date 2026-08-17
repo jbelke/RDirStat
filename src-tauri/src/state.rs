@@ -276,6 +276,48 @@ impl AppState {
         lifecycle.generation = generation;
     }
 
+    /// Publishes a tree restored from a `*.rdstat` snapshot.
+    ///
+    /// Returns the generation it was published under, or `None` if it was not
+    /// published at all.
+    ///
+    /// Two things make this different from [`publish`](Self::publish), and both
+    /// are why it is a separate method rather than a flag:
+    ///
+    /// 1. **It never clobbers.** A restore is started at launch and finishes
+    ///    whenever the file finishes reading. If the user was quick enough to
+    ///    start a real scan in the meantime — or one already published — the
+    ///    restore is dropped. Live observation always outranks a cache.
+    /// 2. **The ids are re-stamped.** [`ScanId`] and [`TreeGeneration`] are
+    ///    per-process counters. The ones in the file came from a previous run,
+    ///    and republishing them would let a stale generation collide with a
+    ///    live one, which is precisely the confusion the generation check in
+    ///    [`tree_for_query`](Self::tree_for_query) exists to prevent.
+    ///
+    /// The active slot is not claimed: nothing is scanning, so there is nothing
+    /// to cancel and no progress to emit.
+    pub fn publish_restored(&self, mut scan: CompletedScan) -> Option<TreeGeneration> {
+        let generation = {
+            let mut lifecycle = lock(&self.lifecycle);
+            if lifecycle.active.is_some() || !lifecycle.generation.is_none() {
+                return None;
+            }
+            let generation = TreeGeneration::from_raw(self.next_generation.fetch_add(1, Ordering::Relaxed));
+            scan.scan_id = ScanId::from_raw(self.next_scan_id.fetch_add(1, Ordering::Relaxed));
+            scan.generation = generation;
+
+            // The published slot is written while the lifecycle lock is held so
+            // a scan cannot start between the check above and the swap below and
+            // then be overwritten by this restore.
+            let mut slot = self.published.write().unwrap_or_else(PoisonError::into_inner);
+            *slot = Some(Arc::new(scan));
+            lifecycle.state = ScanState::Ready;
+            lifecycle.generation = generation;
+            generation
+        };
+        Some(generation)
+    }
+
     /// Releases the active slot without publishing.
     ///
     /// A cancelled or failed scan never becomes `Ready`; the previously
