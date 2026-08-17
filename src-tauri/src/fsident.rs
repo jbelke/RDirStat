@@ -13,7 +13,7 @@ use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _}
 use std::path::{Component, Path, PathBuf};
 
 use rdirstat_core::{
-    ActionError, CompletedScan, DisplayPath, ErrorClass, Kind, NodeId, Operation, QueryError, ScanError, flags,
+    ActionError, CompletedScan, DisplayPath, Kind, NodeId, Operation, QueryError, flags,
 };
 
 /// What a fresh `lstat` says about a path.
@@ -82,62 +82,6 @@ pub(crate) fn observe_metadata(metadata: &Metadata) -> Observation {
 /// Whatever `symlink_metadata` reports.
 pub(crate) fn observe(path: &Path) -> io::Result<Observation> {
     std::fs::symlink_metadata(path).map(|metadata| observe_metadata(&metadata))
-}
-
-/// Classifies an `io::Error` for [`ScanError`] and [`ErrorClassCount`].
-///
-/// [`ErrorClassCount`]: rdirstat_core::ErrorClassCount
-#[must_use]
-pub(crate) fn error_class(error: &io::Error) -> ErrorClass {
-    match error.kind() {
-        io::ErrorKind::PermissionDenied => ErrorClass::PermissionDenied,
-        io::ErrorKind::NotFound => ErrorClass::NotFound,
-        io::ErrorKind::NotADirectory => ErrorClass::NotADirectory,
-        // `io::ErrorKind::FilesystemLoop` / `InvalidFilename` are still
-        // unstable, so the remaining classes come from `errno` directly.
-        _ => match error.raw_os_error() {
-            // EMFILE / ENFILE
-            Some(24 | 23) => ErrorClass::TooManyOpenFiles,
-            // ELOOP
-            Some(62) => ErrorClass::SymlinkLoop,
-            // ENAMETOOLONG
-            Some(63) => ErrorClass::NameTooLong,
-            // EILSEQ
-            Some(92) => ErrorClass::InvalidName,
-            // EIO
-            Some(5) => ErrorClass::InputOutput,
-            // ESTALE / EHOSTDOWN
-            Some(70 | 64) => ErrorClass::RemoteUnavailable,
-            _ => ErrorClass::Other,
-        },
-    }
-}
-
-/// Turns an `io::Error` at `path` into a recorded, usually non-fatal
-/// [`ScanError`].
-#[must_use]
-pub(crate) fn scan_error(path: &Path, operation: Operation, error: &io::Error) -> ScanError {
-    let display = DisplayPath::from_bytes(path.as_os_str().as_encoded_bytes());
-    let class = error_class(error);
-    let os_code = error.raw_os_error().unwrap_or(0);
-    match class {
-        ErrorClass::PermissionDenied => ScanError::PermissionDenied {
-            path: display,
-            operation,
-            os_code,
-        },
-        ErrorClass::NotFound => ScanError::Vanished {
-            path: display,
-            operation,
-        },
-        ErrorClass::InvalidName => ScanError::InvalidName { path: display },
-        _ => ScanError::Io {
-            path: display,
-            operation,
-            class,
-            os_code,
-        },
-    }
 }
 
 /// Turns an `io::Error` at `path` into an [`ActionError`].
@@ -309,14 +253,4 @@ mod tests {
         assert!(!observed.executable);
     }
 
-    #[test]
-    fn a_missing_path_classifies_as_not_found() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let error = observe(&dir.path().join("nope")).expect_err("must fail");
-        assert_eq!(error_class(&error), ErrorClass::NotFound);
-        assert!(matches!(
-            scan_error(&dir.path().join("nope"), Operation::Metadata, &error),
-            ScanError::Vanished { .. }
-        ));
-    }
 }

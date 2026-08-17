@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rdirstat_core::{DisplayPath, PROGRESS_MAX_HZ, ScanId, ScanProgress, ScanState};
+use rdirstat_core::{
+    DisplayPath, ErrorClass, ErrorClassCount, PROGRESS_MAX_HZ, ScanError, ScanId, ScanProgress, ScanState,
+};
 
 use crate::events::ScanProgressEvent;
 use crate::state::{AppState, CancelToken};
@@ -57,8 +59,41 @@ pub struct ProgressCounters {
     /// `try_lock` and skipped under contention — a blocking lock in the scan
     /// loop would be a bug.
     current_dir: Mutex<Option<DisplayPath>>,
+    /// What the recorded failures actually were, while they are being recorded.
+    errors_by_class: ErrorLog,
     started: Instant,
 }
+
+/// The per-class counts and the first few failures of a running scan.
+///
+/// `ScanProgress` carries one number: `errors`. A number is not an answer to
+/// "what failed" — it is the question — and until a scan finishes, its detailed
+/// error list belongs to the scanner and has not crossed any boundary yet. This
+/// is the shell's own copy, written as failures happen and read by the
+/// `scan_errors` command.
+///
+/// Two shapes for two jobs, both bounded:
+///
+/// - **Counts are an array of atomics**, one slot per [`ErrorClass`]. Exact,
+///   allocation-free, and safe to write from any thread.
+/// - **Samples are a `Vec` behind a mutex**, capped at [`LIVE_ERROR_SAMPLES`]
+///   and never re-allocated after the cap. It is the *first* N rather than the
+///   most recent: the same rule `CompletedScan::errors` follows, so the live
+///   list and the final list agree about their first page instead of quietly
+///   disagreeing. Once the cap is reached the lock is not even taken.
+#[derive(Debug, Default)]
+struct ErrorLog {
+    classes: [AtomicU64; ErrorClass::ALL.len()],
+    samples: Mutex<Vec<ScanError>>,
+}
+
+/// How many failures a *running* scan keeps in full.
+///
+/// Small on purpose. This is the "what is going wrong right now" affordance,
+/// not the report: the completed scan keeps
+/// [`MAX_DETAILED_ERRORS`](rdirstat_core::MAX_DETAILED_ERRORS) of them, and
+/// that is what the completion alert reads.
+pub(crate) const LIVE_ERROR_SAMPLES: usize = 64;
 
 impl Default for ProgressCounters {
     fn default() -> Self {
@@ -113,8 +148,65 @@ impl ProgressCounters {
             state: AtomicU8::new(STATE_SCANNING),
             rss_bytes: AtomicU64::new(0),
             current_dir: Mutex::new(None),
+            errors_by_class: ErrorLog::default(),
             started: Instant::now(),
         }
+    }
+
+    /// Records one failure for the live "what are these errors" view.
+    ///
+    /// Called once per recorded [`ScanError`], from whichever thread recorded
+    /// it. The class counter is always incremented; the full error is kept only
+    /// while there is room, so a volume with a million unreadable paths costs
+    /// one atomic add each after the first [`LIVE_ERROR_SAMPLES`].
+    ///
+    /// A poisoned samples lock is recovered rather than propagated: a panic
+    /// somewhere else must not turn the error log into a second failure.
+    pub fn record_error(&self, error: &ScanError) {
+        let slot = error.class().index();
+        if let Some(counter) = self.errors_by_class.classes.get(slot) {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        let mut samples = self
+            .errors_by_class
+            .samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if samples.len() < LIVE_ERROR_SAMPLES {
+            samples.push(error.clone());
+        }
+    }
+
+    /// The live per-class counts, in [`ErrorClass::ALL`] order, omitting zeros.
+    ///
+    /// `operation` is `None`: the running counters are per class only. The
+    /// completed scan reports the (class, operation) pairs.
+    #[must_use]
+    pub fn error_counts(&self) -> Vec<ErrorClassCount> {
+        ErrorClass::ALL
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, class)| {
+                let count = self.errors_by_class.classes.get(slot)?.load(Ordering::Relaxed);
+                (count > 0).then_some(ErrorClassCount {
+                    class: *class,
+                    operation: None,
+                    count,
+                })
+            })
+            .collect()
+    }
+
+    /// The retained failures of the running scan, oldest first, capped at
+    /// `limit` as well as at [`LIVE_ERROR_SAMPLES`].
+    #[must_use]
+    pub fn error_samples(&self, limit: usize) -> Vec<ScanError> {
+        let samples = self
+            .errors_by_class
+            .samples
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        samples.iter().take(limit).cloned().collect()
     }
 
     /// Publishes the lifecycle state the next snapshot will carry.
@@ -127,6 +219,18 @@ impl ProgressCounters {
     pub fn offer_current_dir(&self, path: &[u8]) {
         if let Ok(mut slot) = self.current_dir.try_lock() {
             *slot = Some(DisplayPath::from_bytes(path));
+        }
+    }
+
+    /// As [`offer_current_dir`](Self::offer_current_dir), for a path the
+    /// producer has **already** escaped.
+    ///
+    /// `DisplayPath::from_bytes` is not idempotent — it escapes `%` as `%25` —
+    /// so re-encoding a `DisplayPath` that arrived on a `ScanProgress` snapshot
+    /// would double-escape every path containing a percent sign.
+    pub fn offer_current_display(&self, path: Option<DisplayPath>) {
+        if let Ok(mut slot) = self.current_dir.try_lock() {
+            *slot = path;
         }
     }
 

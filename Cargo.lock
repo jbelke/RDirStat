@@ -3537,7 +3537,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
+ "rdirstat-classify",
  "rdirstat-core",
+ "rdirstat-scan",
  "rdirstat-treemap",
  "serde",
  "serde_json",

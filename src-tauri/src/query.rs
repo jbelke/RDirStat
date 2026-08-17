@@ -524,7 +524,22 @@ mod tests {
         let details = details(&scan, sub.node).expect("details");
         assert_eq!(details.name, "sub");
         assert_eq!(details.kind, Kind::Directory);
-        assert_eq!(details.path.as_str(), dir.path().join("sub").to_string_lossy());
+        // Against `scan.root_path`, not `dir.path()`. `Scanner::scan`
+        // canonicalizes its root, and on macOS a `TempDir` lives under `/var`,
+        // which is a symlink to `/private/var` — so the arena's root name is
+        // `/private/var/...` while `dir.path()` is `/var/...`.
+        //
+        // The canonical form is the correct one and the reconstruction is
+        // right: `CompletedScan::root_path` is the sole action authority, and
+        // an action must not resolve through a symlink that could be re-pointed
+        // between the scan and the click. `commands::validate_root` canonicalizes
+        // before the scanner ever sees the path, so the two agree in the app;
+        // only this test bypassed it and then asserted the pre-canonical string.
+        assert_eq!(details.path.as_str(), scan.root_path.join("sub").to_string_lossy());
+        assert!(
+            details.path.as_str().ends_with("/sub"),
+            "the reconstruction still names the node, not just the root"
+        );
         assert_eq!(details.subtree.map(|totals| totals.logical), Some(5_000));
         assert!(!details.is_package);
         assert_eq!(details.generation, scan.generation);

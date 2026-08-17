@@ -69,14 +69,10 @@ pub(crate) async fn scan_start(
     root: String,
     options: ScanOptions,
 ) -> Result<ScanId, StartError> {
-    if let Err(detail) = engine::compile_rules(&options) {
-        return Err(StartError::InvalidOptions { detail });
-    }
-    if options.workers == Some(0) {
-        return Err(StartError::InvalidOptions {
-            detail: "worker count must be at least 1".to_owned(),
-        });
-    }
+    // Options and exclusion patterns are validated *before* a scan slot is
+    // claimed, so a bad pattern is a typed refusal rather than a scan the user
+    // watches start and then fail.
+    engine::validate(&options)?;
 
     let requested = PathBuf::from(root);
     let root_path = tauri::async_runtime::spawn_blocking(move || validate_root(&requested))
@@ -395,6 +391,6 @@ mod tests {
             pattern: "^tmp".to_owned(),
             case_sensitive: true,
         }];
-        assert!(engine::compile_rules(&options).is_err());
+        assert!(engine::validate(&options).is_err());
     }
 }

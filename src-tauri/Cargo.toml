@@ -53,6 +53,14 @@ rdirstat-core = { workspace = true }
 # owns the tile geometry and the `BinaryResponse`; src-tauri only forwards.
 rdirstat-treemap = { workspace = true }
 
+# --- the traversal itself. `src/engine.rs` is now an adapter over this: it
+# bridges cancellation, progress, and categorization and owns no walk logic.
+rdirstat-scan = { workspace = true }
+
+# --- the taxonomy behind every node's CategoryId. Reached only through
+# `engine::ClassifyAdapter`, which joins it to rdirstat-scan's Categorizer seam.
+rdirstat-classify = { workspace = true }
+
 # --- typed IPC: `specta` describes the DTOs, `tauri-specta` emits the client ---
 specta = { workspace = true }
 tauri-specta = { workspace = true }

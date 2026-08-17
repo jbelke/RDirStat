@@ -27,10 +27,18 @@ use crate::progress::ProgressCounters;
 /// Two flags, because docs/01 makes "cancel acknowledged" and "all I/O
 /// resources closed" distinct states: no design can promise a hard deadline for
 /// an uninterruptible remote-filesystem syscall.
+///
+/// It also *owns* the [`rdirstat_scan::CancelToken`] the scanner itself polls.
+/// Wrapping rather than polling is deliberate: a bridge thread that copied one
+/// flag onto the other would add latency to the one operation docs/00 gives a
+/// 100 ms budget, and would be a thread per scan doing nothing else.
+/// [`request`](Self::request) sets both, so there is no window in which the
+/// shell believes a scan is cancelling and the scanner has not been told.
 #[derive(Debug, Default)]
 pub struct CancelToken {
     requested: AtomicBool,
     resources_closed: AtomicBool,
+    scan: rdirstat_scan::CancelToken,
 }
 
 impl CancelToken {
@@ -40,9 +48,16 @@ impl CancelToken {
         Self::default()
     }
 
+    /// The scanner's view of this token. Cloning shares the flag.
+    #[must_use]
+    pub fn scan_token(&self) -> rdirstat_scan::CancelToken {
+        self.scan.clone()
+    }
+
     /// Requests cancellation. Idempotent.
     pub fn request(&self) {
         self.requested.store(true, Ordering::Release);
+        self.scan.cancel();
     }
 
     /// Whether cancellation has been requested. Checked before each directory
