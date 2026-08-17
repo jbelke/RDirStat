@@ -115,6 +115,8 @@ export function AppShell() {
   const [starting, setStarting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  /** The root of the scan in flight, for the progress panel's denominator. */
+  const [scanRoot, setScanRoot] = useState<string | null>(null);
   const [relocating, setRelocating] = useState<number | null>(null);
   // Family first: a whole-volume scan puts far more than a dozen categories on
   // screen at once, and past that the per-category hues stop being tellable
@@ -151,6 +153,11 @@ export function AppShell() {
     async (root: string) => {
       setActionError(null);
       setStarting(true);
+      // Remembered for the progress panel's coverage denominator. It cannot come
+      // from `scan_status`: `summary` is null until a scan *completes*, so while
+      // the scan that needs the root is running, the caller that started it is
+      // the only thing that knows what it is.
+      setScanRoot(root);
       try {
         await scanStart(root);
         await client.invalidateQueries({ queryKey: queryKeys.scanStatus() });
@@ -490,6 +497,7 @@ export function AppShell() {
       <ScanProgressStrip
         state={scanState}
         progress={progress}
+        scanRoot={scanRoot}
         cancelling={cancelling}
         onCancel={() => void handleCancel()}
       />

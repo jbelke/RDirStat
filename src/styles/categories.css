@@ -41,6 +41,17 @@
   --pressure-ok: oklch(0.58 0.15 150);
   --pressure-warn: oklch(0.62 0.15 75);
   --pressure-critical: oklch(0.55 0.21 27);
+
+  /* Scan-progress ramp. A SEPARATE axis from capacity pressure, and
+   * deliberately not the same three tokens: on this screen a red capacity bar
+   * means "this disk is nearly full", so reusing `--pressure-critical` for "the
+   * scan just started" would make the same colour mean two opposite things a
+   * few pixels apart. Four steps rather than three because it is read as
+   * *travel* — red, orange, yellow, green — not as a threshold crossing. */
+  --scan-start: oklch(0.55 0.21 27);
+  --scan-early: oklch(0.60 0.18 50);
+  --scan-mid: oklch(0.64 0.15 92);
+  --scan-late: oklch(0.58 0.15 150);
   --capacity-purgeable: oklch(0.72 0.03 260);
   --capacity-free: oklch(0.9 0.01 260);
 
@@ -111,6 +122,11 @@
     --pressure-ok: oklch(0.74 0.15 150);
     --pressure-warn: oklch(0.79 0.15 80);
     --pressure-critical: oklch(0.66 0.21 25);
+
+    --scan-start: oklch(0.66 0.21 25);
+    --scan-early: oklch(0.71 0.18 50);
+    --scan-mid: oklch(0.79 0.15 95);
+    --scan-late: oklch(0.74 0.15 150);
     --capacity-purgeable: oklch(0.45 0.02 260);
     --capacity-free: oklch(0.28 0.01 260);
 
@@ -162,6 +178,11 @@
   --pressure-ok: oklch(0.74 0.15 150);
   --pressure-warn: oklch(0.79 0.15 80);
   --pressure-critical: oklch(0.66 0.21 25);
+
+  --scan-start: oklch(0.66 0.21 25);
+  --scan-early: oklch(0.71 0.18 50);
+  --scan-mid: oklch(0.79 0.15 95);
+  --scan-late: oklch(0.74 0.15 150);
   --capacity-purgeable: oklch(0.45 0.02 260);
   --capacity-free: oklch(0.28 0.01 260);
 
@@ -215,6 +236,10 @@
   --color-pressure-ok: var(--pressure-ok);
   --color-pressure-warn: var(--pressure-warn);
   --color-pressure-critical: var(--pressure-critical);
+  --color-scan-start: var(--scan-start);
+  --color-scan-early: var(--scan-early);
+  --color-scan-mid: var(--scan-mid);
+  --color-scan-late: var(--scan-late);
   --color-capacity-purgeable: var(--capacity-purgeable);
   --color-capacity-free: var(--capacity-free);
 }
