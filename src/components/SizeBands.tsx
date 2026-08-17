@@ -27,11 +27,18 @@
  * and the rows would not sum to the subtree. The bands partition the leaves.
  */
 
-import { ChevronRight, Info } from "lucide-react";
+import { ChevronRight, Copy, Eye, Info, Lock, Trash2 } from "lucide-react";
 import { Fragment, useState } from "react";
 
 import { formatCount, formatIEC, formatSI, formatMtime } from "@/lib/format";
 import type { SizeBandView } from "@/lib/ipc";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { BAND_ENTRY_LIMIT, useSizeBandEntries } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
@@ -44,6 +51,12 @@ export interface SizeBandsProps {
   /** The subtree the bands describe, for the per-band breakdown. */
   generation: number;
   root: number | null;
+  /** Reveal one file in Finder. Same handler the tree and the canvas use. */
+  onReveal?: (node: number) => void;
+  /** Move one file to the Trash. Refused unless deletion is armed. */
+  onTrash?: (node: number) => void;
+  /** Whether deletion is armed; drives the Trash item's wording, not just its state. */
+  trashEnabled?: boolean;
   className?: string;
 }
 
@@ -68,6 +81,9 @@ export function SizeBands({
   subtreeAllocated,
   generation,
   root,
+  onReveal,
+  onTrash,
+  trashEnabled = false,
   className,
 }: SizeBandsProps) {
   const [expanded, setExpanded] = useState<number | null>(null);
@@ -214,6 +230,9 @@ export function SizeBands({
                       isLoading={entries.isLoading}
                       error={entries.error}
                       total={row.files}
+                      onReveal={onReveal}
+                      onTrash={onTrash}
+                      trashEnabled={trashEnabled}
                     />
                   </td>
                 </tr>
@@ -239,11 +258,17 @@ function BandBreakdown({
   isLoading,
   error,
   total,
+  onReveal,
+  onTrash,
+  trashEnabled,
 }: {
   rows: readonly { node: number; path: string; allocated: number; logical: number; mtime: number }[] | undefined;
   isLoading: boolean;
   error: Error | null;
   total: number;
+  onReveal?: (node: number) => void;
+  onTrash?: (node: number) => void;
+  trashEnabled: boolean;
 }) {
   if (error !== null) {
     return <div className="px-4 py-3 text-xs text-pressure-critical">{error.message}</div>;
@@ -266,20 +291,43 @@ function BandBreakdown({
       </div>
       <ul className="flex flex-col">
         {rows.map((entry) => (
-          <li
-            key={entry.node}
-            className="flex items-baseline gap-3 border-b border-border/20 py-1 last:border-0"
-          >
-            <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={entry.path}>
-              {entry.path}
-            </span>
-            <span className="rds-numeric shrink-0 text-xs tabular-nums">
-              {formatSI(entry.allocated)}
-            </span>
-            <span className="rds-numeric w-24 shrink-0 text-right text-[11px] text-muted-foreground tabular-nums">
-              {formatMtime(entry.mtime)}
-            </span>
-          </li>
+          <ContextMenu key={entry.node}>
+            <ContextMenuTrigger asChild>
+              <li className="flex cursor-default items-baseline gap-3 rounded-sm border-b border-border/20 py-1 last:border-0 hover:bg-accent/40">
+                <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={entry.path}>
+                  {entry.path}
+                </span>
+                <span className="rds-numeric shrink-0 text-xs tabular-nums">
+                  {formatSI(entry.allocated)}
+                </span>
+                <span className="rds-numeric w-24 shrink-0 text-right text-[11px] text-muted-foreground tabular-nums">
+                  {formatMtime(entry.mtime)}
+                </span>
+              </li>
+            </ContextMenuTrigger>
+            {/* The same three verbs the tree and the canvas offer, on the same
+              * handlers. A file listed here is a file, and a list you cannot act
+              * on is a report rather than a tool. */}
+            <ContextMenuContent>
+              <ContextMenuItem disabled={onReveal === undefined} onSelect={() => onReveal?.(entry.node)}>
+                <Eye aria-hidden />
+                Reveal in Finder
+              </ContextMenuItem>
+              <ContextMenuItem onSelect={() => void navigator.clipboard.writeText(entry.path)}>
+                <Copy aria-hidden />
+                Copy Path
+              </ContextMenuItem>
+              <ContextMenuSeparator />
+              <ContextMenuItem
+                variant="destructive"
+                disabled={onTrash === undefined || !trashEnabled}
+                onSelect={() => onTrash?.(entry.node)}
+              >
+                {trashEnabled ? <Trash2 aria-hidden /> : <Lock aria-hidden />}
+                {trashEnabled ? "Move to Trash…" : "Move to Trash… (deletion off)"}
+              </ContextMenuItem>
+            </ContextMenuContent>
+          </ContextMenu>
         ))}
       </ul>
       {truncated && (

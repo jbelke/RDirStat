@@ -462,6 +462,9 @@ export function AppShell() {
               subtreeAllocated={rootDetails.data?.subtree?.allocated ?? null}
               generation={generation}
               root={currentRoot}
+              onReveal={handleReveal}
+              onTrash={(node) => handleTrash([node])}
+              trashEnabled={deletionArmed}
               className="min-h-0 flex-1"
             />
           )}
