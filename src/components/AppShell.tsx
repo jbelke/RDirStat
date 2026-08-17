@@ -23,9 +23,15 @@
 
 import { useQueryClient } from "@tanstack/react-query";
 import type { SortingState } from "@tanstack/react-table";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DetailsPanel } from "@/components/DetailsPanel";
+import {
+  HierarchyCanvas,
+  type ContextActionRequest,
+  type NodeDescription,
+  type SelectionChange,
+} from "@/components/canvas";
 import { ScanAlerts } from "@/components/ScanAlerts";
 import { ScanProgressStrip, useScanProgress } from "@/components/ScanProgressStrip";
 import { SegmentedControl } from "@/components/SegmentedControl";
@@ -35,7 +41,8 @@ import { VolumePicker } from "@/components/VolumePicker";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { formatSI } from "@/lib/format";
-import { revealInFinder, scanCancel, scanStart, type LayoutKind } from "@/lib/ipc";
+import { categoryOf } from "@/lib/categories";
+import { nodeDetails, revealInFinder, scanCancel, scanStart, type LayoutKind } from "@/lib/ipc";
 import {
   dropStaleGenerations,
   queryKeys,
@@ -43,7 +50,7 @@ import {
   useScanStatus,
 } from "@/lib/queries";
 import { cn } from "@/lib/utils";
-import { GENERATION_NONE } from "@/lib/wire";
+import { GENERATION_NONE, isRealNode } from "@/lib/wire";
 import { useCurrentRoot, useSoleSelection, useUiStore, type Route } from "@/state/store";
 import { CircleAlert } from "lucide-react";
 
@@ -162,6 +169,81 @@ export function AppShell() {
     );
   }, []);
 
+  // ---------------------------------------------------------------------
+  // Canvas wiring.
+  //
+  // The canvas is the *other* view of the same selection the table shows, so
+  // it is driven controlled: `selectedNodes` is the tree -> canvas half and
+  // `onSelectionChange` is the canvas -> tree half. `source` is carried on the
+  // change so an echo can be suppressed later if one ever appears; today the
+  // store is the single owner, so setting it from either side converges.
+  // ---------------------------------------------------------------------
+
+  // A new array identity every render would re-run the canvas's selection
+  // effect on every keystroke elsewhere in the shell.
+  const selectedNodes = useMemo(() => [...selection], [selection]);
+
+  const handleCanvasSelection = useCallback(
+    (change: SelectionChange) => {
+      if (change.primary === null) return;
+      select(change.primary, change.additive ? "add" : "replace");
+    },
+    [select],
+  );
+
+  // The layout batch carries only ids and geometry — the pinned 7-column schema
+  // has no name — so tooltips and the accessible list get their text from
+  // `node_details`, through the same Query cache the table uses. A virtual
+  // `<Files>` group is skipped: `node_details` answers `VirtualGroup` for one
+  // by design, and a rejected promise here would surface as a tooltip error.
+  const describeNode = useCallback(
+    async (node: number): Promise<NodeDescription | undefined> => {
+      if (generation === GENERATION_NONE || !isRealNode(node)) return undefined;
+      const details = await client.fetchQuery({
+        queryKey: queryKeys.details(generation, node),
+        queryFn: () => nodeDetails(generation, node),
+        staleTime: Number.POSITIVE_INFINITY,
+      });
+      return {
+        path: details.path,
+        name: details.name,
+        logical: details.logical,
+        allocated: details.allocated,
+        categoryLabel: categoryOf(details.category).label,
+      };
+    },
+    [client, generation],
+  );
+
+  const handleCanvasAction = useCallback(
+    (request: ContextActionRequest) => {
+      switch (request.action) {
+        case "reveal":
+          handleReveal(request.primary);
+          break;
+        case "trash":
+          handleTrash([...request.nodes]);
+          break;
+        case "copy-path":
+          void describeNode(request.primary)
+            .then((description) => {
+              if (description?.path === undefined) return;
+              return navigator.clipboard.writeText(description.path);
+            })
+            .catch((cause: unknown) => {
+              setActionError(cause instanceof Error ? cause.message : String(cause));
+            });
+          break;
+        case "zoom":
+          // The canvas already pushed its own stack; mirror it onto the store
+          // so the breadcrumb and the table follow the canvas.
+          navigateTo(request.primary);
+          break;
+      }
+    },
+    [describeNode, handleReveal, handleTrash, navigateTo],
+  );
+
   const crumbs = useCrumbs(generation, navStack, summary?.rootPath ?? null);
   const rootDetails = useNodeDetails(generation, currentRoot);
 
@@ -238,22 +320,23 @@ export function AppShell() {
                 </span>
               </div>
 
-              {/* --------------------------------------------------------------
-                * The canvas hierarchy view mounts here.
-                *
-                * `src/components/canvas/**` is owned by another agent and is
-                * deliberately NOT imported: an import of a module that does not
-                * exist fails the build outright, which would take the whole
-                * shell down rather than degrade one pane.
-                *
-                * Wiring is one line — render the view with
-                * `generation`, `currentRoot`, `layoutKind`, and `sizeMetric`,
-                * calling `select`/`navigateTo` for click and double-click so
-                * tree <-> canvas selection sync stays bidirectional.
-                * ----------------------------------------------------------- */}
-              <div className="flex h-56 shrink-0 items-center justify-center border-b border-border/60 bg-card/40 text-xs text-muted-foreground">
-                Hierarchy view ({layoutKind}) renders here — owned by the canvas module.
-              </div>
+              {/* The canvas owns its own `layout` fetch, decode, hit-test and
+                * paint. `showToggle={false}` because the toolbar above already
+                * owns `layoutKind`; two controls for one piece of state is how
+                * they drift apart. */}
+              <HierarchyCanvas
+                className="h-72 shrink-0 border-b border-border/60"
+                generation={generation}
+                root={currentRoot}
+                kind={layoutKind}
+                showToggle={false}
+                selectedNodes={selectedNodes}
+                onSelectionChange={handleCanvasSelection}
+                onNavigate={navigateTo}
+                onContextAction={handleCanvasAction}
+                describeNode={describeNode}
+                formatBytes={formatSI}
+              />
 
               <ScanAlerts summary={summary} className="p-3" />
 
