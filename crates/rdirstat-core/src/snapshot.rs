@@ -622,6 +622,64 @@ pub fn read<R: Read>(input: &mut R, limits: Limits) -> Result<CompletedScan, Sna
     })
 }
 
+/// What a snapshot says about itself, without decoding its arena.
+///
+/// Everything here comes from the fixed header and the small JSON metadata
+/// section — the first few kilobytes of the file. Deciding whether to offer
+/// "restore" in a menu must not cost the 77 MB read that actually restoring
+/// would, and a menu that renders on every open cannot pay for an arena.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Peek {
+    /// Retained nodes in the arena.
+    pub nodes: u64,
+    /// Directories in the arena.
+    pub directories: u64,
+    /// The scanned root.
+    pub root_path: PathBuf,
+    /// Which volume it was.
+    pub volume: VolumeId,
+    /// When the scan finished, Unix milliseconds.
+    pub finished_unix_ms: i64,
+    /// Logical and allocated totals.
+    pub totals: ScanTotals,
+    /// The build that wrote it.
+    pub tool_version: String,
+}
+
+/// Reads a snapshot's header and metadata, and stops.
+///
+/// The arena is **not** read, so this returns in the time it takes to read a
+/// few kilobytes regardless of how large the file is. The checksum covers the
+/// whole file and therefore cannot be verified here; a `Peek` is a label, not a
+/// guarantee, and [`read`] still validates everything before a tree is built
+/// from it.
+///
+/// # Errors
+///
+/// The header errors from [`read`] — magic, version, endianness, layout,
+/// compression, limits — plus [`SnapshotError::BadMetadata`].
+pub fn peek<R: Read>(input: &mut R, limits: Limits) -> Result<Peek, SnapshotError> {
+    let mut raw_header = [0_u8; HEADER_BYTES];
+    fill(input, &mut raw_header, "header")?;
+    let header = parse_header(&raw_header, limits)?;
+
+    let mut discard = Checksum::new();
+    let meta_bytes = take(input, header.meta_len, "metadata", &mut discard)?;
+    let meta: Meta =
+        serde_json::from_slice(&meta_bytes).map_err(|error| SnapshotError::BadMetadata(error.to_string()))?;
+
+    Ok(Peek {
+        nodes: header.node_count,
+        directories: header.dir_count,
+        root_path: bytes_to_path(meta.root_path),
+        volume: meta.volume,
+        finished_unix_ms: meta.finished_unix_ms,
+        totals: meta.totals,
+        tool_version: meta.tool_version,
+    })
+}
+
 /// The four section lengths, once the header has been proven to describe a
 /// container this build can read.
 struct Header {
@@ -1292,5 +1350,41 @@ mod tests {
         let mut b = Checksum::new();
         b.write(b"ab\0\0");
         assert_ne!(a.finish(), b.finish(), "zero padding is indistinguishable from data");
+    }
+
+    #[test]
+    fn a_peek_reports_the_scan_without_reading_the_arena() {
+        let original = scan();
+        let bytes = encode(&original);
+        let peeked = peek(&mut &bytes[..], Limits::default()).expect("peeks");
+
+        assert_eq!(peeked.nodes, as_u64(original.tree.len()));
+        assert_eq!(peeked.root_path, original.root_path);
+        assert_eq!(peeked.finished_unix_ms, original.finished_unix_ms);
+        assert_eq!(peeked.totals, original.totals);
+        assert_eq!(peeked.volume, original.volume);
+    }
+
+    #[test]
+    fn a_peek_stops_before_the_arena() {
+        // Truncated immediately after the metadata: `read` must fail and `peek`
+        // must not. That is the whole point — a label costs a few kilobytes
+        // whatever the file weighs.
+        let bytes = encode(&scan());
+        let meta_len = usize::try_from(u64_at(&bytes, 24)).expect("fits");
+        let prefix = &bytes[..HEADER_BYTES + meta_len];
+
+        assert!(peek(&mut &prefix[..], Limits::default()).is_ok());
+        assert!(read(&mut &prefix[..], Limits::default()).is_err());
+    }
+
+    #[test]
+    fn a_peek_still_refuses_a_file_it_does_not_understand() {
+        let mut bytes = encode(&scan());
+        bytes[0] = b'X';
+        assert!(matches!(
+            peek(&mut &bytes[..], Limits::default()),
+            Err(SnapshotError::BadMagic)
+        ));
     }
 }
