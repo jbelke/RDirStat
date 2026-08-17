@@ -22,6 +22,8 @@
  */
 
 import { type ColorBy, type LegendEntry, legendEntries } from "./palette.ts";
+import { X } from "lucide-react";
+
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { categoryOf } from "@/lib/categories";
 import { cn } from "@/lib/utils";
@@ -46,6 +48,16 @@ export interface CategoryLegendProps {
   /** Highlight one row — the category under the cursor. */
   highlighted?: number | null;
   onColorByChange?: (colorBy: ColorBy) => void;
+  /**
+   * The active filter as `CategoryId`s, or `null` for "show everything".
+   *
+   * Always category ids, never families, even while the legend is showing
+   * families — see [`LegendEntry.categoryIds`]. Omitting `onFilterChange`
+   * renders the legend as a plain key with no interaction, which is what the
+   * settings/help surface wants.
+   */
+  selected?: readonly number[] | null;
+  onFilterChange?: (selected: readonly number[] | null) => void;
   className?: string;
 }
 
@@ -54,10 +66,37 @@ export function CategoryLegend({
   present,
   highlighted = null,
   onColorByChange,
+  selected = null,
+  onFilterChange,
   className,
 }: CategoryLegendProps) {
   const entries = legendEntries(colorBy, present);
   if (entries.length === 0) return null;
+
+  const active = selected !== null && selected.length > 0;
+  const selectedSet = new Set(selected ?? []);
+  const interactive = onFilterChange !== undefined;
+
+  /*
+   * Clicking a row shows only that thing; clicking it again clears.
+   *
+   * Toggle-in/toggle-out over a set, rather than single-select, because the
+   * one-click case is identical either way — clicking a row when nothing is
+   * filtered gives you exactly that row — while the set also answers "caches
+   * AND build junk", which is the actual question someone reclaiming space is
+   * asking. An empty set means no filter rather than an empty view: filtering
+   * everything out is never what a click meant.
+   */
+  const toggle = (entry: LegendEntry): void => {
+    if (onFilterChange === undefined) return;
+    const isOn = entry.categoryIds.every((id) => selectedSet.has(id));
+    const next = new Set(selectedSet);
+    for (const id of entry.categoryIds) {
+      if (isOn) next.delete(id);
+      else next.add(id);
+    }
+    onFilterChange(next.size === 0 ? null : [...next]);
+  };
 
   // Under `"family"` the highlighted *category* has to be mapped onto its
   // family before it can match a row id.
@@ -90,29 +129,91 @@ export function CategoryLegend({
         />
       )}
 
-      <ul className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+      <ul className="flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1">
         {entries.map((entry) => (
-          <LegendRow key={entry.id} entry={entry} highlighted={entry.id === highlightedId} />
+          <LegendRow
+            key={entry.id}
+            entry={entry}
+            highlighted={entry.id === highlightedId}
+            // Under a filter, the rows that are NOT in it are dimmed rather
+            // than hidden: the legend is also the control that puts them back,
+            // so removing them would remove the way out.
+            selected={entry.categoryIds.every((id) => selectedSet.has(id))}
+            dimmed={active && !entry.categoryIds.some((id) => selectedSet.has(id))}
+            onToggle={interactive ? () => toggle(entry) : undefined}
+          />
         ))}
       </ul>
+
+      {active && onFilterChange !== undefined && (
+        <button
+          type="button"
+          onClick={() => onFilterChange(null)}
+          className="ml-auto flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <X aria-hidden className="size-3" />
+          Show all
+        </button>
+      )}
     </div>
   );
 }
 
-function LegendRow({ entry, highlighted }: { entry: LegendEntry; highlighted: boolean }) {
-  return (
-    <li
-      className={cn(
-        "flex shrink-0 items-center gap-1.5 rounded px-1 text-xs transition-colors",
-        highlighted ? "bg-accent text-foreground" : "text-muted-foreground",
-      )}
-    >
+function LegendRow({
+  entry,
+  highlighted,
+  selected,
+  dimmed,
+  onToggle,
+}: {
+  entry: LegendEntry;
+  highlighted: boolean;
+  selected: boolean;
+  dimmed: boolean;
+  onToggle?: () => void;
+}) {
+  const body = (
+    <>
       <span
         aria-hidden
         className="size-2.5 shrink-0 rounded-[2px] ring-1 ring-inset ring-black/20"
         style={{ backgroundColor: entry.colorVar }}
       />
       <span className="truncate">{entry.label}</span>
+    </>
+  );
+
+  const shared = cn(
+    "flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5 text-xs transition-colors",
+    highlighted && "bg-accent text-foreground",
+    !highlighted && (selected ? "text-foreground" : "text-muted-foreground"),
+    dimmed && "opacity-40",
+  );
+
+  // Without a handler this is a key, not a control, and must not claim to be
+  // focusable or pressable.
+  if (onToggle === undefined) {
+    return <li className={shared}>{body}</li>;
+  }
+
+  return (
+    <li className="shrink-0">
+      <button
+        type="button"
+        // `aria-pressed` rather than a checkbox role: these are toggle buttons
+        // that filter a view, not form inputs that submit a value.
+        aria-pressed={selected}
+        onClick={onToggle}
+        title={selected ? `Stop filtering to ${entry.label}` : `Show only ${entry.label}`}
+        className={cn(
+          shared,
+          "cursor-default hover:bg-accent hover:text-foreground",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          selected && "bg-accent ring-1 ring-inset ring-border",
+        )}
+      >
+        {body}
+      </button>
     </li>
   );
 }

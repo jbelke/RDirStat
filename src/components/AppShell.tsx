@@ -133,6 +133,20 @@ export function AppShell() {
   // screen at once, and past that the per-category hues stop being tellable
   // apart at tile size. Drilling in is when switching to `category` pays.
   const [colorBy, setColorBy] = useState<ColorBy>("family");
+  /**
+   * The legend's filter, as `CategoryId`s. `null` is "show everything".
+   *
+   * Always category ids even while the legend shows families: the family
+   * grouping is a presentation choice and the backend has no concept of it, so
+   * `CategoryLegend` expands a family to its members before it gets here.
+   */
+  const [categoryFilter, setCategoryFilter] = useState<readonly number[] | null>(null);
+
+  // Switching between family and category rebuilds what a row *means*, so a
+  // filter carried across the switch would be a selection the user cannot see
+  // the shape of — half a family checked, with no row showing it. Clearing is
+  // the honest reset.
+  useEffect(() => setCategoryFilter(null), [colorBy]);
 
   const liveGeneration = status.data?.generation ?? GENERATION_NONE;
   const scanState = status.data?.state ?? "idle";
@@ -511,7 +525,13 @@ export function AppShell() {
                 * content type. `present={null}` lists the whole taxonomy;
                 * once the canvas reports which categories it actually drew,
                 * pass that set instead so the legend shrinks on drill-down. */}
-              <CategoryLegend colorBy={colorBy} present={null} onColorByChange={setColorBy} />
+              <CategoryLegend
+                colorBy={colorBy}
+                present={null}
+                onColorByChange={setColorBy}
+                selected={categoryFilter}
+                onFilterChange={setCategoryFilter}
+              />
 
               <TreeTable
                 generation={generation}

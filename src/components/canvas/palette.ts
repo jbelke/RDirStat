@@ -126,6 +126,17 @@ export interface LegendEntry {
   readonly label: string;
   /** The CSS `var()` reference, so the swatch follows the theme with no JS. */
   readonly colorVar: string;
+  /**
+   * Every `CategoryId` this row stands for — one under `"category"`, a whole
+   * family's worth under `"family"`.
+   *
+   * This is what makes a legend row usable as a *filter*. The backend has no
+   * concept of a family and should not gain one: the grouping is a
+   * presentation choice that can change without the arena changing. So the
+   * expansion happens here, and everything downstream only ever sees category
+   * ids.
+   */
+  readonly categoryIds: readonly number[];
 }
 
 /**
@@ -147,6 +158,9 @@ export function legendEntries(colorBy: ColorBy, present: ReadonlySet<number> | n
       id: family,
       label: family,
       colorVar: `var(--fam-${familyKey(family)})`,
+      categoryIds: CATEGORIES.filter((category) => category.family === family).map(
+        (category) => category.id,
+      ),
     }));
   }
 
@@ -154,6 +168,7 @@ export function legendEntries(colorBy: ColorBy, present: ReadonlySet<number> | n
     id: String(category.id),
     label: category.label,
     colorVar: `var(--cat-${category.key})`,
+    categoryIds: [category.id],
   }));
 }
 
