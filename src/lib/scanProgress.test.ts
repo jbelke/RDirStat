@@ -164,3 +164,18 @@ test("the percentage floors rather than rounds, so it never overstates", () => {
 test("no fraction means no percentage to show", () => {
   assert.equal(coveragePercent(null), null);
 });
+
+// The bug that only appeared when the UI was driven: a scan of /Applications
+// announced itself as "Scanning Macintosh HD", because the heading used
+// `volumeForRoot` (which answers "where does this path live") as if it answered
+// "is this path a volume". The two questions have different answers for every
+// subtree scan, which is most of them.
+test("a subtree scan is not a whole-volume scan just because it resolves to one", () => {
+  const volume = volumeForRoot(VOLUMES, "/Applications");
+  assert.equal(volume, MACINTOSH_HD, "the containing volume is still the right lookup");
+  assert.equal(
+    isVolumeRoot(volume, "/Applications"),
+    false,
+    "/Applications must not be mistaken for the volume it sits on",
+  );
+});

@@ -41,6 +41,7 @@ import { subscribeScanProgress, type ScanProgressView, type ScanState } from "@/
 import { useScanErrors, useVolumes } from "@/lib/queries";
 import {
   coveragePercent,
+  isVolumeRoot,
   scanCoverage,
   scanRampClass,
   volumeForRoot,
@@ -77,6 +78,24 @@ const ACTIVE_STATES: ReadonlySet<ScanState> = new Set<ScanState>([
   "cancelling",
   "finalizing",
 ]);
+
+/**
+ * The trailing component of a path, for the heading.
+ *
+ * The heading names what is being scanned; the row below it shows where the walk
+ * currently is. A full root path in the heading would be the longest string in
+ * the panel and would push the percentage off the line, so the heading gets the
+ * folder name and the full path stays available as the element's `title`.
+ */
+function lastPathSegment(path: string | null): string | null {
+  if (path === null || path.length === 0) return null;
+  const trimmed = path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
+  const cut = trimmed.lastIndexOf("/");
+  // "/" itself, and any path whose last segment is empty, keep the whole string
+  // rather than degrading to "".
+  if (cut < 0 || cut === trimmed.length - 1) return trimmed;
+  return trimmed.slice(cut + 1);
+}
 
 /** What the bar is a fraction *of*. A progress bar that does not say is decoration. */
 function basisLabel(basis: CoverageBasis): string {
@@ -119,7 +138,13 @@ export function ScanProgressStrip({
   // Rolling up totals is a real phase with no meaningful fraction, so the bar
   // stops claiming one rather than freezing at whatever it last read.
   const showBar = !isFinalizing && coverage.fraction !== null;
-  const target = scanRoot === null ? null : (volume?.name ?? scanRoot);
+
+  // The volume's name is only the right label when the volume IS what is being
+  // scanned. `volumeForRoot` answers "which volume does this path live on", so
+  // using it directly made a scan of /Applications announce itself as
+  // "Scanning Macintosh HD" — naming the disk the folder happens to sit on
+  // rather than the folder the user picked.
+  const target = isVolumeRoot(volume, scanRoot) ? (volume?.name ?? null) : lastPathSegment(scanRoot);
 
   const heading = isFinalizing
     ? "Rolling up totals"
@@ -160,7 +185,9 @@ export function ScanProgressStrip({
       {/* Row 1 — what is happening, how far along, and the way out. */}
       <div className="flex items-center gap-3">
         <Loader aria-hidden className="size-4 shrink-0 animate-spin text-brand" />
-        <span className="shrink-0 text-sm font-medium">{heading}</span>
+        <span className="shrink-0 text-sm font-medium" title={scanRoot ?? undefined}>
+          {heading}
+        </span>
 
         {percent !== null && !isFinalizing && (
           <span className="rds-numeric shrink-0 text-2xl font-semibold leading-none tabular-nums">
