@@ -89,6 +89,15 @@ export interface UiState {
   /** Replace the navigation stack with an exact root-to-node path. */
   setNavPath: (nodes: readonly number[]) => void;
   select: (node: number, mode?: "replace" | "toggle" | "add") => void;
+  /**
+   * Select many nodes at once — a shift-click range, or select-all.
+   *
+   * Separate from `select` rather than a loop over it because a range is one
+   * user gesture and should be one state transition: looping would fire a
+   * render per row and, on a 500-row page, make a single shift-click feel like
+   * a stutter.
+   */
+  selectMany: (nodes: readonly number[], mode?: "replace" | "add") => void;
   clearSelection: () => void;
   setFocused: (node: number | null) => void;
   setHovered: (node: number | null) => void;
@@ -171,6 +180,16 @@ export const useUiStore = create<UiState>((set) => ({
         next.add(node);
       }
       return { selection: next, focused: node };
+    }),
+
+  selectMany: (nodes, mode = "replace") =>
+    set((state) => {
+      const next = mode === "add" ? new Set(state.selection) : new Set<number>();
+      for (const node of nodes) next.add(node);
+      // Focus follows the end of the range, which is where the user's cursor
+      // actually is — anchoring it at the start would make a subsequent
+      // shift-click extend from the wrong end.
+      return { selection: next, focused: nodes.at(-1) ?? state.focused };
     }),
 
   clearSelection: () => set({ selection: EMPTY_SELECTION }),

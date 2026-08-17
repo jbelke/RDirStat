@@ -33,6 +33,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DetailsPanel } from "@/components/DetailsPanel";
 import { DriveSwitcher } from "@/components/DriveSwitcher";
 import { RelocateDialog } from "@/components/RelocateDialog";
+import { SelectionActions } from "@/components/SelectionActions";
 import { CategoryLegend } from "@/components/canvas/CategoryLegend";
 import {
   HierarchyCanvas,
@@ -112,6 +113,8 @@ export function AppShell() {
   const navigateUpTo = useUiStore((state) => state.navigateUpTo);
   const setNavPath = useUiStore((state) => state.setNavPath);
   const select = useUiStore((state) => state.select);
+  const selectMany = useUiStore((state) => state.selectMany);
+  const clearSelection = useUiStore((state) => state.clearSelection);
   const setHovered = useUiStore((state) => state.setHovered);
   const setLayoutKind = useUiStore((state) => state.setLayoutKind);
   const setSizeMetric = useUiStore((state) => state.setSizeMetric);
@@ -133,7 +136,15 @@ export function AppShell() {
   const [actionError, setActionError] = useState<string | null>(null);
   /** The root of the scan in flight, for the progress panel's denominator. */
   const [scanRoot, setScanRoot] = useState<string | null>(null);
-  const [relocating, setRelocating] = useState<number | null>(null);
+  /**
+   * The nodes the move dialog is open on. Empty means closed.
+   *
+   * An array rather than a single id because migrating is inherently plural —
+   * the user picks out the twelve things they want off this disk, not one.
+   */
+  const [relocating, setRelocating] = useState<readonly number[]>([]);
+  /** Combined size of the selection, reported up by the table that holds the rows. */
+  const [selectionBytes, setSelectionBytes] = useState(0);
   // Family first: a whole-volume scan puts far more than a dozen categories on
   // screen at once, and past that the per-category hues stop being tellable
   // apart at tile size. Drilling in is when switching to `category` pays.
@@ -324,7 +335,7 @@ export function AppShell() {
   const rootDetails = useNodeDetails(generation, currentRoot);
   // Only while the route is showing: this is an O(subtree) walk on the backend.
   const sizeBands = useSizeBands(generation, currentRoot, route === "sizes");
-  const relocatingDetails = useNodeDetails(generation, relocating);
+  const relocatingDetails = useNodeDetails(generation, relocating.length === 1 ? relocating[0] : null);
 
   // A completed relocation makes the tree on screen wrong: the subtree that
   // moved is now a symlink and the sizes above it are stale. Rather than
@@ -353,6 +364,19 @@ export function AppShell() {
     },
     [crumbs, setNavPath],
   );
+
+  // Escape clears a multi-selection. The bar has a Clear button, but a bulk
+  // selection is exactly the state a user most wants to abandon quickly, and
+  // reaching for the mouse to do it is the wrong shape.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      // Not while the move dialog is open — Escape belongs to the modal there.
+      if (event.key !== "Escape" || relocating.length > 0) return;
+      clearSelection();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [clearSelection, relocating.length]);
 
   // ⌘↑ is the Finder shortcut for "enclosing folder", so it is the one a macOS
   // user will already try; ⇧⌘↑ goes all the way back to the scan root.
@@ -567,6 +591,22 @@ export function AppShell() {
                 onFilterChange={setCategoryFilter}
               />
 
+              <SelectionActions
+                count={selection.size}
+                bytes={selectionBytes}
+                armed={deletionArmed}
+                onMove={() => setRelocating([...selection])}
+                onReveal={() => {
+                  // Finder shows one item at a time; revealing twelve would
+                  // open twelve windows. The focused row is the one the user
+                  // most recently touched, so it is the honest single answer.
+                  const target = focused ?? [...selection][0];
+                  if (target !== undefined) handleReveal(target);
+                }}
+                onTrash={() => handleTrash([...selection])}
+                onClear={clearSelection}
+              />
+
               <TreeTable
                 generation={generation}
                 root={currentRoot}
@@ -578,6 +618,8 @@ export function AppShell() {
                 selection={selection}
                 focused={focused}
                 onSelect={select}
+                onSelectMany={selectMany}
+                onSelectionBytes={setSelectionBytes}
                 onDrillDown={navigateTo}
                 onHover={setHovered}
                 onReveal={handleReveal}
@@ -594,7 +636,7 @@ export function AppShell() {
           selectionCount={selection.size}
           onReveal={handleReveal}
           onTrash={handleTrash}
-          onRelocate={setRelocating}
+          onRelocate={(node) => setRelocating([node])}
           onTrashDropped={handleTrash}
           deletionArmed={deletionArmed}
           onArmDeletion={setDeletionArmed}
@@ -603,11 +645,11 @@ export function AppShell() {
 
       <RelocateDialog
         generation={generation}
-        node={relocating}
-        sourcePath={relocatingDetails.data?.path ?? null}
+        nodes={relocating}
+        sourcePath={relocating.length === 1 ? (relocatingDetails.data?.path ?? null) : null}
         scanRootPath={summary?.rootPath ?? null}
         deletionArmed={deletionArmed}
-        onClose={() => setRelocating(null)}
+        onClose={() => setRelocating([])}
         onRelocated={handleRelocated}
       />
 

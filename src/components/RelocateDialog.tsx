@@ -45,9 +45,16 @@ import { cn } from "@/lib/utils";
 
 export interface RelocateDialogProps {
   generation: number;
-  /** The node to move. `null` closes the dialog. */
-  node: number | null;
-  /** Its path, for the header, before any plan has come back. */
+  /**
+   * The nodes to move. Empty closes the dialog.
+   *
+   * One and many share this surface deliberately: a migration is the same
+   * operation whether it is one 58 GB disk image or twelve build folders, and
+   * splitting it into two dialogs would mean two places for the safety rules
+   * to drift apart.
+   */
+  nodes: readonly number[];
+  /** The sole node's path, for the header. Omitted for a multi-selection. */
   sourcePath: string | null;
   /**
    * The scan root. Used only to work out which volume the source is *on*, by
@@ -64,7 +71,7 @@ export interface RelocateDialogProps {
 
 export function RelocateDialog({
   generation,
-  node,
+  nodes,
   sourcePath,
   scanRootPath,
   deletionArmed,
@@ -75,11 +82,13 @@ export function RelocateDialog({
   const [destination, setDestination] = useState("");
   const [mode, setMode] = useState<RelocateMode>("migrate");
   const [disposal, setDisposal] = useState<SourceDisposal>("trash");
-  const [plan, setPlan] = useState<RelocatePlanView | null>(null);
+  const [plans, setPlans] = useState<readonly RelocatePlanView[] | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [planning, setPlanning] = useState(false);
   const [running, setRunning] = useState(false);
-  const [report, setReport] = useState<RelocateReportView | null>(null);
+  /** How many of `nodes` have been attempted, for the progress line. */
+  const [done, setDone] = useState(0);
+  const [outcomes, setOutcomes] = useState<readonly BatchOutcome[] | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
 
   /**
@@ -105,36 +114,51 @@ export function RelocateDialog({
     });
   }, [volumes.data, sourceMount]);
 
-  // Reset everything when the dialog is opened on a different node; a stale
-  // plan from a previous target is the one thing that must never linger in a
-  // confirmation UI.
+  // A stable key for "the same selection", so the reset below fires when the
+  // set changes rather than on every render that rebuilds the array.
+  const selectionKey = nodes.join(",");
+
+  // Reset everything when the dialog is opened on a different selection; a
+  // stale plan from a previous target is the one thing that must never linger
+  // in a confirmation UI.
   useEffect(() => {
-    setPlan(null);
+    setPlans(null);
     setPlanError(null);
-    setReport(null);
+    setOutcomes(null);
+    setDone(0);
     setFailure(null);
     setDestination("");
     setMode("migrate");
     setDisposal("trash");
-  }, [node]);
+  }, [selectionKey]);
 
+  /*
+   * Plan EVERY selected item, not just the first.
+   *
+   * A batch is only as safe as its worst member: one item landing on a
+   * filesystem that cannot hold its metadata, or overlapping the destination,
+   * has to surface before the user confirms twelve moves. So each gets its own
+   * backend plan and its own token, and the summary below reports the whole
+   * set rather than a sample of it.
+   */
   useEffect(() => {
-    if (node === null || destination.trim().length === 0) {
-      setPlan(null);
+    const target = destination.trim();
+    if (nodes.length === 0 || target.length === 0) {
+      setPlans(null);
       setPlanError(null);
       return;
     }
     let cancelled = false;
     setPlanning(true);
-    relocatePlan(generation, node, destination.trim(), mode, disposal)
+    Promise.all(nodes.map((node) => relocatePlan(generation, node, target, mode, disposal)))
       .then((next) => {
         if (cancelled) return;
-        setPlan(next);
+        setPlans(next);
         setPlanError(null);
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
-        setPlan(null);
+        setPlans(null);
         setPlanError(cause instanceof Error ? cause.message : String(cause));
       })
       .finally(() => {
@@ -143,22 +167,54 @@ export function RelocateDialog({
     return () => {
       cancelled = true;
     };
-  }, [generation, node, destination, mode, disposal]);
+  }, [generation, selectionKey, nodes, destination, mode, disposal]);
 
+  /*
+   * Applied one at a time, in order, and a failure does NOT abort the rest.
+   *
+   * Sequential rather than parallel because each move is disk-bound: running
+   * twelve `ditto` copies at once would contend for the same two devices and
+   * finish later than doing them in turn, while making the progress line
+   * meaningless.
+   *
+   * Continuing past a failure is the deliberate part. Each item is
+   * independently verified and independently disposed of, so item 4 failing
+   * says nothing about item 5 — and stopping would strand a half-migrated set
+   * with no record of which half. Every outcome is collected and reported.
+   */
   const handleConfirm = useCallback(async () => {
-    if (node === null || plan?.token == null) return;
+    const ready = plans?.filter((plan) => plan.token !== null) ?? [];
+    if (ready.length === 0) return;
     setRunning(true);
     setFailure(null);
-    try {
-      const next = await relocateApply(generation, node, destination.trim(), mode, disposal, plan.token);
-      setReport(next);
-      onRelocated(next);
-    } catch (cause) {
-      setFailure(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setRunning(false);
+    setDone(0);
+
+    const collected: BatchOutcome[] = [];
+    for (const plan of ready) {
+      try {
+        const report = await relocateApply(
+          generation,
+          plan.node,
+          destination.trim(),
+          mode,
+          disposal,
+          plan.token as string,
+        );
+        collected.push({ source: plan.source, report, error: null });
+        onRelocated(report);
+      } catch (cause) {
+        collected.push({
+          source: plan.source,
+          report: null,
+          error: cause instanceof Error ? cause.message : String(cause),
+        });
+      }
+      setDone(collected.length);
     }
-  }, [generation, node, destination, mode, disposal, plan?.token, onRelocated]);
+
+    setOutcomes(collected);
+    setRunning(false);
+  }, [generation, plans, destination, mode, disposal, onRelocated]);
 
   // Escape closes, as it does for every other modal on the platform — except
   // mid-run, when there is a copy in flight and nothing safe to cancel into.
@@ -170,10 +226,14 @@ export function RelocateDialog({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose, running]);
 
-  if (node === null) return null;
+  if (nodes.length === 0) return null;
 
-  const blocked = plan !== null && plan.token === null;
-  const canConfirm = plan?.token != null && deletionArmed && !running && report === null;
+  const actionable = plans?.filter((plan) => plan.token !== null) ?? [];
+  const refused = plans?.filter((plan) => plan.token === null) ?? [];
+  // Blocked means NOTHING can move. A partially-blocked batch is not blocked —
+  // it proceeds with the items that can, and says which it is leaving.
+  const blocked = plans !== null && actionable.length === 0;
+  const canConfirm = actionable.length > 0 && deletionArmed && !running && outcomes === null;
 
   /*
    * The label carries the state, not just the styling.
@@ -184,7 +244,9 @@ export function RelocateDialog({
    * of purple. So the button says which of the three reasons applies.
    */
   const confirmLabel = running
-    ? "Copying and verifying…"
+    ? nodes.length > 1
+      ? `Moving ${done + 1} of ${actionable.length}…`
+      : "Copying and verifying…"
     : blocked
       ? "Cannot move"
       : !deletionArmed
@@ -201,9 +263,13 @@ export function RelocateDialog({
       <div className="flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-border bg-background shadow-2xl">
         <header className="flex shrink-0 items-start gap-3 border-b border-border/60 p-4">
           <div className="min-w-0 flex-1">
-            <h2 className="text-sm font-medium">Move to another volume</h2>
+            <h2 className="text-sm font-medium">
+              {nodes.length === 1 ? "Move to another volume" : `Move ${nodes.length} items`}
+            </h2>
             <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground" title={sourcePath ?? undefined}>
-              {sourcePath ?? "…"}
+              {nodes.length === 1
+                ? (sourcePath ?? "…")
+                : "Each keeps its own name at the destination."}
             </p>
           </div>
           <Button variant="ghost" size="icon" onClick={onClose} title="Close">
@@ -213,8 +279,8 @@ export function RelocateDialog({
         </header>
 
         <div className="min-h-0 flex-1 overflow-auto p-4">
-          {report !== null ? (
-            <RelocateResult report={report} />
+          {outcomes !== null ? (
+            <BatchResult outcomes={outcomes} />
           ) : (
             <>
               <DestinationPicker
@@ -242,7 +308,9 @@ export function RelocateDialog({
                 </Alert>
               )}
 
-              {plan !== null && <PlanSummary plan={plan} blocked={blocked} />}
+              {plans !== null && (
+                <PlanSummary plans={plans} actionable={actionable} refused={refused} blocked={blocked} />
+              )}
 
               {failure !== null && (
                 <Alert variant="destructive" className="mt-4">
@@ -261,17 +329,17 @@ export function RelocateDialog({
         </div>
 
         <footer className="flex shrink-0 items-center gap-3 border-t border-border/60 p-4">
-          {!deletionArmed && report === null && (
+          {!deletionArmed && outcomes === null && (
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Lock aria-hidden className="size-3.5" />
               Turn on destructive actions in the details panel to enable this.
             </span>
           )}
           <div className="ml-auto flex items-center gap-2">
-            <Button variant="ghost" onClick={onClose}>
-              {report === null ? "Cancel" : "Done"}
+            <Button variant="ghost" onClick={onClose} disabled={running}>
+              {outcomes === null ? "Cancel" : "Done"}
             </Button>
-            {report === null && (
+            {outcomes === null && (
               <Button
                 onClick={() => void handleConfirm()}
                 disabled={!canConfirm}
@@ -443,25 +511,80 @@ function Choice<T extends string>({
   );
 }
 
-function PlanSummary({ plan, blocked }: { plan: RelocatePlanView; blocked: boolean }) {
-  const remaining = plan.destinationAvailable - plan.allocated;
+/** One item's fate in a batch move. */
+interface BatchOutcome {
+  readonly source: string;
+  readonly report: RelocateReportView | null;
+  readonly error: string | null;
+}
+
+function PlanSummary({
+  plans,
+  actionable,
+  refused,
+  blocked,
+}: {
+  plans: readonly RelocatePlanView[];
+  actionable: readonly RelocatePlanView[];
+  refused: readonly RelocatePlanView[];
+  blocked: boolean;
+}) {
+  const first = plans[0];
+  if (first === undefined) return null;
+
+  // Only the items that will actually move count toward the size and the
+  // free-space arithmetic. Including refused ones would overstate the cost and
+  // could claim there is not enough room for a move that fits.
+  const moving = actionable.reduce((total, plan) => total + plan.allocated, 0);
+  const remaining = first.destinationAvailable - moving;
+  const unreadable = actionable.reduce((total, plan) => total + plan.unreadable, 0);
+
+  // Deduped, because a batch bound for one destination produces the same
+  // destination-level warning once per item — five copies of "this frees no
+  // space" is noise that hides the one warning that is specific.
+  const warnings = new Map<string, string>();
+  for (const plan of plans) {
+    for (const warning of plan.warnings) warnings.set(warning.message, warning.code);
+  }
+
   return (
     <section className="mt-4">
-      <div className="flex items-center gap-2 rounded border border-border/60 p-3 text-xs">
-        <span className="min-w-0 flex-1 truncate font-mono" title={plan.source}>
-          {plan.source}
-        </span>
-        <ArrowRight aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate font-mono" title={plan.destination}>
-          {plan.destination}
-        </span>
-      </div>
+      {plans.length === 1 ? (
+        <div className="flex items-center gap-2 rounded border border-border/60 p-3 text-xs">
+          <span className="min-w-0 flex-1 truncate font-mono" title={first.source}>
+            {first.source}
+          </span>
+          <ArrowRight aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1 truncate font-mono" title={first.destination}>
+            {first.destination}
+          </span>
+        </div>
+      ) : (
+        <ul className="max-h-32 overflow-auto rounded border border-border/60 text-xs">
+          {plans.map((plan) => (
+            <li
+              key={plan.node}
+              className={cn(
+                "flex items-center gap-2 px-3 py-1",
+                plan.token === null && "text-muted-foreground line-through",
+              )}
+              title={plan.token === null ? "This one cannot move — see below" : plan.source}
+            >
+              <span className="min-w-0 flex-1 truncate font-mono">{plan.source}</span>
+              <span className="shrink-0 rds-numeric">{formatSI(plan.allocated)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
 
       <dl className="mt-2 grid grid-cols-3 gap-2 text-xs">
-        <Stat label="To move" value={formatSI(plan.allocated)} />
         <Stat
-          label={`Free there (${plan.destinationFilesystem})`}
-          value={formatSI(plan.destinationAvailable)}
+          label={actionable.length === plans.length ? "To move" : `Moving ${actionable.length} of ${plans.length}`}
+          value={formatSI(moving)}
+        />
+        <Stat
+          label={`Free there (${first.destinationFilesystem})`}
+          value={formatSI(first.destinationAvailable)}
         />
         <Stat
           label="Free there after"
@@ -470,21 +593,33 @@ function PlanSummary({ plan, blocked }: { plan: RelocatePlanView; blocked: boole
         />
       </dl>
 
-      {plan.unreadable > 0 && (
+      {unreadable > 0 && (
         <p className="mt-2 text-xs text-muted-foreground">
-          {plan.retainedNodes.toLocaleString()} items counted, but {plan.unreadable.toLocaleString()}{" "}
-          director{plan.unreadable === 1 ? "y" : "ies"} could not be read — the real size may be larger.
+          {unreadable.toLocaleString()} director{unreadable === 1 ? "y" : "ies"} could not be read during
+          the scan, so the real size may be larger than shown.
         </p>
       )}
 
-      {plan.warnings.length > 0 && (
+      {refused.length > 0 && !blocked && (
+        <Alert className="mt-3">
+          <AlertTriangle aria-hidden />
+          <AlertTitle>
+            {refused.length} of {plans.length} will be skipped
+          </AlertTitle>
+          <AlertDescription>
+            The rest will still move. Skipped items stay exactly where they are.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {warnings.size > 0 && (
         <Alert variant={blocked ? "destructive" : "default"} className="mt-3">
           <AlertTriangle aria-hidden />
           <AlertTitle>{blocked ? "This move cannot proceed" : "Before you confirm"}</AlertTitle>
           <AlertDescription>
             <ul className="flex list-disc flex-col gap-1 pl-4">
-              {plan.warnings.map((warning) => (
-                <li key={warning.code}>{warning.message}</li>
+              {[...warnings.keys()].map((message) => (
+                <li key={message}>{message}</li>
               ))}
             </ul>
           </AlertDescription>
@@ -503,29 +638,69 @@ function Stat({ label, value, alarming = false }: { label: string; value: string
   );
 }
 
-function RelocateResult({ report }: { report: RelocateReportView }) {
-  const kept = report.disposal === "keep";
+/**
+ * What actually happened, item by item.
+ *
+ * A batch reports per item rather than as a total, because "10 of 12 moved" is
+ * not an outcome anyone can act on — the two that did not move are the whole
+ * message, and the user needs to know WHICH two and why. Successes collapse to
+ * a count; failures are listed in full.
+ */
+function BatchResult({ outcomes }: { outcomes: readonly BatchOutcome[] }) {
+  const moved = outcomes.filter((outcome) => outcome.report !== null && outcome.error === null);
+  const kept = moved.filter((outcome) => outcome.report?.disposal === "keep");
+  const failed = outcomes.filter((outcome) => outcome.error !== null);
+  const bytes = moved.reduce((total, outcome) => total + (outcome.report?.bytesVerified ?? 0), 0);
+  const files = moved.reduce((total, outcome) => total + (outcome.report?.filesVerified ?? 0), 0);
+
   return (
     <div>
-      <Alert variant={kept ? "default" : "default"}>
-        {kept ? <AlertTriangle aria-hidden /> : <Check aria-hidden />}
-        <AlertTitle>{kept ? "Copied, but the original was kept" : "Moved"}</AlertTitle>
+      <Alert variant={failed.length > 0 ? "destructive" : "default"}>
+        {failed.length > 0 ? <AlertTriangle aria-hidden /> : <Check aria-hidden />}
+        <AlertTitle>
+          {failed.length === 0
+            ? `Moved ${moved.length === 1 ? "1 item" : `${moved.length} items`}`
+            : `Moved ${moved.length} of ${outcomes.length} — ${failed.length} failed`}
+        </AlertTitle>
         <AlertDescription>
-          {report.filesVerified.toLocaleString()} items ({formatSI(report.bytesVerified)}) were copied and
-          verified byte-for-byte.
-          {report.symlinkCreated && " The original path is now a link to the new location, so existing references still work."}
-          {kept && report.specialFiles > 0 && (
-            <span className="mt-1 block">
-              {report.specialFiles.toLocaleString()} socket{report.specialFiles === 1 ? "" : "s"} or pipe
-              {report.specialFiles === 1 ? "" : "s"} could not be copied — nothing can copy those — so the
-              original was left in place rather than losing them. No link was created.
-            </span>
-          )}
+          {files.toLocaleString()} files ({formatSI(bytes)}) were copied and verified byte-for-byte.
+          {moved.length > kept.length &&
+            " Each original path is now a link to its new location, so existing references still work."}
         </AlertDescription>
       </Alert>
-      <p className="mt-3 font-mono text-xs text-muted-foreground">{report.destination}</p>
+
+      {kept.length > 0 && (
+        <Alert className="mt-3">
+          <AlertTriangle aria-hidden />
+          <AlertTitle>
+            {kept.length === 1 ? "One original was kept" : `${kept.length} originals were kept`}
+          </AlertTitle>
+          <AlertDescription>
+            These contained sockets or pipes, which nothing can copy. Rather than lose them, the
+            originals were left in place and no link was created — so these are copies, not moves.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {failed.length > 0 && (
+        <ul className="mt-3 flex flex-col gap-2">
+          {failed.map((outcome) => (
+            <li key={outcome.source} className="rounded border border-border/60 p-2 text-xs">
+              <p className="truncate font-mono" title={outcome.source}>
+                {outcome.source}
+              </p>
+              <p className="mt-0.5 text-muted-foreground">{outcome.error}</p>
+            </li>
+          ))}
+          <li className="text-xs text-muted-foreground">
+            Anything that failed was left exactly where it was.
+          </li>
+        </ul>
+      )}
+
       <p className="mt-3 text-xs text-muted-foreground">
-        The sizes on screen still describe the volume as it was scanned. Re-scan to see the space return.
+        The sizes on screen still describe the volume as it was scanned. Re-scan to see the space
+        return.
       </p>
     </div>
   );

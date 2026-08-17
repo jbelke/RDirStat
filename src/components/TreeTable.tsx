@@ -22,7 +22,7 @@
 
 import type { ColumnDef, SortingState } from "@tanstack/react-table";
 import { ChevronDown, ChevronRight, Eye, File, Folder, Link2, Lock, Trash2 } from "lucide-react";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { DataTable } from "@/components/DataTable";
 import { CategoryChip } from "@/components/cells/CategoryChip";
@@ -46,6 +46,16 @@ export interface TreeTableProps {
   selection: ReadonlySet<number>;
   focused: number | null;
   onSelect: (node: number, mode: "replace" | "toggle" | "add") => void;
+  /** Shift-click range and select-all. Both are one gesture, so one call. */
+  onSelectMany?: (nodes: readonly number[], mode: "replace" | "add") => void;
+  /**
+   * Combined size of the selected rows, in the metric on screen.
+   *
+   * Reported from here because the table is what holds the rows — the shell
+   * has ids and no sizes. Only loaded rows can contribute, which is correct:
+   * a selection can only be made from rows the user can see.
+   */
+  onSelectionBytes?: (bytes: number) => void;
   /** Double-click drills into a directory: pushes the navigation stack. */
   onDrillDown: (node: number) => void;
   onHover?: (node: number | null) => void;
@@ -70,6 +80,8 @@ export function TreeTable({
   selection,
   focused,
   onSelect,
+  onSelectMany,
+  onSelectionBytes,
   onDrillDown,
   onHover,
   onReveal,
@@ -152,13 +164,78 @@ export function TreeTable({
     [sizeMetric, tree.toggle],
   );
 
+  /*
+   * The anchor a shift-click extends FROM.
+   *
+   * Held in a ref rather than state because it must not cause a render: it
+   * changes on every plain click, and re-rendering a 500-row virtualized table
+   * to remember where a range might start later is pure cost.
+   */
+  const anchorRef = useRef<number | null>(null);
+
   const handleClick = useCallback(
     (entry: FlatRow, event: React.MouseEvent) => {
-      const mode = event.metaKey ? "toggle" : event.shiftKey ? "add" : "replace";
-      onSelect(entry.row.node, mode);
+      const node = entry.row.node;
+
+      // Shift extends a RANGE over the rows as they are currently flattened —
+      // which is what the user sees, and therefore what they mean. Extending
+      // over node ids or over the unexpanded tree would select rows that are
+      // not on screen, which is the classic way a bulk action eats something
+      // the user never saw.
+      if (event.shiftKey && onSelectMany !== undefined && anchorRef.current !== null) {
+        const rows = tree.rows;
+        const from = rows.findIndex((candidate) => candidate.row.node === anchorRef.current);
+        const to = rows.findIndex((candidate) => candidate.row.node === node);
+        if (from >= 0 && to >= 0) {
+          const [lo, hi] = from <= to ? [from, to] : [to, from];
+          const span = rows.slice(lo, hi + 1).map((candidate) => candidate.row.node);
+          // The anchor stays put, so dragging the shift-click further extends
+          // from the same origin rather than walking it along.
+          onSelectMany(span, event.metaKey ? "add" : "replace");
+          return;
+        }
+      }
+
+      anchorRef.current = node;
+      onSelect(node, event.metaKey ? "toggle" : "replace");
     },
-    [onSelect],
+    [onSelect, onSelectMany, tree.rows],
   );
+
+  useEffect(() => {
+    if (onSelectionBytes === undefined) return;
+    let bytes = 0;
+    for (const entry of tree.rows) {
+      if (!selection.has(entry.row.node)) continue;
+      bytes += sizeMetric === "logical" ? entry.row.logical : entry.row.allocated;
+    }
+    onSelectionBytes(bytes);
+  }, [selection, tree.rows, sizeMetric, onSelectionBytes]);
+
+  /*
+   * Select-all over the rows currently flattened, not the whole subtree.
+   *
+   * "All" has to mean what is on screen. A directory can hold a million
+   * entries and the table holds a page of them, so selecting the true subtree
+   * would hand a bulk action a set the user has never seen and cannot review —
+   * exactly the shape of an irreversible mistake.
+   */
+  useEffect(() => {
+    if (onSelectMany === undefined) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.metaKey || event.key !== "a") return;
+      const target = event.target as HTMLElement | null;
+      // Never steal ⌘A from a text field.
+      if (target !== null && /^(INPUT|TEXTAREA)$/.test(target.tagName)) return;
+      event.preventDefault();
+      onSelectMany(
+        tree.rows.filter((entry) => !entry.row.isVirtualGroup).map((entry) => entry.row.node),
+        "replace",
+      );
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onSelectMany, tree.rows]);
 
   // Which directory the next cursor page belongs to.
   //
