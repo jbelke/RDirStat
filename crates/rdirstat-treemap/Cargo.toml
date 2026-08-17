@@ -1,0 +1,35 @@
+[package]
+name        = "rdirstat-treemap"
+description = "Squarified treemap, icicle, and sunburst layout over one traversal, emitted as Arrow IPC."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+publish.workspace      = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rdirstat-core = { workspace = true }
+arrow         = { workspace = true }
+serde         = { workspace = true }
+specta        = { workspace = true }
+thiserror     = { workspace = true }
+tracing       = { workspace = true }
+
+[dev-dependencies]
+insta      = { workspace = true }
+proptest   = { workspace = true }
+criterion  = { workspace = true }
+tempfile   = { workspace = true }
+# `SizeMetric` is the toolbar's logical/allocated toggle; the wire form is tested.
+serde_json = { workspace = true }
+
+# Landed (docs/05-UI.md#the-hierarchy-views): layout cost at a recorded tile
+# count, for all three kinds. Layout only — paint belongs to the renderer.
+[[bench]]
+name    = "layout"
+harness = false

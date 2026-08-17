@@ -1,0 +1,42 @@
+[package]
+name        = "rdirstat-scan"
+description = "Directory readers, the bounded parallel engine, the single-writer builder, and typed scan errors."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+publish.workspace      = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rdirstat-core     = { workspace = true }
+# Declared but not yet referenced from any `use`: the scanner takes categories
+# through the `Categorizer` trait (src/categorize.rs) so it does not depend on
+# the classifier's concrete shape. Integration wires
+# `Scanner::with_categorizer(Arc::new(<classify type>), hash)`.
+rdirstat-classify = { workspace = true }
+crossbeam-channel = { workspace = true }
+# Declared for the future benchmark adapters; the two shipped schedulers use
+# std threads plus crossbeam channels, not a rayon pool.
+rayon             = { workspace = true }
+smallvec          = { workspace = true }
+thiserror         = { workspace = true }
+tracing           = { workspace = true }
+serde             = { workspace = true }
+specta            = { workspace = true }
+libc              = { workspace = true }
+
+[dev-dependencies]
+proptest  = { workspace = true }
+tempfile  = { workspace = true }
+insta     = { workspace = true }
+criterion = { workspace = true }
+
+# Add when `benches/scan.rs` lands (docs/02-SCANNER.md#benchmarks):
+#   [[bench]]
+#   name    = "scan"
+#   harness = false

@@ -1,0 +1,10 @@
+# Pinned toolchain for STELLAR-RDIRSTAT (docs/07-BUILD-PHASES.md, phase 0).
+#
+# The MSRV declared in Cargo.toml's [workspace.package] is 1.90; this channel is
+# the exact toolchain every developer, CI job, and benchmark run uses, so a
+# measurement artifact names one compiler rather than "whatever was installed".
+[toolchain]
+channel    = "1.97.1"
+components = ["rustfmt", "clippy", "rust-src"]
+targets    = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+profile    = "minimal"

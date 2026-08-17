@@ -1,0 +1,31 @@
+# Clippy configuration for the whole workspace. Owned by the CONTRACT agent
+# alongside Cargo.toml's [workspace.lints]; sibling crates do not add their own.
+
+# `expect_used` is "warn" and `panic` is "deny" in production code, and both stay
+# that way. In a #[cfg(test)] module they are the idiom: `expect("in range")`
+# documents the invariant a fixture relies on, and `assert!` is the whole point.
+allow-expect-in-tests = true
+allow-panic-in-tests  = true
+
+# `unwrap_used` stays denied even in tests. A bare `unwrap` in a test failure
+# tells you a line number and nothing else; `expect("...")` tells you which
+# invariant broke, which is worth the eight extra characters.
+allow-unwrap-in-tests = false
+
+# Identifiers that `clippy::doc_markdown` should not demand backticks around.
+# The defaults already cover macOS, GiB, TiB, GitHub, and friends.
+doc-valid-idents = [
+    "APFS",
+    "DuckDB",
+    "NSFileManager",
+    "NSOpenPanel",
+    "QDirStat",
+    "RDirStat",
+    "SquirrelDisk",
+    "TanStack",
+    "TypeScript",
+    "JavaScript",
+    "VoiceOver",
+    "WebView",
+    "..",
+]

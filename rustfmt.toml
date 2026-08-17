@@ -1,0 +1,13 @@
+# Formatting for the whole workspace. Owned by the CONTRACT agent alongside
+# Cargo.toml and clippy.toml; sibling crates do not add their own.
+#
+# Exactly one setting is changed from rustfmt's defaults, deliberately. Every
+# other heuristic is stock, so `cargo fmt` does nothing surprising to code this
+# agent never saw.
+#
+# `max_width = 120` exists because the shared types carry long derive lists —
+# `#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]`
+# is 92 characters before indentation. At the default 100 those wrap to one
+# trait per line, which turns the contract everybody reads into fourteen lines
+# of noise per type.
+max_width = 120
