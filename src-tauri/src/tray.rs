@@ -292,6 +292,13 @@ mod tests {
     /// on a mixed-DPI setup the panel walked right across the displays, one
     /// screen per open. In points there is one coordinate space and the clamp
     /// is total.
+    // Exact float equality is correct here and the lint is wrong about it.
+    // `clamp_to_monitor` either returns one of its inputs untouched or a value
+    // built from the two `PANEL_*` constants — no accumulated arithmetic, so
+    // there is no epsilon to allow for. An approximate assertion would be
+    // strictly weaker: it would pass on a clamp that was slightly wrong, which
+    // is the only failure mode worth catching.
+    #[allow(clippy::float_cmp)]
     #[test]
     fn the_panel_is_clamped_to_the_monitor_it_opens_on() {
         use super::{PANEL_GAP, PANEL_WIDTH, clamp_to_monitor};

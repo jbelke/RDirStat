@@ -521,6 +521,107 @@ fn check_disjoint(source: &Path, destination: &Path) -> Result<(), RelocateError
     Ok(())
 }
 
+/// The advisories that depend only on the risk tier and the disposal.
+///
+/// Split out of [`plan`] purely for length: they are a flat list of "things
+/// worth saying", and they were crowding out the decisions around them.
+fn push_advisories(
+    warnings: &mut Vec<RelocateWarning>,
+    risk: RiskTier,
+    already_blocked: bool,
+    disposal: SourceDisposal,
+) {
+    // Not repeated when the path is outright blocked: the block reason already
+    // says something stronger, and stacking a "be careful" under a "cannot"
+    // reads as though the first were negotiable.
+    if risk == RiskTier::Risky && !already_blocked {
+        warnings.push(RelocateWarning::new(
+            "system-adjacent",
+            "This path is outside your home folder and other software may expect it exactly where \
+             it is. A symlink keeps most things working, but a process holding a file open across \
+             the move — or one that refuses to follow symlinks — will not notice the change.",
+        ));
+    }
+
+    if disposal == SourceDisposal::Trash {
+        warnings.push(RelocateWarning::new(
+            "trash-holds-space",
+            "The original goes to the Trash, so it stays recoverable — but the space is not \
+             returned until you empty it.",
+        ));
+    }
+}
+
+/// Everything [`destination_problem`] needs, bundled so it cannot be called
+/// with the two paths the wrong way round.
+struct DestinationCheck<'a> {
+    destination: &'a Path,
+    destination_parent: &'a Path,
+    filesystem: &'a str,
+    available: u64,
+    needed: u64,
+    mode: RelocateMode,
+}
+
+/// The one reason this destination cannot be used, or `None`.
+///
+/// Split out of [`plan`] because these are four unrelated refusals that happen
+/// to share a landing place, and inlining them buried the plan's actual shape
+/// under a wall of `if`s.
+///
+/// Order matters: the metadata gate is checked LAST so it wins. A destination
+/// that is both non-existent and unable to hold xattrs should say the second,
+/// because that is the one the user cannot fix by picking a different name.
+fn destination_problem(check: &DestinationCheck<'_>) -> Option<RelocateError> {
+    let exists = fs::symlink_metadata(check.destination).is_ok();
+
+    let staged = match check.mode {
+        RelocateMode::Migrate if exists => Some(RelocateError::Destination {
+            path: display(check.destination),
+            reason: "it already exists; use Repoint to adopt it, or choose another name".to_owned(),
+        }),
+        RelocateMode::Migrate if check.needed > check.available => Some(RelocateError::NotEnoughSpace {
+            needed: check.needed,
+            available: check.available,
+        }),
+        RelocateMode::Repoint if !exists => Some(RelocateError::Destination {
+            path: display(check.destination),
+            reason: "it does not exist; use Migrate to create it".to_owned(),
+        }),
+        _ => None,
+    };
+
+    let staged = if check.destination_parent.is_dir() {
+        staged
+    } else {
+        Some(RelocateError::Destination {
+            path: display(check.destination_parent),
+            reason: "it is not a directory".to_owned(),
+        })
+    };
+
+    // The metadata-fidelity gate. `ditto` is used precisely because it carries
+    // ACLs, extended attributes and resource forks; a destination that cannot
+    // store them drops them without failing, the content comparison still
+    // passes, and the source would then be disposed of — silently losing
+    // metadata in the one routine whose whole purpose is not to. Refused
+    // rather than warned, because the loss is invisible and permanent.
+    if carries_macos_metadata(check.filesystem) {
+        return staged;
+    }
+    Some(RelocateError::Destination {
+        path: display(check.destination_parent),
+        reason: format!(
+            "it is {}, which cannot store extended attributes or ACLs. Copying there would \
+             silently drop Finder tags and colour labels, \"Where from\" provenance, resource \
+             forks, and POSIX ownership — metadata this app cannot verify and cannot get back \
+             once the original is gone. Use an APFS or Mac OS Extended volume, or copy it in \
+             Finder if you accept the loss",
+            check.filesystem
+        ),
+    })
+}
+
 /// Plans a relocation and mints the token that authorizes it.
 ///
 /// Returns a plan even when the relocation cannot proceed: the reasons are the
@@ -598,80 +699,20 @@ pub(crate) fn plan<S: BuildHasher>(
     let destination_available = facts.as_ref().map_or(0, |entry| entry.available);
     let destination_filesystem = facts.map_or_else(|| "unknown".to_owned(), |entry| entry.kind);
 
-    // Destination state has to match the mode, or the operation means something
-    // other than what the user asked for.
-    let destination_exists = fs::symlink_metadata(&destination).is_ok();
-    let mut fatal: Option<RelocateError> = None;
-    match mode {
-        RelocateMode::Migrate => {
-            if destination_exists {
-                fatal = Some(RelocateError::Destination {
-                    path: display(&destination),
-                    reason: "it already exists; use Repoint to adopt it, or choose another name".to_owned(),
-                });
-            } else if allocated > destination_available {
-                fatal = Some(RelocateError::NotEnoughSpace {
-                    needed: allocated,
-                    available: destination_available,
-                });
-            }
-        }
-        RelocateMode::Repoint => {
-            if !destination_exists {
-                fatal = Some(RelocateError::Destination {
-                    path: display(&destination),
-                    reason: "it does not exist; use Migrate to create it".to_owned(),
-                });
-            }
-        }
-    }
-
-    if !destination_parent.is_dir() {
-        fatal = Some(RelocateError::Destination {
-            path: display(destination_parent),
-            reason: "it is not a directory".to_owned(),
-        });
-    }
-
-    // The metadata-fidelity gate. `ditto` is used precisely because it carries
-    // ACLs, extended attributes and resource forks; a destination that cannot
-    // store them drops them without failing, the content-comparison below
-    // still passes, and the source would then be disposed of — silently losing
-    // metadata in the one routine whose whole purpose is not to. Refused
-    // rather than warned, because the loss is invisible and permanent.
-    if !carries_macos_metadata(&destination_filesystem) {
-        fatal = Some(RelocateError::Destination {
-            path: display(destination_parent),
-            reason: format!(
-                "it is {destination_filesystem}, which cannot store extended attributes or ACLs. \
-                 Copying there would silently drop Finder tags and colour labels, \"Where from\" \
-                 provenance, resource forks, and POSIX ownership — metadata this app cannot verify \
-                 and cannot get back once the original is gone. Use an APFS or Mac OS Extended \
-                 volume, or copy it in Finder if you accept the loss"
-            ),
-        });
-    }
+    let fatal = destination_problem(&DestinationCheck {
+        destination: &destination,
+        destination_parent,
+        filesystem: &destination_filesystem,
+        available: destination_available,
+        needed: allocated,
+        mode,
+    });
 
     if let Some(error) = &fatal {
         warnings.push(RelocateWarning::new("blocked", error.to_string()));
     }
 
-    if risk == RiskTier::Risky && blocked_reason.is_none() {
-        warnings.push(RelocateWarning::new(
-            "system-adjacent",
-            "This path is outside your home folder and other software may expect it exactly where \
-             it is. A symlink keeps most things working, but a process holding a file open across \
-             the move — or one that refuses to follow symlinks — will not notice the change.",
-        ));
-    }
-
-    if disposal == SourceDisposal::Trash {
-        warnings.push(RelocateWarning::new(
-            "trash-holds-space",
-            "The original goes to the Trash, so it stays recoverable — but the space is not \
-             returned until you empty it.",
-        ));
-    }
+    push_advisories(&mut warnings, risk, blocked_reason.is_some(), disposal);
 
     let issuable = risk != RiskTier::Blocked && fatal.is_none();
     let token = issuable.then(|| {
@@ -1142,6 +1183,17 @@ pub(crate) fn apply<S: BuildHasher>(
     Ok(report)
 }
 
+/// True when `path` is a plain, absolute path with no `..` in it.
+///
+/// Used to validate the destination the frontend picked, which — unlike a
+/// source path — is not reconstructed from the arena and therefore *is*
+/// attacker-controlled in the threat model docs/03 sets out.
+pub(crate) fn is_acceptable_destination(path: &Path) -> bool {
+    path.is_absolute()
+        && !path.components().any(|part| matches!(part, Component::ParentDir))
+        && path.as_os_str() != OsStr::new("/")
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::hash_map::RandomState;
@@ -1411,7 +1463,12 @@ mod tests {
         let directory = scratch();
         let a = directory.path().join("a.bin");
         let b = directory.path().join("b.bin");
-        let payload: Vec<u8> = (0..(COMPARE_CHUNK * 2 + 517)).map(|i| (i % 251) as u8).collect();
+        // `% 251` cannot exceed a u8, but say so with a conversion rather than a
+        // cast: a silent truncation in the fixture would make the two files
+        // differ in a way the test is not looking for.
+        let payload: Vec<u8> = (0..(COMPARE_CHUNK * 2 + 517))
+            .map(|i| u8::try_from(i % 251).expect("a value mod 251 fits in a u8"))
+            .collect();
         fs::write(&a, &payload).expect("write");
         fs::write(&b, &payload).expect("write");
 
@@ -1620,7 +1677,7 @@ mod tests {
         // to the user's data would be an unexplained artefact of our own making.
         let leftovers: Vec<String> = fs::read_dir(directory.path())
             .expect("read_dir")
-            .filter_map(|entry| entry.ok())
+            .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .filter(|name| name.contains("rdirstat-link-check"))
             .collect();
@@ -1669,7 +1726,7 @@ mod tests {
         // Success path still ends with exactly one symlink and no probe.
         let entries: Vec<String> = fs::read_dir(source.path())
             .expect("read_dir")
-            .filter_map(|entry| entry.ok())
+            .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(entries, vec!["payload".to_owned()], "got {entries:?}");
@@ -1754,13 +1811,4 @@ mod tests {
     }
 }
 
-/// True when `path` is a plain, absolute path with no `..` in it.
-///
-/// Used to validate the destination the frontend picked, which — unlike a
-/// source path — is not reconstructed from the arena and therefore *is*
-/// attacker-controlled in the threat model docs/03 sets out.
-pub(crate) fn is_acceptable_destination(path: &Path) -> bool {
-    path.is_absolute()
-        && !path.components().any(|part| matches!(part, Component::ParentDir))
-        && path.as_os_str() != OsStr::new("/")
-}
+
