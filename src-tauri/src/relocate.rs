@@ -927,6 +927,97 @@ fn is_special(metadata: &Metadata) -> bool {
     file_type.is_socket() || file_type.is_fifo() || file_type.is_block_device() || file_type.is_char_device()
 }
 
+/// An extended attribute macOS applies and reapplies on its own.
+///
+/// It tracks which process wrote a file and is regenerated at the destination,
+/// so it differs across a copy that carried everything the user cares about.
+/// Comparing it would fail every faithful relocation.
+const SELF_MANAGED_XATTR: &str = ": com.apple.provenance";
+
+/// Every extended attribute in a tree, as a sorted, comparable list.
+///
+/// # Why this shells out
+///
+/// `listxattr(2)` is the right call and needs `unsafe extern` FFI. The
+/// workspace denies `unsafe_code` outside `rdirstat-scan::sys::bulk`, and this
+/// crate is not that exception — the same reasoning, and the same remedy, as
+/// [`crate::volumes`]. Replace this with a `listxattr` binding the moment a
+/// crate is allowed to own one.
+///
+/// It is ONE process for the whole tree, not one per file. That distinction is
+/// the difference between a verification that costs a process spawn per file
+/// and one that costs two for the entire relocation.
+///
+/// `xattr -r` reports NAMES, not values, and that is deliberate rather than
+/// lazy: `xattr -l` renders a binary value as empty text, so it would report
+/// two different resource forks as identical, and there is no flag that reports
+/// a value's length. Names are what can actually be compared, and wholesale
+/// loss — every attribute gone because the copy went through a tool that cannot
+/// carry them — is the failure this has actually seen (nato-b6h.7, nato-b6h.8).
+/// A truncated attribute value would not be caught; that is stated here rather
+/// than implied by silence.
+fn extended_attributes(root: &Path) -> Result<Vec<String>, RelocateError> {
+    let output = Command::new("/usr/bin/xattr")
+        .arg("-r")
+        .arg(".")
+        // From inside the tree, so every line is relative and the two sides are
+        // comparable without string surgery on absolute paths.
+        .current_dir(root)
+        .output()
+        .map_err(|error| verify_error(root, &error))?;
+    if !output.status.success() {
+        return Err(mismatch(
+            root,
+            format!(
+                "could not read extended attributes: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ));
+    }
+
+    let mut lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.is_empty() && !line.ends_with(SELF_MANAGED_XATTR))
+        .map(str::to_owned)
+        .collect();
+    // `xattr -r` walks in directory order, which is not the same on the source
+    // and on a freshly written copy. Without this the two lists could differ
+    // only in order and be reported as a loss.
+    lines.sort_unstable();
+    Ok(lines)
+}
+
+/// Proves the copy carried the extended attributes, not just the bytes.
+///
+/// [`verify_tree`] compares contents, sizes, types and symlink targets, and is
+/// blind to every attribute hanging off them. That gap is not academic: it is
+/// exactly the shape of the two defects this project has already paid for, in
+/// which a copy stripped of every xattr passed a size-and-mtime check and the
+/// source was then deleted on the strength of it. Resource forks ride here too,
+/// as `com.apple.ResourceFork`.
+///
+/// Runs BEFORE the source is disposed of, so a failure leaves the original
+/// untouched — the same fail-closed ordering as the content compare.
+fn verify_extended_attributes(source: &Path, destination: &Path) -> Result<(), RelocateError> {
+    let expected = extended_attributes(source)?;
+    let actual = extended_attributes(destination)?;
+    if expected == actual {
+        return Ok(());
+    }
+
+    let missing: Vec<&String> = expected.iter().filter(|line| !actual.contains(line)).take(3).collect();
+    let unexpected: Vec<&String> = actual.iter().filter(|line| !expected.contains(line)).take(3).collect();
+    Err(mismatch(
+        destination,
+        format!(
+            "extended attributes differ ({} on the source, {} on the copy; \
+             missing {missing:?}, unexpected {unexpected:?})",
+            expected.len(),
+            actual.len(),
+        ),
+    ))
+}
+
 fn mismatch(path: &Path, reason: impl Into<String>) -> RelocateError {
     RelocateError::VerifyFailed {
         path: display(path),
@@ -1124,6 +1215,10 @@ pub(crate) fn apply<S: BuildHasher>(
     //    user can inspect or remove it themselves.
     let mut tally = VerifyTally::default();
     verify_tree(&source, &destination, &mut tally)?;
+    // Contents are proved; now prove the metadata hanging off them. A copy that
+    // matches byte for byte and has lost every extended attribute is not the
+    // same file, and this is the only thing in the codebase that can tell.
+    verify_extended_attributes(&source, &destination)?;
     report.files_verified = tally.files;
     report.bytes_verified = tally.bytes;
     report.special_files = tally.special;
@@ -1207,6 +1302,79 @@ mod tests {
     use crate::state::CancelToken;
 
     const NOW: i64 = 1_800_000_000_000;
+
+    /// Builds a small tree carrying the three kinds of metadata a plain content
+    /// compare cannot see: an ordinary xattr, a Finder-style one, and a
+    /// resource fork.
+    fn tree_with_metadata(root: &Path) {
+        fs::create_dir_all(root.join("sub")).expect("mkdir");
+        fs::write(root.join("doc.txt"), b"payload").expect("write");
+        fs::write(root.join("sub/other.txt"), b"more").expect("write");
+        for (name, value) in [
+            ("user.rdirstat.probe", "sentinel"),
+            ("com.apple.metadata:kMDItemWhereFroms", "https://example.test/origin"),
+        ] {
+            let set = Command::new("/usr/bin/xattr")
+                .args(["-w", name, value])
+                .arg(root.join("doc.txt"))
+                .status()
+                .expect("xattr");
+            assert!(set.success(), "the fixture itself must carry {name}");
+        }
+        fs::write(root.join("sub/other.txt/..namedfork/rsrc"), b"resource-fork").expect("resource fork");
+    }
+
+    /// A faithful copy passes. Without this the refusal test below could pass
+    /// by refusing everything.
+    #[test]
+    fn a_copy_that_kept_its_extended_attributes_verifies() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let source = scratch.path().join("source");
+        let destination = scratch.path().join("destination");
+        tree_with_metadata(&source);
+        ditto(&source, &destination).expect("ditto");
+
+        verify_extended_attributes(&source, &destination).expect("a ditto copy carries everything");
+    }
+
+    /// The gap the whole verification exists to close.
+    ///
+    /// `verify_tree` compares contents, and a copy stripped of every extended
+    /// attribute has identical contents — so it passes. That is precisely how
+    /// nato-b6h.8 deleted originals: a size-and-mtime check could not see the
+    /// loss it was standing in front of. This asserts BOTH halves: the content
+    /// compare is fooled, and the attribute compare is not.
+    #[test]
+    fn a_copy_stripped_of_extended_attributes_is_refused() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let source = scratch.path().join("source");
+        let destination = scratch.path().join("destination");
+        tree_with_metadata(&source);
+
+        // A copy that carries the bytes and nothing else.
+        fs::create_dir_all(destination.join("sub")).expect("mkdir");
+        fs::write(destination.join("doc.txt"), b"payload").expect("write");
+        fs::write(destination.join("sub/other.txt"), b"more").expect("write");
+
+        // The content compare is satisfied — this is the bug, reproduced.
+        let mut tally = VerifyTally::default();
+        verify_tree(&source, &destination, &mut tally).expect("contents alone do match");
+
+        // The attribute compare is not.
+        let refused = verify_extended_attributes(&source, &destination)
+            .expect_err("a copy that lost every extended attribute must not verify");
+        let RelocateError::VerifyFailed { reason, .. } = &refused else {
+            panic!("expected a verification failure, got {refused:?}");
+        };
+        assert!(
+            reason.contains("extended attributes differ"),
+            "the reason should name what differed; got {reason}"
+        );
+        assert!(
+            reason.contains("user.rdirstat.probe") || reason.contains("ResourceFork"),
+            "the reason should name a missing attribute; got {reason}"
+        );
+    }
 
     fn scan_of(root: &Path) -> Arc<CompletedScan> {
         match crate::engine::run(ScanRequest {
