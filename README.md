@@ -123,10 +123,14 @@ rather than a package. The container profiles cover the parts that are portable.
 ```bash
 ./rush.sh up dev                   # Vite dev server        http://localhost:1420
 ./rush.sh up staging -d            # built bundle via nginx http://localhost:4174
-./rush.sh compose run --rm check   # typecheck, tests, docs
-./rush.sh compose run --rm rust    # fmt/clippy/test for the portable crates
-./rush.sh compose run --rm assets  # regenerate the brand assets
+./rush.sh compose run --build --rm check   # typecheck, tests, docs
+./rush.sh compose run --build --rm rust    # fmt/clippy/test for the portable crates
+./rush.sh compose run --build --rm assets  # regenerate the brand assets
 ```
+
+`--build` is not optional on those one-shot jobs: `docker compose run` reuses an
+existing image rather than rebuilding it, and a stale image reports on a tree
+that is no longer there.
 
 The webview served by the `dev`, `staging` and `prod` profiles has no Tauri
 backend, so the shell renders and nothing scans. Those profiles are for

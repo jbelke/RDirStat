@@ -142,7 +142,11 @@ EXAMPLES
   ./rush.sh dmg -e staging           ... the one that installs alongside it
   ./rush.sh up dev                   Vite dev server in Docker, port 1420
   ./rush.sh up staging -d            Built bundle behind nginx, detached
-  ./rush.sh compose run --rm rust    The portable-crate gate, in a container
+  ./rush.sh compose run --build --rm rust
+                                     The portable-crate gate, in a container.
+                                     --build is not optional: `compose run`
+                                     reuses an existing image, and a stale one
+                                     reports on a tree that is no longer there.
   ./rush.sh doctor                   Why is it not working
 
 WHAT DOCKER DOES NOT DO

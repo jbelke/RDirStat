@@ -47,7 +47,11 @@ criterion
 *.swp
 *~
 
+# reference-code is local-only material check-docs deliberately skips.
+# `skills/` is NOT excluded: AGENTS.md links to skills/AGENTS.md, so the
+# documentation checker fails without it. Its `rust-skills` entry is a symlink
+# into the untracked .agents/ payload and arrives dangling, which is what a
+# fresh clone looks like too — check-docs skips symlinks.
 reference-code
-skills
 Dockerfile
 docker-compose.yml
