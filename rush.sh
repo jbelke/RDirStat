@@ -516,14 +516,19 @@ cmd_clean() {
   run_cmd rm -rf dist .vite
   local dir
   for dir in target/release/bundle target/debug/bundle src-tauri/target/release/bundle; do
-    [ -d "$dir" ] && run_cmd rm -rf "$dir"
+    if [ -d "$dir" ]; then run_cmd rm -rf "$dir"; fi
   done
   if [ "$CLEAN_ALL" -eq 1 ]; then
     run_cmd rm -rf node_modules .local
     if have docker; then
       say "Removing Docker volumes"
       resolve_environment
-      run_cmd docker compose ${ENV_FILE:+--env-file "$ENV_FILE"} down -v --remove-orphans || true
+      # Built as an array: `${ENV_FILE:+--env-file "$ENV_FILE"}` looks like it
+      # quotes the path, but the inner quotes are literal inside the expansion,
+      # so a path with a space would split into two arguments.
+      local args=(docker compose)
+      [ -n "$ENV_FILE" ] && args+=(--env-file "$ENV_FILE")
+      run_cmd "${args[@]}" down -v --remove-orphans || true
     fi
   else
     note "compiled Rust artifacts kept; \`--all\` also drops node_modules and Docker volumes."
