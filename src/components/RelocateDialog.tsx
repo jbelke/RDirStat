@@ -28,6 +28,7 @@
 import { AlertTriangle, ArrowRight, Check, HardDrive, Loader2, Lock, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { PathField } from "@/components/PathField";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { formatSI } from "@/lib/format";
@@ -423,19 +424,16 @@ function DestinationPicker({
         })}
       </ul>
 
-      <label className="mt-2 block">
-        <span className="text-xs text-muted-foreground">
-          Destination folder — must already exist. The item keeps its own name inside it.
-        </span>
-        <input
-          type="text"
-          value={destination}
-          onChange={(event) => onDestination(event.target.value)}
-          placeholder="/Volumes/…"
-          spellCheck={false}
-          className="mt-1 w-full rounded border border-border/60 bg-transparent px-2 py-1 font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        />
-      </label>
+      <PathField
+        className="mt-2"
+        inputId="relocate-destination"
+        layout="stacked"
+        label="Destination folder"
+        placeholder="/Volumes/…"
+        value={destination}
+        onChange={onDestination}
+        hint="Must already exist. The item keeps its own name inside it."
+      />
     </section>
   );
 }

@@ -40,6 +40,14 @@ tauri-build = { version = "2.6.3", features = [] }
 # tray uses. Neither pulls in a private API.
 tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2.5.4"
+# The native folder chooser. Not merely a convenience over typing a path:
+# docs/03-MACOS.md#privacy-controls-and-full-disk-access names `NSOpenPanel` as
+# the *explicit consent* path for files and folders, so a directory the user
+# picked is one macOS has authorised this process to read and a directory they
+# typed is not. It also updates Tauri's own filesystem scope. Pulls
+# `tauri-plugin-fs` transitively; that plugin's commands are NOT granted in
+# `capabilities/default.json`, so the webview gains no filesystem API from it.
+tauri-plugin-dialog = "2.7.2"
 
 serde = { workspace = true }
 serde_json = { workspace = true }

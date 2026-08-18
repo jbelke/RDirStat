@@ -27,6 +27,7 @@
  */
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 import {
   commands,
@@ -44,7 +45,7 @@ import {
   type SortDirection,
   type SortKey,
 } from "@/lib/bindings";
-import { MAX_CHILD_PAGE, num, SCAN_PROGRESS_EVENT, unwrap, type NumLike } from "@/lib/wire";
+import { IpcError, MAX_CHILD_PAGE, num, SCAN_PROGRESS_EVENT, unwrap, type NumLike } from "@/lib/wire";
 
 export type {
   CancelState,
@@ -1134,6 +1135,49 @@ export async function syncApply(
       reason: failure.reason,
     })),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Choosing a folder
+// ---------------------------------------------------------------------------
+
+/**
+ * Ask macOS for a folder, and return it — or null if the user cancelled.
+ *
+ * This lives here rather than in a component for the reason every other call
+ * in this file does: it is the process boundary, and a component that reaches
+ * across it directly is one the boundary cannot be changed underneath.
+ *
+ * It is also not merely a convenience over typing a path.
+ * docs/03-MACOS.md#privacy-controls-and-full-disk-access names the native open
+ * panel as the *explicit consent* path for files and folders: a directory the
+ * user picked here is one macOS has authorised this process to read, and a
+ * directory they typed is not. Two paths that look identical in a text field
+ * can therefore behave differently, and picking is the one that works.
+ *
+ * `startingAt` is where the panel opens. Passing the field's current value
+ * makes Browse a refinement of what is already there rather than a restart
+ * from the home folder; a blank or bogus value is ignored by the platform,
+ * which is why a half-typed path is not an error here.
+ */
+export async function pickFolder(title: string, startingAt?: string): Promise<string | null> {
+  const chosen = await openDialog({
+    title,
+    directory: true,
+    multiple: false,
+    defaultPath: startingAt !== undefined && startingAt.trim() !== "" ? startingAt : undefined,
+  });
+  if (chosen === null) return null;
+  // The plugin's return type widens to string[] when `multiple` is set. We
+  // asked for one, so anything else is a contract break worth failing on
+  // rather than silently coercing into a path.
+  if (typeof chosen !== "string") {
+    throw new IpcError("pick_folder", {
+      kind: "internal",
+      detail: "the folder chooser returned more than one path",
+    });
+  }
+  return chosen;
 }
 
 // ---------------------------------------------------------------------------

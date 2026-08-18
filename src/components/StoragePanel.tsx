@@ -27,6 +27,7 @@
 import { AlertTriangle, Check, Database, Download, FolderOpen, HardDrive, Lock, RotateCcw } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { PathField } from "@/components/PathField";
 import { Button } from "@/components/ui/button";
 import { formatSI } from "@/lib/format";
 import type { StorageReportView, StoredSnapshotView } from "@/lib/ipc";
@@ -143,49 +144,46 @@ function Location({
       )}
 
       {editable && (
-        <div className="mt-3 flex flex-col gap-1.5">
-          <label className="text-xs text-muted-foreground" htmlFor="snapshot-dir">
-            Keep snapshots in
-          </label>
-          <div className="flex items-center gap-2">
-            <input
-              id="snapshot-dir"
-              className="min-w-0 flex-1 rounded border border-border/60 bg-transparent px-2 py-1 font-mono text-xs"
-              placeholder={report.defaultDirectory}
-              spellCheck={false}
-              value={draft}
-              disabled={busy}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && dirty) void apply(draft.trim() === "" ? null : draft.trim());
-              }}
-            />
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={busy || !dirty}
-              onClick={() => void apply(draft.trim() === "" ? null : draft.trim())}
-            >
-              <Check aria-hidden />
-              Use this
-            </Button>
-            {saved !== "" && (
-              <Button variant="ghost" size="sm" disabled={busy} onClick={() => void apply(null)}>
-                <RotateCcw aria-hidden />
-                Default
-              </Button>
-            )}
-          </div>
-          {error !== null ? (
-            <p className="text-xs text-destructive">{error}</p>
-          ) : (
-            <p className="text-xs text-muted-foreground">
+        <PathField
+          className="mt-3"
+          inputId="snapshot-dir"
+          layout="stacked"
+          label="Keep snapshots in"
+          placeholder={report.defaultDirectory}
+          value={draft}
+          disabled={busy}
+          onChange={setDraft}
+          error={error}
+          hint={
+            <>
               Snapshots already saved stay where they are; this only changes where the next one is
-              written. An absolute path — leave it empty for{" "}
-              <code className="font-mono">{report.defaultDirectory}</code>.
-            </p>
+              written. Leave it empty for <code className="font-mono">{report.defaultDirectory}</code>.
+            </>
+          }
+        >
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            disabled={busy || !dirty}
+            onClick={() => void apply(draft.trim() === "" ? null : draft.trim())}
+          >
+            <Check aria-hidden />
+            Use this
+          </Button>
+          {saved !== "" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="shrink-0"
+              disabled={busy}
+              onClick={() => void apply(null)}
+            >
+              <RotateCcw aria-hidden />
+              Default
+            </Button>
           )}
-        </div>
+        </PathField>
       )}
     </>
   );

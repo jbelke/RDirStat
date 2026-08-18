@@ -18,6 +18,7 @@
 import { AlertTriangle, ArrowRight, Check, FileDown, Loader2, SearchCheck } from "lucide-react";
 import { useState } from "react";
 
+import { PathField } from "@/components/PathField";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -135,8 +136,15 @@ export function SyncRoute() {
       </header>
 
       <section className="flex flex-col gap-2">
-        <PathField label="Source" placeholder="/Volumes/Archive/photos" value={source} onChange={setSource} />
         <PathField
+          inputId="sync-source"
+          label="Source"
+          placeholder="/Volumes/Archive/photos"
+          value={source}
+          onChange={setSource}
+        />
+        <PathField
+          inputId="sync-destination"
           label="Destination"
           placeholder="/Volumes/Backup/photos"
           value={destination}
@@ -193,32 +201,6 @@ function Labelled({ label, children }: { label: string; children: React.ReactNod
       <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</span>
       {children}
     </div>
-  );
-}
-
-function PathField({
-  label,
-  placeholder,
-  value,
-  onChange,
-}: {
-  label: string;
-  placeholder: string;
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label className="flex items-center gap-2">
-      <span className="w-20 shrink-0 text-xs text-muted-foreground">{label}</span>
-      <input
-        type="text"
-        value={value}
-        placeholder={placeholder}
-        spellCheck={false}
-        onChange={(event) => onChange(event.target.value)}
-        className="min-w-0 flex-1 rounded border border-border/60 bg-transparent px-2 py-1 font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      />
-    </label>
   );
 }
 
