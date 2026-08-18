@@ -2061,3 +2061,57 @@ export function toTransferJobView(job: TransferJob): TransferJobView {
     updatedUnixMs: num(job.updated_unix_ms),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Digests
+// ---------------------------------------------------------------------------
+
+/** A structure digest over a subtree. Not a content hash — see `digest.rs`. */
+export interface StructureDigestView {
+  /** Lowercase hex SHA-256 over the subtree's shape. */
+  readonly digest: string;
+  /** How many entries were folded in, so the UI can state what it covered. */
+  readonly entries: number;
+  /**
+   * The walk stopped at its backstop, so this covers only part of the subtree.
+   *
+   * Shown rather than swallowed: a digest over a partial walk is not comparable
+   * to one over a whole tree, and presenting it as if it were would make two
+   * different trees look equal.
+   */
+  readonly truncated: boolean;
+}
+
+/** SHA-256 of one file's contents — the digest `shasum -a 256` agrees with. */
+export interface ContentDigestView {
+  readonly digest: string;
+  /** Bytes actually read; differs from the scanned size if the file changed. */
+  readonly bytes: number;
+}
+
+/**
+ * Folds the shape of a subtree — names, sizes, mtimes, nesting — into one
+ * digest. Reads no file data, so this is safe to call on every selection.
+ */
+export async function structureDigest(generation: number, node: number): Promise<StructureDigestView> {
+  const view = await unwrap("structure_digest", commands.structureDigest(toWireU64(generation), node));
+  return {
+    digest: view.digest,
+    entries: num(view.entries),
+    truncated: view.truncated,
+  };
+}
+
+/**
+ * SHA-256 over a file's contents.
+ *
+ * Reads the whole file, so this is only ever called from an explicit user
+ * action — never on selection. See `digest.rs`.
+ */
+export async function fileDigest(generation: number, node: number): Promise<ContentDigestView> {
+  const view = await unwrap("file_digest", commands.fileDigest(toWireU64(generation), node));
+  return {
+    digest: view.digest,
+    bytes: num(view.bytes),
+  };
+}

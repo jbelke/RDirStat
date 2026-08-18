@@ -40,14 +40,14 @@
  *    released.
  */
 
-import { CircleAlert, Eye, HardDriveDownload, Loader, Lock, Package, Pin, PinOff, Trash2, X } from "lucide-react";
+import { Check, CircleAlert, Copy, Eye, Fingerprint, HardDriveDownload, Loader, Lock, Package, Pin, PinOff, Trash2, X } from "lucide-react";
 import { useState } from "react";
 
 import { CategoryChip } from "@/components/cells/CategoryChip";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { formatCount, formatMtime, formatSI } from "@/lib/format";
-import { useNodeDetails } from "@/lib/queries";
+import { useFileDigest, useNodeDetails, useStructureDigest } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { FLAGS, hasFlag, INCOMPLETE_SUBTREE, isVirtualGroup } from "@/lib/wire";
 
@@ -225,6 +225,13 @@ export function DetailsPanel({
               )}
             </dl>
           )}
+
+          <DigestSection
+            key={data.node}
+            generation={generation}
+            node={data.node}
+            isFile={data.kind === "file"}
+          />
 
           {hasFlag(data.flags, INCOMPLETE_SUBTREE) && (
             <Alert variant="warning">
@@ -432,5 +439,115 @@ function TrashDropZone({ armed, onDrop }: { armed: boolean; onDrop?: (nodes: num
           : "Switch deletion on above if you mean to remove something."}
       </span>
     </div>
+  );
+}
+
+/**
+ * The digest row.
+ *
+ * A file and a directory are asked different questions here, and the row says
+ * which one it answered rather than printing a bare hash. A file gets SHA-256
+ * of its bytes — the digest `shasum -a 256` agrees with — and only when asked,
+ * because reading the file costs what the file costs. A directory gets a fold
+ * over the shape of its subtree, which reads no file data and returns
+ * instantly, and is labelled "Structure" with the scope it covered.
+ *
+ * The label is the point. An unlabelled digest on a directory would let a
+ * hash of names and sizes pass for a hash of contents, which would claim two
+ * trees hold the same *data* when all that matched was their listings.
+ *
+ * Mounted with `key={node}` by the caller, so selecting a different file clears
+ * a computed hash instead of showing the previous file's.
+ */
+function DigestSection({ generation, node, isFile }: { generation: number; node: number; isFile: boolean }) {
+  const structure = useStructureDigest(generation, isFile ? null : node);
+  const contents = useFileDigest();
+
+  if (isFile) {
+    const result = contents.data;
+    return (
+      <dl className="flex flex-col gap-2 rounded-md border border-border/60 p-3 text-xs">
+        <Row label="SHA-256">
+          {result === undefined ? (
+            contents.isPending ? (
+              <span className="inline-flex items-center gap-1 text-muted-foreground">
+                <Loader aria-hidden className="size-3 animate-spin" /> hashing…
+              </span>
+            ) : (
+              <Button size="sm" variant="outline" onClick={() => contents.mutate({ generation, node })}>
+                <Fingerprint aria-hidden className="size-3" /> Compute
+              </Button>
+            )
+          ) : (
+            <DigestValue digest={result.digest} />
+          )}
+        </Row>
+        {result !== undefined && (
+          <p className="text-right text-[10px] text-muted-foreground">contents · {formatSI(result.bytes)} read</p>
+        )}
+        {contents.error !== null && (
+          <p className="text-right text-[10px] text-pressure-warn">{contents.error.message}</p>
+        )}
+      </dl>
+    );
+  }
+
+  const view = structure.data;
+  return (
+    <dl className="flex flex-col gap-2 rounded-md border border-border/60 p-3 text-xs">
+      <Row label="Structure">
+        {view === undefined ? (
+          <span className="text-muted-foreground">{structure.isLoading ? "…" : "—"}</span>
+        ) : (
+          <DigestValue digest={view.digest} />
+        )}
+      </Row>
+      {view !== undefined && (
+        <p className="text-right text-[10px] leading-relaxed text-muted-foreground">
+          {formatCount(view.entries)} entries · names, sizes, mtimes
+          <br />
+          not a content hash
+        </p>
+      )}
+      {view?.truncated === true && (
+        <p className="text-right text-[10px] text-pressure-warn">
+          partial walk — not comparable with a whole-tree digest
+        </p>
+      )}
+    </dl>
+  );
+}
+
+/**
+ * A digest, shortened for the panel and copyable in full.
+ *
+ * Shortened because 64 hex characters do not fit a 320px panel without
+ * wrapping into an unreadable block, and nobody reads a SHA-256 by eye anyway —
+ * they compare a few characters, or they copy it. The whole value is on the
+ * `title` and on the clipboard; only the display is abbreviated.
+ */
+function DigestValue({ digest }: { digest: string }) {
+  const [copied, setCopied] = useState(false);
+
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className="font-mono" title={digest}>
+        {digest.slice(0, 8)}…{digest.slice(-4)}
+      </span>
+      <button
+        type="button"
+        title="Copy the whole digest"
+        onClick={() => {
+          void navigator.clipboard.writeText(digest).then(() => {
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1_200);
+          });
+        }}
+        className="rounded p-0.5 opacity-70 hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {copied ? <Check aria-hidden className="size-3" /> : <Copy aria-hidden className="size-3" />}
+        <span className="sr-only">Copy the full digest</span>
+      </button>
+    </span>
   );
 }
