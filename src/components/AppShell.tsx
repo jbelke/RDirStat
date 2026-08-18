@@ -55,6 +55,7 @@ import { DupesRoute } from "@/components/DupesRoute";
 import { SizeBands } from "@/components/SizeBands";
 import { TypesRoute } from "@/components/TypesRoute";
 import { ScanBar } from "@/components/ScanBar";
+import { ScanFleet } from "@/components/ScanFleet";
 import { ScanProgressStrip, useScanProgress } from "@/components/ScanProgressStrip";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { Titlebar, type Crumb } from "@/components/Titlebar";
@@ -75,9 +76,11 @@ import {
   OPEN_SETTINGS_EVENT,
   type DiffMetricKind,
   type LayoutKind,
+  type ReadyScanView,
   type RelocateReportView,
   preferences,
   setTheme as setThemeIpc,
+  type RunningScanView,
   type ThemeChoice,
 } from "@/lib/ipc";
 import {
@@ -186,6 +189,10 @@ const METRIC_OPTIONS = [
   { value: "logical" as const, label: "Logical", title: "File size as reported by the filesystem" },
   { value: "allocated" as const, label: "Allocated", title: "Blocks actually occupied (st_blocks × 512)" },
 ];
+
+/** Stable empties, so an undefined status does not churn identities. */
+const EMPTY_RUNNING: readonly RunningScanView[] = [];
+const EMPTY_READY: readonly ReadyScanView[] = [];
 
 export function AppShell() {
   const client = useQueryClient();
@@ -355,18 +362,52 @@ export function AppShell() {
   // the honest reset.
   useEffect(() => setCategoryFilter(null), [colorBy]);
 
-  const liveGeneration = status.data?.generation ?? GENERATION_NONE;
   const scanState = status.data?.state ?? "idle";
-  const summary = status.data?.summary ?? null;
   const activeScan = status.data?.activeScan ?? null;
+  const runningScans = status.data?.running ?? EMPTY_RUNNING;
+  const readyScans = status.data?.ready ?? EMPTY_READY;
+
+  // Memoised on the joined generations rather than on the array identity: a
+  // status poll returns a fresh array every time, and an unmemoised dependency
+  // here would re-run the invalidation effect on every poll.
+  const residentKey = readyScans.map((scan) => scan.generation).join(",");
+  const residentGenerations = useMemo(
+    () => (residentKey.length === 0 ? [] : residentKey.split(",").map(Number)),
+    [residentKey],
+  );
+
+  /*
+   * Which tree is on screen.
+   *
+   * Was simply "the newest published", which was the only possible answer when
+   * one tree existed at a time. With concurrent scans the user chooses, so the
+   * rule is now: **the tree they picked, if it is still resident; otherwise the
+   * newest.** The fallback matters — a chosen tree can be evicted, and pinning
+   * to a generation the backend no longer holds would leave the whole app
+   * showing stale-generation errors with no way out.
+   */
+  const [chosenGeneration, setChosenGeneration] = useState<number | null>(null);
+  const newestGeneration = status.data?.generation ?? GENERATION_NONE;
+  const liveGeneration =
+    chosenGeneration !== null && residentGenerations.includes(chosenGeneration)
+      ? chosenGeneration
+      : newestGeneration;
+  // The tree on screen, which is no longer necessarily the newest one.
+  const summary =
+    readyScans.find((scan) => scan.generation === liveGeneration)?.summary ??
+    status.data?.summary ??
+    null;
 
   // The one invalidation. Both halves, or neither.
   const lastGeneration = useRef(GENERATION_NONE);
   useEffect(() => {
     if (lastGeneration.current === liveGeneration) return;
     lastGeneration.current = liveGeneration;
-    dropStaleGenerations(client, liveGeneration);
-    syncGeneration(liveGeneration, status.data?.summary?.root ?? 0);
+    // The whole resident set, not just the tree on screen: several trees can
+    // be live at once now, and evicting the others' pages would make switching
+    // back a full refetch of something that never went anywhere.
+    dropStaleGenerations(client, residentGenerations);
+    syncGeneration(liveGeneration, summary?.root ?? 0);
     // A new tree makes every previous complaint obsolete. Without this, a
     // correct refusal — "already scanning", say — stays on screen through the
     // successful scan that followed it, so the user reads a red banner
@@ -374,7 +415,7 @@ export function AppShell() {
     // it. An error message outliving the state it described is worse than no
     // message.
     setActionError(null);
-  }, [liveGeneration, client, syncGeneration, status.data?.summary?.root]);
+  }, [liveGeneration, client, syncGeneration, summary?.root, residentGenerations]);
 
   // A cancel is only "done" when the supervisor says so.
   useEffect(() => {
@@ -470,6 +511,25 @@ export function AppShell() {
    */
   const [scanBarOffer, setScanBarOffer] = useState<string | null>(null);
   useEffect(() => setScanBarOffer(null), [generation]);
+
+  /**
+   * Cancels one scan by id.
+   *
+   * Deliberately does **not** set the global `cancelling` flag, which greys out
+   * the detailed strip: with several scans running, cancelling one must not
+   * make the others look like they are stopping too.
+   */
+  const handleCancelScan = useCallback(
+    async (scanId: number) => {
+      try {
+        await scanCancel(scanId);
+        await client.invalidateQueries({ queryKey: queryKeys.scanStatus() });
+      } catch (cause) {
+        setActionError(cause instanceof Error ? cause.message : String(cause));
+      }
+    },
+    [client],
+  );
 
   const handleCancel = useCallback(async () => {
     if (activeScan === null) return;
@@ -1226,6 +1286,14 @@ export function AppShell() {
           setRelocateDestination(null);
         }}
         onRelocated={handleRelocated}
+      />
+
+      <ScanFleet
+        running={runningScans}
+        ready={readyScans}
+        viewing={liveGeneration}
+        onView={setChosenGeneration}
+        onCancel={(scanId) => void handleCancelScan(scanId)}
       />
 
       <ScanProgressStrip

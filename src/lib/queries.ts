@@ -146,13 +146,19 @@ export const queryKeys = {
 } as const;
 
 /**
- * Drop every cache entry belonging to a superseded generation.
+ * Drop every cache entry belonging to a tree the backend no longer holds.
  *
  * Cheaper and more honest than `invalidateQueries`: those entries can never be
- * valid again, so there is nothing to refetch. Called by the shell on a
- * generation change, alongside `useUiStore.syncGeneration`.
+ * valid again, so there is nothing to refetch. Called by the shell whenever the
+ * set of resident trees changes, alongside `useUiStore.syncGeneration`.
+ *
+ * Takes the whole live **set**, not one generation. With concurrent scans
+ * several trees are resident at once and the user switches between them —
+ * evicting everything but the one on screen would throw away pages that are
+ * still valid and make switching back a full refetch of a tree that never
+ * went anywhere.
  */
-export function dropStaleGenerations(client: QueryClient, live: number): void {
+export function dropStaleGenerations(client: QueryClient, live: readonly number[]): void {
   client.removeQueries({
     predicate: (query) => {
       const [scope, generation] = query.queryKey as readonly unknown[];
@@ -173,7 +179,7 @@ export function dropStaleGenerations(client: QueryClient, live: number): void {
       ) {
         return false;
       }
-      return typeof generation === "number" && generation !== live;
+      return typeof generation === "number" && !live.includes(generation);
     },
   });
 }
