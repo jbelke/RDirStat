@@ -49,8 +49,25 @@ export interface StoragePanelProps {
   onChangeDirectory?: (directory: string | null) => Promise<unknown>;
   /** Copies one snapshot somewhere the user chooses. */
   onExport?: (snapshot: StoredSnapshotView) => void;
+  /**
+   * Opens the author's page in the real browser.
+   *
+   * Left to the shell for the same reason `onRevealDirectory` is: a webview
+   * that follows an `href` navigates away from the app itself, and the user
+   * has no back button to return with.
+   */
+  onOpenAuthor?: () => void;
   className?: string;
 }
+
+/**
+ * Where the credit below points.
+ *
+ * Exported so the shell wiring `onOpenAuthor` opens the same address the panel
+ * prints — a credit whose visible text and destination can drift is worse than
+ * no link at all.
+ */
+export const AUTHOR_URL = "https://github.com/jbelke/";
 
 /**
  * Where the store is, and — when it is allowed — where to move it.
@@ -189,6 +206,39 @@ function Location({
   );
 }
 
+/**
+ * Who wrote this.
+ *
+ * It lives at the foot of this route because this route is what the Settings
+ * control opens, and an app with no About window still owes the reader one
+ * place that answers "who made this and where do I find them". Quiet by
+ * design — it sits below the user's own data, not above it.
+ *
+ * The address is printed as text whether or not a handler is wired, so the
+ * credit is still legible (and typeable) in a build that cannot open a
+ * browser; the handler only upgrades it to a click.
+ */
+function Credits({ onOpenAuthor }: { onOpenAuthor?: () => void }) {
+  const address = "github.com/jbelke";
+  return (
+    <footer className="mt-6 border-t border-border/60 pt-3 text-xs text-muted-foreground">
+      RDirStat by Josh Belke —{" "}
+      {onOpenAuthor === undefined ? (
+        <span className="font-mono">{address}</span>
+      ) : (
+        <button
+          type="button"
+          onClick={onOpenAuthor}
+          title={AUTHOR_URL}
+          className="rounded font-mono underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {address}
+        </button>
+      )}
+    </footer>
+  );
+}
+
 function whenTaken(unixMs: number): string {
   return new Date(unixMs).toLocaleString(undefined, {
     dateStyle: "medium",
@@ -202,6 +252,7 @@ export function StoragePanel({
   onRevealDirectory,
   onChangeDirectory,
   onExport,
+  onOpenAuthor,
   className,
 }: StoragePanelProps) {
   if (loading && report === null) {
@@ -315,6 +366,8 @@ export function StoragePanel({
           More files were found than are listed. The totals above still count all of them.
         </p>
       )}
+
+      <Credits onOpenAuthor={onOpenAuthor} />
     </div>
   );
 }

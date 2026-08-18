@@ -26,7 +26,7 @@
  * tree and the route is enabled as soon as a scan exists.
  */
 
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useQueryClient } from "@tanstack/react-query";
 import type { SortingState } from "@tanstack/react-table";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -35,7 +35,7 @@ import { DetailsPanel } from "@/components/DetailsPanel";
 import { DriveSwitcher } from "@/components/DriveSwitcher";
 import { RelocateDialog } from "@/components/RelocateDialog";
 import { SelectionActions } from "@/components/SelectionActions";
-import { StoragePanel } from "@/components/StoragePanel";
+import { AUTHOR_URL, StoragePanel } from "@/components/StoragePanel";
 import { SyncRoute } from "@/components/SyncRoute";
 import { CategoryLegend } from "@/components/canvas/CategoryLegend";
 import {
@@ -736,6 +736,10 @@ export function AppShell() {
                 // would be detached from the thing that caused it.
                 await setSnapshotDir.mutateAsync(directory);
               }}
+              // Opened here rather than as an `href` in the panel: following a
+              // link inside the webview would replace the whole app with a web
+              // page and leave no way back.
+              onOpenAuthor={() => void openUrl(AUTHOR_URL)}
               onExport={(snapshot) => {
                 setActionError(null);
                 exportSnapshot(snapshot.path)
