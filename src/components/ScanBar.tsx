@@ -23,7 +23,7 @@
  *    not a validation step this component is entitled to perform.
  */
 
-import { FolderSearch, Loader } from "lucide-react";
+import { FolderSearch, Loader, X } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -45,9 +45,19 @@ export interface ScanBarProps {
   onScan: (root: string) => void;
   /** A scan is already starting or running; the control refuses to start another. */
   busy?: boolean;
+  /**
+   * The drive on screen, as a path. When it changes, the field resets to it.
+   *
+   * A path typed against the old drive is not merely unhelpful after a switch,
+   * it is wrong in a way that looks right: `/Volumes/NATO/TBD` left sitting in
+   * the field while `tuf8tb` is on screen reads as "this is where you are" and
+   * is not. Resetting to the new root replaces a stale answer with a true one,
+   * and leaves the field somewhere useful to type onward from.
+   */
+  scanRoot?: string | null;
 }
 
-export function ScanBar({ onScan, busy = false }: ScanBarProps) {
+export function ScanBar({ onScan, busy = false, scanRoot = null }: ScanBarProps) {
   const [value, setValue] = useState("");
   const [options, setOptions] = useState<readonly string[]>([]);
   const [open, setOpen] = useState(false);
@@ -55,6 +65,20 @@ export function ScanBar({ onScan, busy = false }: ScanBarProps) {
   const [loading, setLoading] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
+
+  /*
+   * Follow the drive.
+   *
+   * Keyed on `scanRoot` alone, so this fires when the drive on screen changes
+   * and not on every keystroke — the user's typing is never overwritten while
+   * they are in the middle of it.
+   */
+  useEffect(() => {
+    setValue(scanRoot ?? "");
+    setOpen(false);
+    setActive(-1);
+  }, [scanRoot]);
+
   const listId = useId();
 
   // The completion the user has actually singled out, as opposed to the first
@@ -186,14 +210,35 @@ export function ScanBar({ onScan, busy = false }: ScanBarProps) {
           autoCorrect="off"
           autoCapitalize="off"
           className={cn(
-            "h-7 w-64 rounded-md border border-input bg-transparent pl-7 pr-2",
+            "h-7 w-64 rounded-md border border-input bg-transparent pl-7 pr-7",
             "font-mono text-xs outline-none",
             "placeholder:font-sans placeholder:text-muted-foreground",
             "focus-visible:ring-2 focus-visible:ring-ring",
           )}
         />
-        {loading && (
+        {loading ? (
           <Loader aria-hidden className="pointer-events-none absolute right-2 size-3 animate-spin text-muted-foreground" />
+        ) : (
+          value.length > 0 && (
+            <button
+              type="button"
+              // Clears without scanning and without closing the bar, so the
+              // fastest way back to "somewhere else entirely" is one click
+              // rather than a select-all and a delete.
+              onClick={() => {
+                setValue("");
+                setOptions([]);
+                setActive(-1);
+                setOpen(false);
+                inputRef.current?.focus();
+              }}
+              title="Clear"
+              className="absolute right-1.5 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <X aria-hidden className="size-3" />
+              <span className="sr-only">Clear the path</span>
+            </button>
+          )
         )}
       </div>
 

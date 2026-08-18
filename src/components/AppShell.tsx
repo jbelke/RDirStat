@@ -702,7 +702,11 @@ export function AppShell() {
           )
         }
       >
-        <ScanBar onScan={(root) => void handleScan(root)} busy={scanning || starting} />
+        <ScanBar
+          onScan={(root) => void handleScan(root)}
+          busy={scanning || starting}
+          scanRoot={summary?.rootPath ?? null}
+        />
       </Titlebar>
 
       <div className="relative flex min-h-0 flex-1">
