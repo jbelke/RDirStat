@@ -482,4 +482,55 @@ mod tests {
         );
         assert!(text.contains("StaleGeneration") || text.contains("stale_generation"));
     }
+
+    /// The checked-in `src/lib/bindings.ts` must match what the current
+    /// command signatures generate.
+    ///
+    /// Without this, the file is refreshed only by a debug run of the app or
+    /// by the `#[ignore]`d test above, so a command whose signature changed
+    /// reaches `main` alongside a stale client that still typechecks — against
+    /// the old shape. The drift is invisible until it is a runtime error.
+    #[test]
+    fn the_checked_in_bindings_have_not_drifted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let generated_path = dir.path().join("bindings.ts");
+        export_bindings(&generated_path).expect("the command signatures must be exportable");
+        let generated = std::fs::read_to_string(&generated_path).expect("written");
+
+        let committed = std::fs::read_to_string("../src/lib/bindings.ts")
+            .expect("src/lib/bindings.ts is checked in and must be readable");
+
+        if generated == committed {
+            return;
+        }
+
+        // A 3,500-line `assert_eq!` is unreadable. Name the first divergence.
+        let divergence = generated
+            .lines()
+            .zip(committed.lines())
+            .enumerate()
+            .find(|(_, (a, b))| a != b)
+            .map_or_else(
+                || {
+                    format!(
+                        "identical line for line, but the lengths differ: \
+                         generated {}, committed {}",
+                        generated.lines().count(),
+                        committed.lines().count()
+                    )
+                },
+                |(index, (generated, committed))| {
+                    format!(
+                        "first divergence at line {}:\n  generated: {generated}\n  committed: {committed}",
+                        index + 1
+                    )
+                },
+            );
+
+        panic!(
+            "src/lib/bindings.ts is stale: the command signatures have changed \
+             since it was generated.\n{divergence}\nRegenerate with:\n    \
+             cargo test -p rdirstat -- --ignored emit_the_checked_in_bindings"
+        );
+    }
 }
