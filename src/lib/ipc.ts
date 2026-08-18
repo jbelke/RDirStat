@@ -44,6 +44,7 @@ import {
   type StorageReport,
   type Sort,
   type SortDirection,
+  type ScanSummary,
   type SortKey,
   type SyncSchedule_Serialize,
   type TransferJob,
@@ -255,12 +256,59 @@ export interface ScanSummaryView {
   readonly excludedRoots: readonly string[];
 }
 
-export interface ScanStatusView {
+/** Why a scan has been accepted but has not started. */
+export type WaitReasonView =
+  | { readonly kind: "same_device"; readonly detail: { readonly scan_id: number } }
+  | { readonly kind: "memory" };
+
+/** One scan that is running, or waiting to. */
+export interface RunningScanView {
+  readonly scanId: number;
+  /** The generation this scan *will* publish under. */
+  readonly generation: number;
+  readonly root: string;
   readonly state: ScanState;
+  /**
+   * `null` while running. Set while the scan is waiting, so the UI can say
+   * which — a bar sitting at 0% with no explanation reads as broken.
+   */
+  readonly waiting: WaitReasonView | null;
+  readonly lastProgress: ScanProgressView | null;
+}
+
+/** One completed tree the user can switch to. */
+export interface ReadyScanView {
+  readonly generation: number;
+  readonly scanId: number;
+  readonly root: string;
+  readonly summary: ScanSummaryView;
+}
+
+export interface ScanStatusView {
+  /**
+   * The busiest state across every scan. Kept alongside {@link running} because
+   * "is this app busy" is a real question with a scalar answer, and the tray and
+   * the window title should not have to fold a list to get it.
+   */
+  readonly state: ScanState;
+  /** The newest scan that is actually live. Never a failed one. */
   readonly activeScan: number | null;
+  /** The most recently published tree. Not necessarily the one on screen. */
   readonly generation: number;
   readonly summary: ScanSummaryView | null;
   readonly lastProgress: ScanProgressView | null;
+  /** Running, waiting and recently-failed scans, oldest first. */
+  readonly running: readonly RunningScanView[];
+  /** Completed trees still resident, so the user can switch between them. */
+  readonly ready: readonly ReadyScanView[];
+}
+
+/** A one-line reason a scan has not started, for the progress row. */
+export function describeWait(reason: WaitReasonView): string {
+  if (reason.kind === "same_device") {
+    return "waiting — another scan is reading this disk";
+  }
+  return "waiting — not enough memory free yet";
 }
 
 // ---------------------------------------------------------------------------
@@ -513,50 +561,72 @@ export async function scanCancel(scanId: number): Promise<CancelState> {
   return unwrap("scan_cancel", commands.scanCancel(toWireU64(scanId)));
 }
 
+/**
+ * The wire summary as the UI sees it.
+ *
+ * Extracted from `scanStatus` when completed scans became plural: the same
+ * mapping is now needed for every `ready` row, and a second inline copy would
+ * be a second thing to keep in step.
+ */
+function toSummary(summary: ScanSummary): ScanSummaryView {
+  return {
+    scanId: num(summary.scan_id),
+    generation: num(summary.generation),
+    root: num(summary.root),
+    rootPath: summary.root_path,
+    startedUnixMs: num(summary.started_unix_ms),
+    finishedUnixMs: num(summary.finished_unix_ms),
+    toolVersion: summary.tool_version,
+    aggregated: summary.aggregated,
+    partial: summary.partial,
+    mutations: num(summary.mutations),
+    counts: {
+      observedEntries: num(summary.counts.observed_entries),
+      retainedNodes: num(summary.counts.retained_nodes),
+      directories: num(summary.counts.directories),
+      files: num(summary.counts.files),
+      symlinks: num(summary.counts.symlinks),
+      special: num(summary.counts.special),
+      unreadableDirs: num(summary.counts.unreadable_dirs),
+      excludedPaths: num(summary.counts.excluded_paths),
+      aggregatedNodes: num(summary.counts.aggregated_nodes),
+      hardLinkRepeats: num(summary.counts.hard_link_repeats),
+    },
+    totals: {
+      logical: num(summary.totals.logical),
+      allocated: num(summary.totals.allocated),
+    },
+    errorCounts: summary.error_counts.map((entry) => ({
+      errorClass: entry.class,
+      operation: entry.operation,
+      count: num(entry.count),
+    })),
+    excludedRoots: summary.excluded_roots,
+  };
+}
+
 export async function scanStatus(): Promise<ScanStatusView> {
   const status = await unwrap("scan_status", commands.scanStatus());
   return {
     state: status.state,
     activeScan: status.active_scan === null ? null : num(status.active_scan),
     generation: num(status.generation),
-    summary:
-      status.summary === null
-        ? null
-        : {
-            scanId: num(status.summary.scan_id),
-            generation: num(status.summary.generation),
-            root: num(status.summary.root),
-            rootPath: status.summary.root_path,
-            startedUnixMs: num(status.summary.started_unix_ms),
-            finishedUnixMs: num(status.summary.finished_unix_ms),
-            toolVersion: status.summary.tool_version,
-            aggregated: status.summary.aggregated,
-            partial: status.summary.partial,
-            mutations: num(status.summary.mutations),
-            counts: {
-              observedEntries: num(status.summary.counts.observed_entries),
-              retainedNodes: num(status.summary.counts.retained_nodes),
-              directories: num(status.summary.counts.directories),
-              files: num(status.summary.counts.files),
-              symlinks: num(status.summary.counts.symlinks),
-              special: num(status.summary.counts.special),
-              unreadableDirs: num(status.summary.counts.unreadable_dirs),
-              excludedPaths: num(status.summary.counts.excluded_paths),
-              aggregatedNodes: num(status.summary.counts.aggregated_nodes),
-              hardLinkRepeats: num(status.summary.counts.hard_link_repeats),
-            },
-            totals: {
-              logical: num(status.summary.totals.logical),
-              allocated: num(status.summary.totals.allocated),
-            },
-            errorCounts: status.summary.error_counts.map((entry) => ({
-              errorClass: entry.class,
-              operation: entry.operation,
-              count: num(entry.count),
-            })),
-            excludedRoots: status.summary.excluded_roots,
-          },
+    summary: status.summary === null ? null : toSummary(status.summary),
     lastProgress: status.last_progress === null ? null : toProgress(status.last_progress),
+    running: status.running.map((row) => ({
+      scanId: num(row.scan_id),
+      generation: num(row.generation),
+      root: row.root,
+      state: row.state,
+      waiting: row.waiting === null ? null : (row.waiting as WaitReasonView),
+      lastProgress: row.last_progress === null ? null : toProgress(row.last_progress),
+    })),
+    ready: status.ready.map((row) => ({
+      generation: num(row.generation),
+      scanId: num(row.scan_id),
+      root: row.root,
+      summary: toSummary(row.summary),
+    })),
   };
 }
 
