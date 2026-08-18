@@ -648,7 +648,7 @@ export function AppShell() {
               offers={offers.data ?? []}
               scanRootPath={summary?.rootPath ?? null}
               busy={scanning || starting}
-              onSelect={handleSwitchDrive}
+              onScan={handleSwitchDrive}
               onRestore={handleRestoreDrive}
             />
           )

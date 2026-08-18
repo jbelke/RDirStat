@@ -7,19 +7,28 @@
  * "what about the other drive?", the single most common thing a person does
  * with a disk-usage tool once they have looked at one disk.
  *
- * **The drive itself is the choice.** Picking a drive puts it on screen; the
- * row does not make the user choose a *mechanism* first. The mechanism is
- * still stated, because the two cost wildly different amounts and the
- * difference matters before the click, not after it:
+ * **Selecting a drive is not the same act as reading it.** The menu used to
+ * treat the drive as the whole choice: one click put it on screen, and for a
+ * drive with no stored snapshot that click was a full disk read — minutes of
+ * it — and it stopped whatever scan was already running to get there. That is
+ * a lot of consequence to hang on picking an item from a list, and it made the
+ * cheap question ("what about the other drive?") indistinguishable from the
+ * expensive one ("read that whole disk again").
  *
- *   - a drive with a stored snapshot restores it — near-instant, and the row
- *     says how old it is;
- *   - a drive without one has to be read, so the row says "reads the disk"
- *     and the click starts a scan of the drive it names.
+ * So the menu is two steps now. Clicking a drive **selects** it and nothing
+ * else: the menu stays open, no disk is touched, no running scan is stopped,
+ * and the tree on screen does not move. The selected drive then offers what
+ * can be done with it, and those are the only things that act:
  *
- * A *Rescan* item sits under any drive that would otherwise restore, so a
- * fresh read is never more than one extra click away, and the drive already on
- * screen offers only that.
+ *   - **Put it on screen** — restores a stored snapshot. Near-instant, and it
+ *     says how old the snapshot is, because a restore is not a fresh read.
+ *   - **Scan** — reads the disk. Always available, always labelled with what
+ *     it costs, and it is the only item that will stop a scan in flight.
+ *
+ * The consequence worth noticing is where the warning went. "A scan is running,
+ * choosing a drive stops it first" used to sit at the top of the menu, because
+ * with one-click-acts it was true of *opening* the menu. It now sits on the
+ * scan item, because that is the only place it is true.
  *
  * Switching replaces the tree along with the selection and the navigation
  * stack, so the menu says so once at the top rather than pretending drives are
@@ -37,7 +46,8 @@
  * can share a name and only the path disambiguates them.
  */
 
-import { Check, ChevronsUpDown, HardDrive, History, Loader2, RefreshCw } from "lucide-react";
+import { Check, ChevronsUpDown, HardDrive, History, Loader2, MonitorUp, RefreshCw } from "lucide-react";
+import { useState } from "react";
 
 import {
   DropdownMenu,
@@ -60,9 +70,12 @@ export interface DriveSwitcherProps {
   scanRootPath: string | null;
   /** True while a scan is in flight; the app runs exactly one at a time. */
   busy: boolean;
-  /** Starts a scan of the chosen mount point. */
-  onSelect: (mountPoint: string) => void;
-  /** Publishes a stored snapshot for the chosen mount point. */
+  /**
+   * Reads the disk. The expensive path, and the only one that stops a scan
+   * already in flight — so it is never what merely selecting a drive does.
+   */
+  onScan: (mountPoint: string) => void;
+  /** Publishes a stored snapshot. The cheap path; touches no disk. */
   onRestore?: (mountPoint: string, device: number) => void;
   className?: string;
 }
@@ -100,12 +113,22 @@ export function DriveSwitcher({
   offers = [],
   scanRootPath,
   busy,
-  onSelect,
+  onScan,
   onRestore,
   className,
 }: DriveSwitcherProps) {
   const candidates = userVolumes(volumes);
   const current = volumeForPath(volumes, scanRootPath);
+
+  /*
+   * Which row is expanded, or `null` for "whatever is on screen".
+   *
+   * Held as an override rather than as the selection itself so the menu always
+   * opens on the drive the user is actually looking at, without an effect to
+   * keep the two in sync — a restore or a scan moves `current`, and this
+   * resets to `null` on open, so the next open follows automatically.
+   */
+  const [picked, setPicked] = useState<string | null>(null);
 
   // Sampled once per render rather than per row, so every age in one open menu
   // is measured from the same instant.
@@ -148,21 +171,17 @@ export function DriveSwitcher({
   const label = current?.name ?? "Choose a drive";
 
   return (
-    <DropdownMenu>
+    <DropdownMenu onOpenChange={(open) => open && setPicked(null)}>
       <DropdownMenuTrigger
         // Deliberately NOT disabled while a scan runs.
         //
         // It used to be, and that made the one thing a person wants during a
         // long scan of the wrong disk — go to the right one — unexpressible:
         // the control showed a spinner, took no clicks, and the way out was to
-        // find Cancel in the status strip first. Choosing a drive now stops the
-        // running scan on the way, and the menu says so before anything is
-        // clicked.
-        title={
-          busy
-            ? "Choose which drive is on screen. A scan is running; choosing stops it."
-            : "Choose which drive is on screen"
-        }
+        // find Cancel in the status strip first. Opening this menu and picking
+        // a row are both free now, so there is nothing to disable; the one item
+        // that would stop the scan says so on itself.
+        title="Choose a drive. Picking one shows what you can do with it; nothing is read until you choose."
         // Shaped like the crumbs it sits between — same padding, same muted
         // weight, same hover — because it *is* one level of the trail, not a
         // toolbar control that happens to be parked in it.
@@ -187,17 +206,9 @@ export function DriveSwitcher({
       <DropdownMenuContent align="start" className="min-w-80">
         <DropdownMenuLabel>Choose a drive</DropdownMenuLabel>
         <p className="px-2 pb-1.5 text-xs text-muted-foreground">
-          Puts that drive on screen, replacing the tree, the selection and the trail. A stored scan
-          comes back instantly; a drive without one has to be read.
+          Pick a drive to see what you can do with it. Nothing is read, and nothing on screen
+          changes, until you choose an action.
         </p>
-        {/* Stated once, at the top, rather than on every row: the scan being
-          * stopped is one fact about the app's state, not a property of any
-          * particular drive. */}
-        {busy && (
-          <p className="px-2 pb-1.5 text-xs text-pressure-warn">
-            A scan is running. Choosing a drive stops it first.
-          </p>
-        )}
 
         {[...groups.entries()].map(([disk, rows]) => (
           <div key={disk}>
@@ -208,31 +219,29 @@ export function DriveSwitcher({
 
             {rows.map((volume) => {
               const isCurrent = volume.mountPoint === current?.mountPoint;
+              const isPicked = (picked ?? current?.mountPoint ?? null) === volume.mountPoint;
               const offer = offerFor(volume);
               const age = describeAge(offer?.takenUnixMs ?? null, nowMs);
-              // Restoring is the cheap way to put a drive on screen, so it is
-              // what choosing the drive does when a snapshot exists. Without
-              // one there is nothing to show but what a read produces, and the
-              // row says so before it is clicked.
-              const restores = offer !== undefined && onRestore !== undefined && !isCurrent;
+              // A stored snapshot is the cheap way onto the screen, but it is
+              // now an *action*, not a side effect of picking the row.
+              const canRestore = offer !== undefined && onRestore !== undefined && !isCurrent;
               return (
                 <div key={volume.mountPoint} className="pb-1">
                   <DropdownMenuItem
-                    // The drive on screen is not a destination. It stays
-                    // listed, with a check, because a menu that hides where
-                    // you already are makes you count to work out where you
-                    // are.
-                    disabled={isCurrent}
-                    onSelect={() => {
-                      if (isCurrent) return;
-                      if (restores && offer !== undefined) onRestore(volume.mountPoint, offer.device);
-                      else onSelect(volume.mountPoint);
+                    // `preventDefault` keeps the menu open. This is the whole
+                    // change: the click expresses "this one", and expressing
+                    // that must not close the menu, move the tree, or touch a
+                    // disk. Radix closes on select by default, which is right
+                    // for an item that acts and wrong for one that chooses.
+                    onSelect={(event) => {
+                      event.preventDefault();
+                      setPicked(volume.mountPoint);
                     }}
-                    className="gap-2 py-1.5"
+                    className={cn("gap-2 py-1.5", isPicked && "bg-accent")}
                   >
                     {isCurrent ? (
                       <Check aria-hidden className="text-foreground" />
-                    ) : restores ? (
+                    ) : canRestore ? (
                       <History aria-hidden />
                     ) : (
                       <HardDrive aria-hidden />
@@ -253,31 +262,51 @@ export function DriveSwitcher({
                         {formatSI(volume.usedBytes)} used
                         {volume.fsType.toLowerCase() !== "apfs" && ` · ${volume.fsType.toUpperCase()}`}
                       </span>
-                      {/* What clicking this row will cost, in the row itself.
-                        * "restored from 25 min ago" and "reads the disk" are
-                        * seconds versus minutes, and the difference has to be
-                        * legible before the click rather than discovered after
-                        * it. */}
+                      {/* What this drive HAS, not what clicking will do —
+                        * because clicking no longer does anything. The cost of
+                        * each action is stated on the action itself. */}
                       <span className="text-[10px] text-muted-foreground/80">
-                        {isCurrent ? "" : restores ? `restore · ${age}` : "scan · reads the disk"}
+                        {canRestore ? `saved scan · ${age}` : isCurrent ? "" : "no saved scan"}
                       </span>
                     </span>
                   </DropdownMenuItem>
 
-                  {/* The second, expensive answer. Offered under a drive that
-                    * would otherwise restore — and under the current one,
-                    * where it is the only thing left to do. */}
-                  {(restores || isCurrent) && (
-                    <DropdownMenuItem
-                      onSelect={() => onSelect(volume.mountPoint)}
-                      className="pl-9 text-muted-foreground"
-                    >
-                      <RefreshCw aria-hidden />
-                      <span className="flex-1 text-xs">
-                        {isCurrent ? "Rescan this drive" : "Scan instead of restoring"}
-                      </span>
-                      <span className="text-[10px]">reads the disk</span>
-                    </DropdownMenuItem>
+                  {/* Step two. Only these act. */}
+                  {isPicked && (
+                    <>
+                      {canRestore && offer !== undefined && onRestore !== undefined && (
+                        <DropdownMenuItem
+                          onSelect={() => onRestore(volume.mountPoint, offer.device)}
+                          className="pl-9"
+                        >
+                          <MonitorUp aria-hidden />
+                          <span className="flex-1 text-xs">Put this drive on screen</span>
+                          <span className="text-[10px] text-muted-foreground">
+                            saved · {age}
+                          </span>
+                        </DropdownMenuItem>
+                      )}
+                      <DropdownMenuItem
+                        onSelect={() => onScan(volume.mountPoint)}
+                        className="pl-9"
+                      >
+                        <RefreshCw aria-hidden />
+                        <span className="flex-1 text-xs">
+                          {isCurrent ? "Rescan this drive" : "Scan this drive"}
+                        </span>
+                        {/* The warning belongs here and only here. Selecting a
+                          * drive cannot stop a scan; this is the one item that
+                          * can. */}
+                        <span
+                          className={cn(
+                            "text-[10px]",
+                            busy ? "text-pressure-warn" : "text-muted-foreground",
+                          )}
+                        >
+                          {busy ? "reads the disk · stops the running scan" : "reads the disk"}
+                        </span>
+                      </DropdownMenuItem>
+                    </>
                   )}
                 </div>
               );
