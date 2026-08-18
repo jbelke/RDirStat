@@ -41,6 +41,55 @@ die()  { printf '%s fail%s %s\n' "$C_RED$C_BOLD" "$C_RESET" "$*" >&2; exit 1; }
 note() { printf '%s     %s%s\n' "$C_DIM" "$*" "$C_RESET"; }
 
 # ---------------------------------------------------------------------------
+# Build-cache provenance
+# ---------------------------------------------------------------------------
+#
+# Cargo bakes ABSOLUTE paths into build-script output and into `env!()`
+# constants such as CARGO_BIN_EXE_*, so renaming or moving the checkout leaves
+# a target/ tree pointing at a directory that no longer exists.
+#
+# It does not present as a stale cache. It presents as broken source:
+#
+#   failed to read plugin permissions: <old path>/.../commands/app_hide.toml
+#   the binary runs: Os { code: 2, kind: NotFound }        (every CLI test)
+#
+# Both cost an hour to diagnose the first time. A stamp file is enough to
+# recognise it instantly, so this refuses to build rather than let someone
+# debug a rename.
+
+readonly CHECKOUT_STAMP="target/.rush-checkout"
+
+# The packages whose artifacts carry an absolute path: the Tauri crate (its
+# generated permission files are handed to dependents as an absolute OUT_DIR)
+# and every first-party crate (CARGO_BIN_EXE_* in the integration tests).
+readonly PATH_BAKED_PACKAGES="-p tauri -p rdirstat -p rdirstat-core -p rdirstat-scan \
+-p rdirstat-classify -p rdirstat-treemap -p rdirstat-remote -p rdirstat-cli"
+
+checkout_stamp_value() { [ -f "$CHECKOUT_STAMP" ] && cat "$CHECKOUT_STAMP"; }
+
+# Record where target/ was built, so the next run can tell it moved.
+stamp_checkout() {
+  mkdir -p target 2>/dev/null || return 0
+  printf '%s\n' "$RUSH_ROOT" >"$CHECKOUT_STAMP" 2>/dev/null || true
+}
+
+# Refuse to build on a cache that was produced somewhere else.
+assert_checkout_unmoved() {
+  local was; was="$(checkout_stamp_value || true)"
+  if [ -n "$was" ] && [ "$was" != "$RUSH_ROOT" ]; then
+    warn "target/ was built at $was"
+    warn "this checkout is    $RUSH_ROOT"
+    # shellcheck disable=SC2086
+    die "cargo baked the old path into the build cache. Clear the packages that carry it:
+
+    cargo clean ${PATH_BAKED_PACKAGES//$'\n'/ }
+
+  Nothing is wrong with the source; a fresh clone builds."
+  fi
+  stamp_checkout
+}
+
+# ---------------------------------------------------------------------------
 # Defaults, overridable by every flag below
 # ---------------------------------------------------------------------------
 
@@ -379,6 +428,7 @@ cmd_dmg() {
   load_environment
 
   [ "$(uname -s)" = "Darwin" ] || die "a .dmg can only be built on macOS; hdiutil is part of the OS."
+  assert_checkout_unmoved
   require pnpm
   have xcrun || warn "the Xcode command line tools were not found; the bundle step will likely fail."
 
@@ -489,6 +539,19 @@ cmd_doctor() {
   else
     warn "not macOS: \`build\`, \`dmg\` and \`run\` are unavailable here."
     note "the container profiles (up / compose) work on any platform."
+  fi
+
+  printf '\n'
+  say "Build cache"
+  local stamped; stamped="$(checkout_stamp_value || true)"
+  if [ -z "$stamped" ]; then
+    note "target/ has no provenance stamp yet; the next build writes one."
+  elif [ "$stamped" = "$RUSH_ROOT" ]; then
+    ok "target/ was built in this checkout"
+  else
+    warn "target/ was built at $stamped, not $RUSH_ROOT"
+    note "cargo baked that path in. \`./rush.sh dmg\` will refuse until you run:"
+    note "cargo clean ${PATH_BAKED_PACKAGES//$'\n'/ }"
   fi
 
   printf '\n'
