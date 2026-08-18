@@ -8,8 +8,9 @@
 # is the only thing in this directory that is ever committed; it carries the
 # pinned revisions, licences, and clone commands that restore the rest.
 #
-# reference-code/AGENTS.md documents six checkouts (docs/07 says five; the
-# rust-skills provenance clone was added after that sentence was written).
+# reference-code/AGENTS.md documents ten checkouts (docs/07 says five; the
+# rust-skills provenance clone, and later cyberduck, rgigasync, rustfs and
+# AionUi, were all added after that sentence was written).
 # The rule below is by-directory, not by-name, so it stays correct either way.
 # ---------------------------------------------------------------------------
 /reference-code/*
