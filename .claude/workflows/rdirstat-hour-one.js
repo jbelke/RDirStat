@@ -256,13 +256,12 @@ const [scaffold, contract] = await parallel([
     You do NOT own crates/**, src-tauri/src/**, or any React component.
 
     1. 'git init' on main. Per this project's policy: never create a branch. Write a
-       .gitignore covering target/, node_modules/, dist/, .agents/, and the five
-       nested reference checkouts in .settings/reference-code/ (they contain their own .git -
-       they must NOT be added as embedded repos). Keep .settings/reference-code/AGENTS.md
-       tracked. Commit the existing .settings/docs/ and skills/ as the first commit.
+       .gitignore covering target/, node_modules/, dist/, .agents/, and
+       .settings/. Never add nested .git directories as embedded repos.
+       Commit skills/ as part of the first commit.
     2. Scaffold Tauri v2 + React + TypeScript + pnpm into a TEMP directory, inspect
        what it generated, then move its files to the repo root. .settings/docs/, skills/,
-       .settings/reference-code/, and .claude/ are never generator targets and must survive.
+       and .claude/ are never generator targets and must survive.
        'cargo tauri' 2.11.0 is already installed; 'create-tauri-app' is not, so
        'cargo install create-tauri-app --locked' first.
     3. Tailwind CSS v4 via @tailwindcss/vite, CSS-first @theme in src/index.css. No

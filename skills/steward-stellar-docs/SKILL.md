@@ -1,6 +1,6 @@
 ---
 name: steward-stellar-docs
-description: Re-scan, repair, and extend the STELLAR/DOX `AGENTS.md` hierarchy from a committed snapshot, so a documentation pass is a delta against known state rather than a rewrite from memory. Use to run a scheduled or post-change documentation pass, to bring the chain back after it has drifted, to place a new `AGENTS.md` when a folder becomes a durable boundary, to repair orphaned or dangling child-index rows, and to keep the `.settings/reference-code/` index pointing at the third-party checkouts so their code stays findable. Use it as the closeout step of any change that altered structure, contracts, ownership, or workflow. Do not use it to make the code change itself, and do not use it to rewrite a doc whose subtree has not moved.
+description: Re-scan, repair, and extend the STELLAR/DOX `AGENTS.md` hierarchy from a committed snapshot, so a documentation pass is a delta against known state rather than a rewrite from memory. Use to run a scheduled or post-change documentation pass, to bring the chain back after it has drifted, to place a new `AGENTS.md` when a folder becomes a durable boundary, to repair orphaned or dangling child-index rows, and to keep local third-party checkouts findable without adopting them. Use it as the closeout step of any change that altered structure, contracts, ownership, or workflow. Do not use it to make the code change itself, and do not use it to rewrite a doc whose subtree has not moved.
 ---
 
 # Steward STELLAR Docs
@@ -23,7 +23,7 @@ just stellar-snapshot   # accept the current state; refreshes the reference inde
 ## What this owns
 
 Every `AGENTS.md` in the tracked tree, their Child STELLAR Index rows, and
-`.settings/stellar/` (the snapshot and the reference-code index). It owns no
+`.settings/stellar/` (the snapshot). It owns no
 code. A doc claim that a `grep` cannot reproduce is the defect this skill
 exists to remove, so it reads the subtree before it writes the doc.
 
@@ -95,35 +95,11 @@ visible snapshot diff.
   and everything else is copied byte-for-byte. Put the *why* outside the
   markers. Never hand-edit inside them; the next `--write` overwrites it.
 
-## Reference code is indexed, never adopted
+## Upstream clones are never adopted
 
-`.settings/reference-code/` holds third-party checkouts and is gitignored, so
-the clones are invisible to git and their own `AGENTS.md` files are upstream
-documents. `.settings/AGENTS.md` stops the STELLAR chain at itself for exactly
-that reason: `coco-cli/` alone carries ~30 nested `AGENTS.md`, and step 4 of
-Read Before Editing walks an agent straight into them.
-
-`.settings/stellar/reference-index.md` resolves the tension. It is the tracked
-record — status, path, entry points, upstream docs, and which tracked files cite
-the checkout — so `cloudflare-os`'s `packages/gatekeeper-*` is findable in one
-grep without any of it becoming binding. Three rules:
-
-- **A row is never deleted when a clone goes missing.** An absent clone is the
-  normal state of a gitignored checkout; the row flips to `Status: absent` and
-  keeps its prose. Deleting it would lose the only tracked pointer to the source.
-- **Every present checkout carries its own `AGENTS.md` map.** The index row's
-  `Own docs` line is how a reader decides whether a checkout is legible before
-  opening it, so a checkout with no `AGENTS.md` is not properly indexed. When a
-  pass finds one missing, **author it inside the checkout**: a short
-  upstream-style map (purpose, load-bearing paths, license constraints, what to
-  read first) that opens by declaring itself outside the CoCo STELLAR chain and
-  non-binding. It is gitignored like the rest of the clone — the tracked record
-  stays the index row, whose `Own docs` line picks it up on the next
-  `stellar-snapshot`. `compass-ts` is the worked example.
-- **Never edit *upstream* files under `.settings/reference-code/`.** Those edits are
-  invisible to git, unreviewable, and lost on the next clone. Quote what
-  matters into a tracked doc instead. The one exception is the `AGENTS.md` map
-  above, which is ours, additive, and cheap to re-author if a re-clone drops it.
+Gitignored third-party trees are read for behaviour, never copied, never
+vendored, and never added as embedded gitlinks. Quote what matters into a
+tracked doc. Do not edit upstream files in those trees.
 
 ## Placing a new doc
 
@@ -145,9 +121,7 @@ index row. The scan fails an orphan for exactly this reason.
 - Do not rewrite a doc whose subtree did not move. Absence of change is a result.
 - Do not refresh the snapshot to clear a failing check without deciding the loss.
 - Do not add a Verification block naming a command that does not exist.
-- Do not pull `.settings/reference-code/` docs into the chain, or edit upstream files
-  under it. Authoring a missing checkout `AGENTS.md` map (above) is the one
-  sanctioned write.
+- Do not pull gitignored upstream clones into the chain, or edit their files.
 - Do not fix code found during a pass. File it; route it to a primary skill.
 - Do not restate a parent's rule in a child. Duplication drifts; the chain is
   read root-first by contract.

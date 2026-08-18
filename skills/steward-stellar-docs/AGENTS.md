@@ -10,7 +10,7 @@ known state rather than a rewrite from memory.
 
 | Path | Owns |
 | --- | --- |
-| `SKILL.md` | The binding procedure: scan first, work the buckets in order, never lose snapshot content without a decision, index `.settings/reference-code/` instead of adopting it |
+| `SKILL.md` | The binding procedure: scan first, work the buckets in order, never lose snapshot content without a decision, never adopt upstream clones |
 | `agents/openai.yaml` | UI metadata and the default prompt that names this skill |
 
 This folder owns no code. In the repository this skill came from, the scan it

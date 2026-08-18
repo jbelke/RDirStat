@@ -18,9 +18,7 @@ gitignored. It is not part of the public repository.
 
 | Path | Owns |
 | --- | --- |
-| `.settings/docs/` | The design contract — numbered `00`–`10`. Binding, local, gitignored. |
-| `.settings/reference-code/` | Upstream clones, read for reference and never adopted. Gitignored. Chain stops here. |
-| `.settings/` | Local developer material. Never committed. |
+| `.settings/` | Local developer material, including the binding design contract. Gitignored. Never committed. |
 | `skills/` | Five project-carried/installed agent skills, indexed by `skills/AGENTS.md`. |
 | `skills-lock.json` | Source and integrity lock for installed skills; currently pins `rust-skills` |
 | `.agents/` | Installer-managed canonical payload for `rust-skills`; external skill content, not project source |
@@ -34,10 +32,8 @@ gitignored. It is not part of the public repository.
 | `Justfile`, `scripts/` | Local quality/build commands and repository validators |
 | `.github/` | macOS CI workflows |
 
-The project is a git repository on `main`, with a root `.gitignore`. Upstream
-checkouts under `.settings/reference-code/` carry their own `.git` directories
-and must never be added as files or as embedded gitlinks. `.agents/` is
-excluded as an installed payload, which leaves `skills/rust-skills` and
+The project is a git repository on `main`, with a root `.gitignore`. `.agents/`
+is excluded as an installed payload, which leaves `skills/rust-skills` and
 `.claude/skills/rust-skills` as tracked symlinks that dangle in a fresh clone
 until the skills are installed.
 
@@ -45,17 +41,13 @@ until the skills are installed.
 
 - **Present is not implemented.** `crates/`, `src-tauri/`, and `src/` exist, but
   a scaffold is not the scanner. Cite the exact file for landed code.
-- **`.settings/reference-code/` is indexed, never adopted.** Its code is read,
-  quoted, and ported deliberately; it is not built, not vendored, and not
-  edited. The local index is `.settings/reference-code/AGENTS.md`.
 - **69 million inodes on one volume is the design driver.** Every structural
   decision in `.settings/docs/01-ARCHITECTURE.md` — the 48-byte arena node, the
   interned name blob, the single-writer builder, the "node count never appears
   in an IPC payload" rule — exists to survive that number.
-- **Licence asymmetry is load-bearing.** The checkouts carry different licences
-  and they are not interchangeable. `squirreldisk/` is **AGPL-3.0** — copy
-  nothing; take design decisions and implement from scratch. `qdirstat/` is
-  GPL-2.0: port *behaviour* you re-implement from reading, never source text.
+- **Never paste third-party copyleft into this repository.** Re-implement
+  behaviour from reading and tests. A single copied function can poison the
+  commercial license track.
 - **Installed skill payloads are a chain boundary.** `skills/rust-skills` and
   `.claude/skills/rust-skills` point at `.agents/skills/rust-skills`. Do not
   edit generated payloads by hand.

@@ -18,9 +18,8 @@ differ from "bytes physically reclaimable."
 ## Status
 
 In development. The Cargo workspace, Tauri v2 desktop shell, and React 19 +
-Vite + Tailwind v4 frontend are in place. The detailed design contract and
-upstream reference checkouts are **local developer material** under `.settings/`
-and are not part of this repository.
+Vite + Tailwind v4 frontend are in place. Private local developer material
+under `.settings/` is gitignored and is not part of this repository.
 
 ## Requirements
 
@@ -84,9 +83,8 @@ rather than authored here, so it is untracked; `skills/rust-skills` and
 `.claude/skills/rust-skills` are tracked symlinks into it and dangle in a fresh
 clone until the skills are installed. Nothing in the build reads them.
 
-`.settings/` is gitignored local developer material: the numbered design
-contract (`.settings/docs/`) and upstream reference checkouts
-(`.settings/reference-code/`). They are never cloned with this repository.
+`.settings/` is gitignored local developer material and is never cloned
+with this repository.
 
 ## License
 

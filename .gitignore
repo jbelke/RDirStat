@@ -65,8 +65,7 @@ pnpm-debug.log*
 # ---------------------------------------------------------------------------
 .agents/
 .claude/settings.local.json
-# Local developer material: design contract (.settings/docs/) and
-# upstream reference checkouts (.settings/reference-code/). Never public.
+# Local developer material. Never public.
 .settings/
 
 # ---------------------------------------------------------------------------
