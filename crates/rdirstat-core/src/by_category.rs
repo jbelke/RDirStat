@@ -369,7 +369,10 @@ mod tests {
         // be roughly double.
         let totalled: u64 = rows.iter().map(|row| row.allocated).sum();
         let expected = (1 << 10) + (60_u64 << 30) + (4 << 10) + (2 << 10);
-        assert_eq!(totalled, expected, "category rows must partition the files exactly once");
+        assert_eq!(
+            totalled, expected,
+            "category rows must partition the files exactly once"
+        );
         assert_eq!(rows.iter().map(|row| row.files).sum::<u64>(), 5);
     }
 
@@ -418,7 +421,8 @@ mod tests {
         for pair in rows.windows(2) {
             let (left, right) = (pair[0], pair[1]);
             assert!(
-                left.allocated > right.allocated || (left.allocated == right.allocated && left.category < right.category),
+                left.allocated > right.allocated
+                    || (left.allocated == right.allocated && left.category < right.category),
                 "ordering must be total so the table does not reshuffle on redraw"
             );
         }
@@ -510,10 +514,10 @@ mod tests {
         let mut deepest = root;
         for _ in 1..CHAIN {
             let name = builder.intern(b"d").expect("interns");
-            deepest = builder
-                .push_child(deepest, Node::directory(name, 0))
-                .expect("links");
-            builder.register_directory(deepest, DirTotals::EMPTY).expect("registers");
+            deepest = builder.push_child(deepest, Node::directory(name, 0)).expect("links");
+            builder
+                .register_directory(deepest, DirTotals::EMPTY)
+                .expect("registers");
         }
         let bottom_name = builder.intern(b"bottom.mov").expect("interns");
         builder

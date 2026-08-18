@@ -377,13 +377,7 @@ fn read_full(file: &mut fs::File, buffer: &mut [u8]) -> io::Result<usize> {
 /// walked and files that exist only there are never even looked at — correct,
 /// because this operation never touches them. It also keeps memory flat: there
 /// is no map of the destination tree, just one `stat` per source file.
-fn walk(
-    request: SyncRequest<'_>,
-    relative: &Path,
-    cap: usize,
-    entries: &mut Vec<PlannedCopy>,
-    tally: &mut Tally,
-) {
+fn walk(request: SyncRequest<'_>, relative: &Path, cap: usize, entries: &mut Vec<PlannedCopy>, tally: &mut Tally) {
     let (source_root, destination_root) = (request.source, request.destination);
     let (mode, on_differ) = (request.compare_mode, request.on_differ);
     let here = source_root.join(relative);
@@ -479,13 +473,7 @@ fn walk(
 /// Lifted out of [`plan`] for length, and because it is a flat list of
 /// observations rather than part of the decision — the decisions above it were
 /// getting hard to see behind five `if` blocks of prose.
-fn advisories(
-    tally: &Tally,
-    filesystem: &str,
-    available: u64,
-    on_differ: OnDiffer,
-    short: bool,
-) -> Vec<SyncWarning> {
+fn advisories(tally: &Tally, filesystem: &str, available: u64, on_differ: OnDiffer, short: bool) -> Vec<SyncWarning> {
     let mut warnings = Vec::new();
     let plural = |count: u64| if count == 1 { "" } else { "s" };
 
@@ -598,7 +586,12 @@ pub(crate) fn plan<S: BuildHasher>(
     now_unix_ms: i64,
     request: SyncRequest<'_>,
 ) -> Result<SyncPlan, SyncError> {
-    let SyncRequest { source, destination, compare_mode, on_differ } = request;
+    let SyncRequest {
+        source,
+        destination,
+        compare_mode,
+        on_differ,
+    } = request;
     usable(request)?;
 
     let mut entries = Vec::new();
@@ -824,7 +817,10 @@ fn copy_planned(source: &Path, destination: &Path, entries: &[PlannedCopy]) -> R
     if !listed.status.success() {
         return Err("the copy list could not be read back".to_owned());
     }
-    let built_count = String::from_utf8_lossy(&listed.stdout).lines().filter(|line| !line.is_empty()).count();
+    let built_count = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .count();
     if built_count != lines.len() {
         return Err(format!(
             "the copy list describes {built_count} of {} paths; refusing to copy a partial list",
@@ -875,7 +871,9 @@ pub(crate) fn apply<S: BuildHasher>(
     request: SyncRequest<'_>,
     confirmation: &ConfirmationToken,
 ) -> Result<SyncReport, SyncError> {
-    let SyncRequest { source, destination, .. } = request;
+    let SyncRequest {
+        source, destination, ..
+    } = request;
     usable(request)?;
 
     // ONE walk, uncapped. `plan` caps its entry list for display, so this used
@@ -1035,13 +1033,22 @@ mod tests {
         compare_mode: CompareMode,
         on_differ: OnDiffer,
     ) -> SyncRequest<'a> {
-        SyncRequest { source, destination, compare_mode, on_differ }
+        SyncRequest {
+            source,
+            destination,
+            compare_mode,
+            on_differ,
+        }
     }
 
     fn planned(relative_path: &str, bytes: u64, reason: SyncReason) -> PlannedCopy {
         PlannedCopy {
             relative: PathBuf::from(relative_path),
-            entry: SyncEntry { relative_path: relative_path.to_owned(), bytes, reason },
+            entry: SyncEntry {
+                relative_path: relative_path.to_owned(),
+                bytes,
+                reason,
+            },
         }
     }
 
@@ -1159,7 +1166,12 @@ mod tests {
         fs::create_dir_all(&destination).expect("mkdir");
         let keys = RandomState::new();
 
-        let error = plan(&keys, GEN, NOW, request(&source, &destination, CompareMode::Quick, OnDiffer::Skip))
+        let error = plan(
+            &keys,
+            GEN,
+            NOW,
+            request(&source, &destination, CompareMode::Quick, OnDiffer::Skip),
+        )
         .expect_err("nesting must be refused");
         assert!(matches!(error, SyncError::Overlapping { .. }), "got {error:?}");
     }
@@ -1178,7 +1190,13 @@ mod tests {
             !link.starts_with(&real) && !real.starts_with(&link),
             "the two must look disjoint lexically or this proves nothing"
         );
-        let error = plan(&keys, GEN, NOW, request(&real, &link, CompareMode::Quick, OnDiffer::Skip)).expect_err("must refuse");
+        let error = plan(
+            &keys,
+            GEN,
+            NOW,
+            request(&real, &link, CompareMode::Quick, OnDiffer::Skip),
+        )
+        .expect_err("must refuse");
         assert!(matches!(error, SyncError::Overlapping { .. }), "got {error:?}");
     }
 
@@ -1187,7 +1205,12 @@ mod tests {
         let dir = scratch();
         let keys = RandomState::new();
         assert!(
-            plan(&keys, GEN, NOW, request(Path::new("relative"), dir.path(), CompareMode::Quick, OnDiffer::Skip))
+            plan(
+                &keys,
+                GEN,
+                NOW,
+                request(Path::new("relative"), dir.path(), CompareMode::Quick, OnDiffer::Skip)
+            )
             .is_err()
         );
     }
@@ -1228,8 +1251,16 @@ mod tests {
         };
         copy_individually(source.path(), destination.path(), vec![landed, ghost], &mut report);
 
-        assert_eq!(report.copied, 1, "only the entry whose real file exists may be credited");
-        assert_eq!(report.failures.len(), 1, "the other must be reported, got {:?}", report.failures);
+        assert_eq!(
+            report.copied, 1,
+            "only the entry whose real file exists may be credited"
+        );
+        assert_eq!(
+            report.failures.len(),
+            1,
+            "the other must be reported, got {:?}",
+            report.failures
+        );
     }
 
     /// The report may never claim a file was copied that is not there.
@@ -1256,8 +1287,14 @@ mod tests {
 
         // The batch reports success even though `ghost.txt` is not there.
         copy_planned(source.path(), destination.path(), &entries).expect("ditto skips the absent path and exits 0");
-        assert!(destination.path().join("real.txt").exists(), "the real file should have landed");
-        assert!(!destination.path().join("ghost.txt").exists(), "the absent one obviously did not");
+        assert!(
+            destination.path().join("real.txt").exists(),
+            "the real file should have landed"
+        );
+        assert!(
+            !destination.path().join("ghost.txt").exists(),
+            "the absent one obviously did not"
+        );
 
         let mut report = SyncReport {
             generation: GEN,
@@ -1271,7 +1308,12 @@ mod tests {
 
         assert_eq!(report.copied, 1, "only the file that actually landed may be counted");
         assert_eq!(report.bytes_copied, 4);
-        assert_eq!(report.failures.len(), 1, "the skipped file must be reported, got {:?}", report.failures);
+        assert_eq!(
+            report.failures.len(),
+            1,
+            "the skipped file must be reported, got {:?}",
+            report.failures
+        );
         assert_eq!(report.failures[0].relative_path, "ghost.txt");
     }
 
@@ -1292,7 +1334,10 @@ mod tests {
 
         let done = planned("done.txt", 7, SyncReason::Missing);
         let landed = already_landed(&done.entry, &destination.path().join("done.txt"));
-        assert!(landed, "a file already at the destination at the right size must be skipped");
+        assert!(
+            landed,
+            "a file already at the destination at the right size must be skipped"
+        );
 
         // ...but a file whose bytes differ at the same size must NOT be skipped,
         // because that is exactly what ContentDiffers means.
@@ -1340,11 +1385,22 @@ mod tests {
         write(destination.path(), "theirs.txt", b"do not touch");
 
         let keys = RandomState::new();
-        let plan = plan(&keys, GEN, NOW, request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip))
+        let plan = plan(
+            &keys,
+            GEN,
+            NOW,
+            request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip),
+        )
         .expect("plan");
         let token = plan.token.clone().expect("a copyable plan must get a token");
 
-        let report = apply(&keys, GEN, NOW, request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip), &token)
+        let report = apply(
+            &keys,
+            GEN,
+            NOW,
+            request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip),
+            &token,
+        )
         .expect("apply");
 
         assert_eq!(report.copied, 1);
@@ -1447,8 +1503,14 @@ mod tests {
         let report = apply(&keys, GEN, NOW, ask, &token).expect("apply");
 
         assert_eq!(report.copied, 2, "failures: {:?}", report.failures);
-        assert_eq!(fs::read(destination.path().join("we\nird.txt")).expect("read"), b"awkward");
-        assert_eq!(fs::read(destination.path().join("plain.txt")).expect("read"), b"ordinary");
+        assert_eq!(
+            fs::read(destination.path().join("we\nird.txt")).expect("read"),
+            b"awkward"
+        );
+        assert_eq!(
+            fs::read(destination.path().join("plain.txt")).expect("read"),
+            b"ordinary"
+        );
     }
 
     /// Every ancestor of every path, and the root, exactly once.
@@ -1463,7 +1525,10 @@ mod tests {
             planned("top.txt", 1, SyncReason::Missing),
         ];
         let lines: Vec<String> = bom_lines(&entries).into_iter().collect();
-        assert_eq!(lines, vec![".", "./deep", "./deep/nested", "./deep/nested/file.txt", "./top.txt"]);
+        assert_eq!(
+            lines,
+            vec![".", "./deep", "./deep/nested", "./deep/nested/file.txt", "./top.txt"]
+        );
         // Sorted, so a parent always precedes its children — which is the
         // property `mkbom` actually requires.
         assert!(lines.windows(2).all(|pair| pair[0] < pair[1]));
@@ -1491,13 +1556,24 @@ mod tests {
         write(source.path(), "a.txt", b"one");
 
         let keys = RandomState::new();
-        let plan = plan(&keys, GEN, NOW, request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip))
+        let plan = plan(
+            &keys,
+            GEN,
+            NOW,
+            request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip),
+        )
         .expect("plan");
         let token = plan.token.clone().expect("token");
 
         write(source.path(), "surprise.txt", b"appeared after review");
 
-        let error = apply(&keys, GEN, NOW, request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip), &token)
+        let error = apply(
+            &keys,
+            GEN,
+            NOW,
+            request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip),
+            &token,
+        )
         .expect_err("a changed source must invalidate the plan");
         assert!(matches!(error, SyncError::InvalidConfirmation), "got {error:?}");
     }

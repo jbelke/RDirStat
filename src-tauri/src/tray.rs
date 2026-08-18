@@ -393,8 +393,16 @@ mod tests {
         // legal band for a 520-point panel is [-1074, -526], so a NEGATIVE y is
         // perfectly valid here — which is exactly why a naive "reject negative"
         // check would be wrong and a real clamp is needed.
-        assert_eq!(clamp_vertical(-800.0, -1080.0, 1080.0), -800.0, "a legal position is untouched");
-        assert_eq!(clamp_vertical(-2000.0, -1080.0, 1080.0), -1080.0 + PANEL_GAP, "above its own screen");
+        assert_eq!(
+            clamp_vertical(-800.0, -1080.0, 1080.0),
+            -800.0,
+            "a legal position is untouched"
+        );
+        assert_eq!(
+            clamp_vertical(-2000.0, -1080.0, 1080.0),
+            -1080.0 + PANEL_GAP,
+            "above its own screen"
+        );
         assert_eq!(
             clamp_vertical(-241.0, -1080.0, 1080.0),
             -1080.0 + 1080.0 - PANEL_HEIGHT - PANEL_GAP,
@@ -402,8 +410,16 @@ mod tests {
         );
 
         // The primary at the origin: a negative y can only be off-screen.
-        assert_eq!(clamp_vertical(-241.0, 0.0, 1080.0), PANEL_GAP, "above a primary at the origin");
-        assert_eq!(clamp_vertical(30.0, 0.0, 1080.0), 30.0, "just under the menu bar is fine");
+        assert_eq!(
+            clamp_vertical(-241.0, 0.0, 1080.0),
+            PANEL_GAP,
+            "above a primary at the origin"
+        );
+        assert_eq!(
+            clamp_vertical(30.0, 0.0, 1080.0),
+            30.0,
+            "just under the menu bar is fine"
+        );
         assert_eq!(
             clamp_vertical(1000.0, 0.0, 1080.0),
             1080.0 - PANEL_HEIGHT - PANEL_GAP,

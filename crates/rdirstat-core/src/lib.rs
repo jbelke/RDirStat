@@ -187,8 +187,8 @@
 pub mod bands;
 pub mod by_age;
 pub mod by_category;
-mod dirs;
 pub mod diff;
+mod dirs;
 pub mod dupes;
 mod error;
 mod fmt_bytes;
@@ -204,11 +204,11 @@ pub use crate::bands::{SIZE_BAND_COUNT, SIZE_BAND_EDGES, SizeBandEntry, SizeBand
 pub use crate::by_age::{AGE_BUCKET_COUNT, AGE_BUCKET_EDGES, AgeBucketEntry, AgeBucketRow};
 pub use crate::by_category::{CategoryEntry, CategoryRow};
 pub use crate::diff::{DiffMetric, DiffReport, MAX_DIFF_ENTRIES};
+pub use crate::dirs::{DirIndex, DirTotals};
 pub use crate::dupes::{
     DuplicateCandidateCluster, DuplicateCandidateMember, DuplicateCandidateReport, MAX_CLUSTER_MEMBERS,
     MAX_DUPLICATE_CLUSTERS,
 };
-pub use crate::dirs::{DirIndex, DirTotals};
 pub use crate::error::{
     ActionError, ArenaError, CommandError, ErrorClass, ErrorClassCount, Operation, QueryError, ScanError, StartError,
 };

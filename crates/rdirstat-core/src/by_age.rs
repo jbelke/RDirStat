@@ -477,8 +477,22 @@ mod tests {
             .expect("links");
         builder.register_directory(sub, DirTotals::EMPTY).expect("registers");
 
-        push_file(&mut builder, sub, b"quarter.bin", 4 << 20, NOW - 100 * DAY_SECONDS, false);
-        push_file(&mut builder, sub, b"ancient.bin", 8 << 20, NOW - 1000 * DAY_SECONDS, false);
+        push_file(
+            &mut builder,
+            sub,
+            b"quarter.bin",
+            4 << 20,
+            NOW - 100 * DAY_SECONDS,
+            false,
+        );
+        push_file(
+            &mut builder,
+            sub,
+            b"ancient.bin",
+            8 << 20,
+            NOW - 1000 * DAY_SECONDS,
+            false,
+        );
         push_file(&mut builder, sub, b"future.bin", 16 << 20, NOW + 5 * DAY_SECONDS, false);
         push_file(&mut builder, sub, b"clone.bin", 8 << 20, NOW - 1000 * DAY_SECONDS, true);
 
@@ -576,7 +590,11 @@ mod tests {
         let (tree, root) = fixture();
         let entries = age_bucket_entries(&tree, root, NOW, 5, 1).expect("a root");
         assert_eq!(entries.len(), 1, "a bucket of two, capped at one");
-        assert_eq!(entries[0].path.as_str(), "root/sub/ancient.bin", "the heaviest survives");
+        assert_eq!(
+            entries[0].path.as_str(),
+            "root/sub/ancient.bin",
+            "the heaviest survives"
+        );
 
         assert!(
             age_bucket_entries(&tree, root, NOW, 5, 0).expect("a root").is_empty(),
@@ -607,7 +625,10 @@ mod tests {
                 "bucket {bucket} lists a different number of files than it counted"
             );
             let listed: u64 = entries.iter().map(|entry| entry.allocated).sum();
-            assert_eq!(listed, row.allocated, "bucket {bucket} lists different bytes than it counted");
+            assert_eq!(
+                listed, row.allocated,
+                "bucket {bucket} lists different bytes than it counted"
+            );
         }
     }
 }

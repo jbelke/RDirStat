@@ -208,12 +208,13 @@ pub(crate) fn children<S: BuildHasher>(
     // Every non-directory child belongs to the group: the scanner absorbs files,
     // symlinks and special files alike into `direct_*`, so the group's totals
     // already account for all of them and the split has to match.
-    let is_directory = |node: NodeId| {
-        tree.node(node)
-            .is_some_and(|entry| entry.kind().is_directory())
-    };
+    let is_directory = |node: NodeId| tree.node(node).is_some_and(|entry| entry.kind().is_directory());
 
-    let group = if owner.is_some() { None } else { tree.virtual_group(source) };
+    let group = if owner.is_some() {
+        None
+    } else {
+        tree.virtual_group(source)
+    };
     let mut candidates: Vec<NodeId> = if owner.is_some() {
         tree.children(source).filter(|node| !is_directory(*node)).collect()
     } else {
@@ -545,11 +546,7 @@ mod tests {
         let directories = scan
             .tree
             .children(scan.root)
-            .filter(|node| {
-                scan.tree
-                    .node(*node)
-                    .is_some_and(|entry| entry.kind().is_directory())
-            })
+            .filter(|node| scan.tree.node(*node).is_some_and(|entry| entry.kind().is_directory()))
             .count();
         let total = directories + usize::from(scan.tree.virtual_group(scan.root).is_some());
         assert_eq!(seen.len(), total, "every child, once");
@@ -615,10 +612,17 @@ mod tests {
             .expect("a directory with direct files gets a group");
         assert_eq!(group.name, VIRTUAL_GROUP_NAME);
         assert!(group.logical > 0);
-        assert!(group.children > 0, "a group that reports no children draws no disclosure control");
+        assert!(
+            group.children > 0,
+            "a group that reports no children draws no disclosure control"
+        );
 
         let inside = children(&scan, &keys, group.node, Sort::default(), None, 500).expect("the group opens");
-        assert_eq!(inside.rows.len(), group.children as usize, "every counted file is reachable");
+        assert_eq!(
+            inside.rows.len(),
+            group.children as usize,
+            "every counted file is reachable"
+        );
         assert!(
             inside.rows.iter().all(|row| !row.is_virtual_group),
             "a group must not contain another group"

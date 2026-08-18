@@ -761,7 +761,11 @@ impl DiffState {
         // only when the selected one did not move. A file rewritten sparse has
         // the same `st_size` and fewer blocks, and filing that as "unchanged"
         // because the logical column happened not to see it would be a lie.
-        let direction = if selected == 0 { other.signum() } else { selected.signum() };
+        let direction = if selected == 0 {
+            other.signum()
+        } else {
+            selected.signum()
+        };
 
         if direction == 0 {
             let touched = kind_changed
@@ -800,12 +804,18 @@ impl DiffState {
 
     fn into_report(mut self, before: &Tree, after: &Tree, options: DiffOptions) -> DiffReport {
         let mut scratch = Vec::new();
-        let (added_totals, added) = self.added.finish(after, DiffChange::Added, DiffSide::After, &mut scratch);
-        let (removed_totals, removed) = self
-            .removed
-            .finish(before, DiffChange::Removed, DiffSide::Before, &mut scratch);
-        let (grown_totals, grown) = self.grown.finish(after, DiffChange::Grown, DiffSide::After, &mut scratch);
-        let (shrunk_totals, shrunk) = self.shrunk.finish(after, DiffChange::Shrunk, DiffSide::After, &mut scratch);
+        let (added_totals, added) = self
+            .added
+            .finish(after, DiffChange::Added, DiffSide::After, &mut scratch);
+        let (removed_totals, removed) =
+            self.removed
+                .finish(before, DiffChange::Removed, DiffSide::Before, &mut scratch);
+        let (grown_totals, grown) = self
+            .grown
+            .finish(after, DiffChange::Grown, DiffSide::After, &mut scratch);
+        let (shrunk_totals, shrunk) = self
+            .shrunk
+            .finish(after, DiffChange::Shrunk, DiffSide::After, &mut scratch);
 
         self.summary.added = added_totals;
         self.summary.removed = removed_totals;
@@ -887,7 +897,9 @@ mod tests {
                 .builder
                 .push_child(parent, Node::directory(reference, 0))
                 .expect("links");
-            self.builder.register_directory(id, DirTotals::EMPTY).expect("registers");
+            self.builder
+                .register_directory(id, DirTotals::EMPTY)
+                .expect("registers");
             if let Some(totals) = self.builder.dir_totals_mut(parent) {
                 totals.observed_entries = totals.observed_entries.saturating_add(1);
             }
@@ -1207,8 +1219,8 @@ mod tests {
         }
         let (after, after_root) = new.finish();
 
-        let report = diff_trees(&before, before_root, &after, after_root, options().with_limit(5))
-            .expect("roots exist");
+        let report =
+            diff_trees(&before, before_root, &after, after_root, options().with_limit(5)).expect("roots exist");
 
         assert_eq!(report.summary.added.entries, 50, "the count is the truth");
         assert_eq!(report.added.len(), 5, "the list is a leaderboard");

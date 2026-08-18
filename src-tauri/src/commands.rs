@@ -237,9 +237,7 @@ fn browse_blocking(requested: &str) -> BrowseListing {
     // `check_disjoint` used to be fooled into copying a tree into itself.
     let resolved = std::fs::canonicalize(&raw).unwrap_or_else(|_| PathBuf::from(&raw));
     let display = resolved.to_string_lossy().into_owned();
-    let parent = resolved
-        .parent()
-        .map(|parent| parent.to_string_lossy().into_owned());
+    let parent = resolved.parent().map(|parent| parent.to_string_lossy().into_owned());
 
     let entries = match std::fs::read_dir(&resolved) {
         Ok(entries) => entries,
@@ -1854,7 +1852,12 @@ pub(crate) async fn remote_plan(
     state: tauri::State<'_, AppState>,
     request: TransferRequest,
 ) -> Result<RemotePlanView, RemoteConfigError> {
-    let TransferRequest { source, target, compare, on_differ } = request;
+    let TransferRequest {
+        source,
+        target,
+        compare,
+        on_differ,
+    } = request;
     let source = PathBuf::from(&source);
     if !source.is_absolute() {
         return Err(RemoteConfigError::Invalid(
@@ -1943,7 +1946,12 @@ pub(crate) async fn transfer_enqueue(
     request: TransferRequest,
     confirmation: ConfirmationToken,
 ) -> Result<TransferJob, RemoteConfigError> {
-    let TransferRequest { source, target, compare, on_differ } = request.clone();
+    let TransferRequest {
+        source,
+        target,
+        compare,
+        on_differ,
+    } = request.clone();
     let source_path = PathBuf::from(&source);
     if !source_path.is_absolute() {
         return Err(RemoteConfigError::Invalid(

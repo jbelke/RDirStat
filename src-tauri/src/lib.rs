@@ -50,9 +50,9 @@ mod state;
 mod storage;
 mod sync;
 mod token;
-mod verify;
 mod transfers;
 mod tray;
+mod verify;
 mod volumes;
 
 pub use crate::events::{ScanProgressEvent, TransferProgressEvent};

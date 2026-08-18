@@ -139,7 +139,11 @@ pub(crate) fn verify(scan: &CompletedScan, nodes: &[NodeId]) -> VerifyReport {
         // Stable output: the same set of files must produce the same report
         // twice, and a HashMap's order does not.
         members.sort_unstable();
-        groups.push(VerifiedGroup { digest, nodes: members, bytes });
+        groups.push(VerifiedGroup {
+            digest,
+            nodes: members,
+            bytes,
+        });
     }
 
     // Biggest recovery first — the reason anyone opened this panel.
@@ -150,7 +154,12 @@ pub(crate) fn verify(scan: &CompletedScan, nodes: &[NodeId]) -> VerifyReport {
     });
     unique.sort_unstable();
 
-    VerifyReport { groups, unique, failed, bytes_read }
+    VerifyReport {
+        groups,
+        unique,
+        failed,
+        bytes_read,
+    }
 }
 
 struct Hashed {
@@ -174,7 +183,11 @@ fn hash_prefix(scan: &CompletedScan, node: NodeId, limit: u64) -> Result<Hashed,
     })?;
     let size = file
         .metadata()
-        .map_err(|error| VerifyFailure { node, path: display.clone(), reason: error.to_string() })?
+        .map_err(|error| VerifyFailure {
+            node,
+            path: display.clone(),
+            reason: error.to_string(),
+        })?
         .len();
 
     let mut reader = BufReader::new(file);
@@ -184,9 +197,11 @@ fn hash_prefix(scan: &CompletedScan, node: NodeId, limit: u64) -> Result<Hashed,
 
     while read < limit {
         let want = usize::try_from((limit - read).min(READ_CHUNK as u64)).unwrap_or(READ_CHUNK);
-        let got = reader
-            .read(&mut buffer[..want])
-            .map_err(|error| VerifyFailure { node, path: display.clone(), reason: error.to_string() })?;
+        let got = reader.read(&mut buffer[..want]).map_err(|error| VerifyFailure {
+            node,
+            path: display.clone(),
+            reason: error.to_string(),
+        })?;
         if got == 0 {
             break;
         }

@@ -364,13 +364,7 @@ fn count_by_size(tree: &Tree, start: NodeId) -> SizeCensus {
 /// The sample is the lowest node ids — arena order, i.e. the order the scanner
 /// met them — so it is a function of the tree rather than of the traversal, and
 /// two runs over one snapshot list the same rows.
-fn sample_members(
-    tree: &Tree,
-    start: NodeId,
-    index: &HashMap<u64, usize>,
-    picked: &mut [Picked],
-    member_limit: usize,
-) {
+fn sample_members(tree: &Tree, start: NodeId, index: &HashMap<u64, usize>, picked: &mut [Picked], member_limit: usize) {
     walk_files(tree, start, |id, size| {
         let Some(slot) = index.get(&size).copied().and_then(|at| picked.get_mut(at)) else {
             return;
@@ -490,7 +484,9 @@ pub fn duplicate_candidates(
     let files_in_clusters = ranked
         .iter()
         .fold(0_u64, |sum, (_, _, count)| sum.saturating_add(u64::from(*count)));
-    let potential_recovery_upper_bytes = ranked.iter().fold(0_u64, |sum, (upper, _, _)| sum.saturating_add(*upper));
+    let potential_recovery_upper_bytes = ranked
+        .iter()
+        .fold(0_u64, |sum, (upper, _, _)| sum.saturating_add(*upper));
 
     // Rank by what the user came for — space — and not by file size: ten copies
     // of a 3 MB asset outrank two copies of a 10 MB one. Size breaks the tie, and
@@ -565,7 +561,9 @@ mod tests {
                 .builder
                 .push_child(parent, Node::directory(reference, 0))
                 .expect("links");
-            self.builder.register_directory(id, DirTotals::EMPTY).expect("registers");
+            self.builder
+                .register_directory(id, DirTotals::EMPTY)
+                .expect("registers");
             id
         }
 
@@ -664,7 +662,10 @@ mod tests {
         );
         assert_eq!(report.potential_recovery_upper_bytes, 1 << 20);
         assert!(
-            !cluster.members.iter().any(|member| member.path.as_str().contains("second-name")),
+            !cluster
+                .members
+                .iter()
+                .any(|member| member.path.as_str().contains("second-name")),
             "a repeat must not be offered for deletion"
         );
     }
@@ -680,7 +681,11 @@ mod tests {
         let (tree, root) = fixture.finish();
 
         let report = report(&tree, root);
-        let flagged: Vec<bool> = report.clusters[0].members.iter().map(|member| member.hard_linked).collect();
+        let flagged: Vec<bool> = report.clusters[0]
+            .members
+            .iter()
+            .map(|member| member.hard_linked)
+            .collect();
         assert_eq!(flagged, vec![true, false]);
     }
 
@@ -693,7 +698,10 @@ mod tests {
         let (tree, root) = fixture.finish();
 
         let report = report(&tree, root);
-        assert!(report.clusters.is_empty(), "the biggest same-size group on a disk is worth nothing");
+        assert!(
+            report.clusters.is_empty(),
+            "the biggest same-size group on a disk is worth nothing"
+        );
         assert_eq!(report.empty_files_skipped, 3, "skipped, but visibly so");
     }
 
@@ -712,7 +720,11 @@ mod tests {
 
         let report = report(&tree, root);
         assert_eq!(report.clusters.len(), 2);
-        assert_eq!(report.clusters[0].logical_bytes, 3 << 20, "27 MiB of upside outranks 10");
+        assert_eq!(
+            report.clusters[0].logical_bytes,
+            3 << 20,
+            "27 MiB of upside outranks 10"
+        );
         assert_eq!(report.clusters[0].potential_recovery_upper_bytes, 27 << 20);
         assert_eq!(report.clusters[1].potential_recovery_upper_bytes, 10 << 20);
         assert_eq!(report.potential_recovery_upper_bytes, 37 << 20);
@@ -736,7 +748,11 @@ mod tests {
         // The headline total describes everything found, so it does not shrink
         // when the list is shortened.
         assert_eq!(report.potential_recovery_upper_bytes, (1 + 2 + 3 + 4 + 5) * 4096);
-        assert_eq!(report.clusters[0].logical_bytes, 5 * 4096, "the heaviest survives the cap");
+        assert_eq!(
+            report.clusters[0].logical_bytes,
+            5 * 4096,
+            "the heaviest survives the cap"
+        );
     }
 
     #[test]
@@ -817,7 +833,10 @@ mod tests {
         let (tree, root) = fixture.finish();
 
         let group = NodeId::virtual_group_of(root).expect("a group id");
-        assert_eq!(duplicate_candidates(&tree, group, 0, 0), duplicate_candidates(&tree, root, 0, 0));
+        assert_eq!(
+            duplicate_candidates(&tree, group, 0, 0),
+            duplicate_candidates(&tree, root, 0, 0)
+        );
     }
 
     #[test]

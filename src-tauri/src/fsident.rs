@@ -12,9 +12,7 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
 use std::path::{Component, Path, PathBuf};
 
-use rdirstat_core::{
-    ActionError, CompletedScan, DisplayPath, Kind, NodeId, Operation, QueryError, flags,
-};
+use rdirstat_core::{ActionError, CompletedScan, DisplayPath, Kind, NodeId, Operation, QueryError, flags};
 
 /// What a fresh `lstat` says about a path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,5 +250,4 @@ mod tests {
         assert!(observed.device > 0);
         assert!(!observed.executable);
     }
-
 }
