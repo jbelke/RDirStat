@@ -10,19 +10,17 @@
  * and in CI, so "are these still the branded icons?" is a question `git
  * status` can answer.
  *
- * The `.icns` is the one exception: it is assembled by `iconutil`, which only
- * exists on macOS. Elsewhere the iconset directory is left on disk and the
- * existing `.icns` is untouched rather than replaced with something wrong.
+ * That includes the `.icns`, which is written here rather than handed to
+ * `iconutil`: `iconutil` is macOS-only AND its output is not byte-stable
+ * across runs, so it can neither run in the container nor be checked.
  *
  * Nothing here reads the Tauri v2 template icons. That is the whole point:
  * every file under src-tauri/icons/ is generated from THIS file.
  */
 
 import { Buffer } from "node:buffer";
-import { spawnSync } from "node:child_process";
 import { deflateSync } from "node:zlib";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -385,7 +383,6 @@ const OUT_ROOT = OUT_FLAG === -1 ? ROOT : resolve(process.argv[OUT_FLAG + 1]);
 
 const written = [];
 const drifted = [];
-const skipped = [];
 
 const relative = (path) => path.replace(`${ROOT}/`, "");
 const relocate = (path) => (OUT_ROOT === ROOT ? path : join(OUT_ROOT, relative(path)));
@@ -463,36 +460,58 @@ function traySvg() {
 `;
 }
 
+/**
+ * Writes the `.icns` directly, rather than shelling out to `iconutil`.
+ *
+ * Not a preference — a correctness requirement. `iconutil` is not
+ * byte-deterministic: two runs over identical input PNGs produce files of the
+ * same length and different content, which makes `--check` fail at random and
+ * therefore useless as a gate. It is also macOS-only, so it would have left a
+ * hole in the one asset that matters most on macOS.
+ *
+ * The container is simple: an `icns` magic, the total length, then typed
+ * chunks each carrying its own length. Every type below has accepted an
+ * embedded PNG since 10.7, and the ten of them are exactly the set `iconutil`
+ * emits from a full iconset.
+ */
 function buildIcns() {
-  // Always assembled in a temp directory and then handed to `emit`, so
-  // `--check` and `--out` behave for the .icns exactly as they do for every
-  // other asset instead of needing a second code path.
-  const workdir = mkdtempSync(join(tmpdir(), "stellar-icons-"));
+  const members = [
+    ["icp4", 16], // 16x16
+    ["ic11", 32], // 16x16@2x
+    ["icp5", 32], // 32x32
+    ["ic12", 64], // 32x32@2x
+    ["ic07", 128], // 128x128
+    ["ic13", 256], // 128x128@2x
+    ["ic08", 256], // 256x256
+    ["ic14", 512], // 256x256@2x
+    ["ic09", 512], // 512x512
+    ["ic10", 1024], // 512x512@2x
+  ];
 
-  try {
-    if (process.platform !== "darwin") {
-      skipped.push("src-tauri/icons/icon.icns (macOS packaging is unavailable)");
-      return;
-    }
+  const chunks = members.map(([ostype, size]) => {
+    const png = encodePng(drawMark(size));
+    const head = Buffer.alloc(8);
+    head.write(ostype, 0, "ascii");
+    head.writeUInt32BE(png.length + 8, 4);
+    return Buffer.concat([head, png]);
+  });
 
-    // Tauri's icon packager accepts the renderer's PNG directly and produces
-    // a valid ICNS on current macOS releases, whose iconutil rejects these
-    // otherwise-valid hand-written PNGs as an iconset.
-    const source = join(workdir, "icon.png");
-    const output = join(workdir, "tauri");
-    writeFileSync(source, encodePng(drawMark(1024)));
-    const result = spawnSync(
-      "pnpm",
-      ["exec", "tauri", "icon", "--output", output, source],
-      { stdio: "inherit" },
-    );
-    if (result.status !== 0) {
-      throw new Error(`Tauri icon packaging failed with status ${result.status}`);
-    }
-    emit(join(ICONS, "icon.icns"), readFileSync(join(output, "icon.icns")));
-  } finally {
-    rmSync(workdir, { recursive: true, force: true });
+  // The table of contents is optional, but `iconutil` writes one and readers
+  // use it to seek without walking every chunk. It lists the type and length
+  // of each chunk that follows it.
+  const toc = Buffer.alloc(8 + chunks.length * 8);
+  toc.write("TOC ", 0, "ascii");
+  toc.writeUInt32BE(toc.length, 4);
+  for (const [index, chunk] of chunks.entries()) {
+    chunk.copy(toc, 8 + index * 8, 0, 8);
   }
+
+  const body = Buffer.concat([toc, ...chunks]);
+  const header = Buffer.alloc(8);
+  header.write("icns", 0, "ascii");
+  header.writeUInt32BE(body.length + 8, 4);
+
+  emit(join(ICONS, "icon.icns"), Buffer.concat([header, body]));
 }
 
 function main() {
@@ -532,10 +551,6 @@ function main() {
   emit(join(PUBLIC, "stellar-rdirstat.svg"), Buffer.from(markSvg({ size: 32, radius: 220 })));
 
   buildIcns();
-
-  for (const note of skipped) {
-    console.warn(`! skipped ${note}`);
-  }
 
   if (!CHECK) {
     console.log(`Generated ${written.length} brand assets under ${OUT_ROOT}:`);
