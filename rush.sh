@@ -283,10 +283,7 @@ cmd_icons() {
   require node
   say "Regenerating brand assets"
   run_cmd node scripts/generate-icons.mjs
-  if [ "$(uname -s)" != "Darwin" ]; then
-    warn "icon.icns was left alone: iconutil is macOS-only. Re-run this on a Mac"
-    warn "before building a release, or the app ships a stale Dock icon."
-  fi
+  note "every asset, .icns included, is written in-process — this works on any platform."
 }
 
 cmd_verify() {
@@ -435,6 +432,7 @@ cmd_up() {
   [ "$NO_BUILD" -eq 1 ] || extra+=(--build)
   [ "$DETACH" -eq 1 ] && extra+=(-d)
   resolve_environment
+  load_environment
   say "Starting the '$PROFILE' compose profile"
   case "$PROFILE" in
     development|dev) note "Vite dev server → http://localhost:${DEV_PORT:-1420}" ;;
@@ -475,7 +473,6 @@ cmd_doctor() {
   say "macOS packaging"
   if [ "$(uname -s)" = "Darwin" ]; then
     report_tool "xcode-select" xcode-select "xcode-select -p" "required for a .dmg"
-    report_tool "iconutil" iconutil "echo present" "required to regenerate icon.icns"
     report_tool "hdiutil" hdiutil "echo present" "required to assemble the .dmg"
     if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
       ok "APPLE_SIGNING_IDENTITY is set"

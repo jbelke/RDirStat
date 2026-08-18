@@ -39,6 +39,9 @@ pnpm-debug.log*
 *.duckdb.wal
 *.parquet
 /scans/
+# Per-environment scratch: snapshot stores the .env.<environment> templates
+# point at. Data, never source.
+/.local/
 /bench-results/
 /criterion/
 

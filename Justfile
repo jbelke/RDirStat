@@ -42,6 +42,17 @@ test-js:
 check-docs:
     node scripts/check-docs.mjs
 
+# Regenerate every brand asset from scripts/generate-icons.mjs.
+icons:
+    node scripts/generate-icons.mjs
+
+# In the gate because the failure it catches is silent: nothing about a build
+# tells you the Dock icon reverted to the Tauri v2 template.
+#
+# Assert the committed icons are still the generated, branded ones.
+check-icons:
+    node scripts/generate-icons.mjs --check
+
 # Compatibility names used by the repository's documentation stewardship skill.
 stellar-scan: check-docs
 
@@ -54,7 +65,7 @@ frontend:
     pnpm build
 
 # Run the deterministic local quality gate (no network required after bootstrap).
-check: check-docs fmt lint test test-js frontend
+check: check-docs check-icons fmt lint test test-js frontend
 
 # Report Rust and JavaScript dependency advisories/licenses. Requires cargo-deny.
 audit:
@@ -69,6 +80,17 @@ build:
     cargo build --workspace --all-features
     pnpm build
 
+# `./rush.sh dev` is the same thing with an environment file and the
+# development bundle identifier applied; this stays as the unadorned form.
+#
 # Open the Tauri development application.
 dev:
     pnpm tauri dev
+
+# Build the branded, installable macOS disk image (production by default).
+dmg:
+    ./rush.sh dmg
+
+# Build the staging disk image, which installs beside the release build.
+dmg-staging:
+    ./rush.sh dmg -e staging
