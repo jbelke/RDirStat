@@ -53,6 +53,7 @@ mod sync;
 mod token;
 mod transfers;
 mod tray;
+mod updates;
 mod verify;
 mod volumes;
 
@@ -119,6 +120,9 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::trash_preview,
             commands::move_to_trash,
             commands::reveal_in_finder,
+            commands::preferences,
+            commands::set_theme,
+            commands::check_for_updates,
             commands::sync_diff,
             commands::sync_plan,
             commands::sync_apply,

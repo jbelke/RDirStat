@@ -49,6 +49,17 @@ tauri-plugin-opener = "2.5.4"
 # `capabilities/default.json`, so the webview gains no filesystem API from it.
 tauri-plugin-dialog = "2.7.2"
 
+# Used for one thing: asking GitHub whether a newer release exists when the
+# user presses "Check for updates" in About. Adds ZERO crates — opendal already
+# builds reqwest for its HTTP transport, so this is a direct handle on a
+# dependency that is compiled either way. `default-features = false` plus
+# native-tls matches opendal's feature selection so the two unify instead of
+# pulling a second TLS stack; see the transport note in the workspace manifest.
+reqwest = { version = "0.13.4", default-features = false, features = [
+  "json",
+  "native-tls",
+] }
+
 serde = { workspace = true }
 serde_json = { workspace = true }
 # The workspace reserves anyhow for rdirstat-cli and src-tauri
