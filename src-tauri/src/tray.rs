@@ -224,13 +224,14 @@ fn position_panel(window: &tauri::WebviewWindow, anchor: Option<tauri::Rect>) ->
     let left = f64::from(monitor.position().x) / scale;
     let top = f64::from(monitor.position().y) / scale;
     let width = f64::from(monitor.size().width) / scale;
+    let height = f64::from(monitor.size().height) / scale;
 
     let Some(rect) = anchor else {
         // No anchor: top-right, inset by the same gap the anchored case uses,
         // and below the menu bar rather than under it.
         return window.set_position(Position::Logical(LogicalPosition::new(
             left + width - PANEL_WIDTH - PANEL_GAP,
-            top + MENU_BAR_POINTS,
+            clamp_vertical(top + MENU_BAR_POINTS, top, height),
         )));
     };
 
@@ -247,9 +248,32 @@ fn position_panel(window: &tauri::WebviewWindow, anchor: Option<tauri::Rect>) ->
     // push the panel off the screen it belongs to.
     let centred = icon_left + icon_width / 2.0 - PANEL_WIDTH / 2.0;
     let x = clamp_to_monitor(centred, left, width);
-    let y = icon_top + icon_height + PANEL_GAP;
+    // Clamped vertically for the same reason as horizontally, which the first
+    // version simply forgot. A menu bar on a display arranged ABOVE the primary
+    // has a negative origin in the global space, so `icon_top` is negative and
+    // the panel lands above every attached screen — observed at y = -241, on a
+    // window macOS will not let the user move. Unlike a window that is merely
+    // awkwardly placed, that one cannot be recovered by hand.
+    let y = clamp_vertical(icon_top + icon_height + PANEL_GAP, top, height);
 
     window.set_position(Position::Logical(LogicalPosition::new(x, y)))
+}
+
+/// Keeps the panel's top edge inside `[top, top + height]`, gap included.
+///
+/// The horizontal clamp existed from the start; this one did not, and its
+/// absence is what let the panel open off-screen. Both axes can go wrong for
+/// the same reason — a monitor whose origin is negative in the global
+/// coordinate space, which is what a display arranged above or left of the
+/// primary produces — so treating the axes differently was the bug rather than
+/// an oversight in the arithmetic.
+///
+/// A monitor shorter than the panel still yields a defined answer rather than
+/// an inverted range, exactly as the horizontal clamp does.
+fn clamp_vertical(y: f64, monitor_top: f64, monitor_height: f64) -> f64 {
+    let min = monitor_top + PANEL_GAP;
+    let max = monitor_top + monitor_height - PANEL_HEIGHT - PANEL_GAP;
+    if max <= min { min } else { y.clamp(min, max) }
 }
 
 /// Keeps the panel's left edge inside `[left, left + width]`, gap included.
@@ -339,5 +363,55 @@ mod tests {
             opaque > 0,
             "a template icon with no opaque pixels renders as an empty slot"
         );
+    }
+
+    /// The bug this pins: the panel opened at y = -241, above every attached
+    /// display, on a Mac with a screen arranged ABOVE the primary. A monitor in
+    /// that position has a negative origin in the global coordinate space, so
+    /// the tray icon's own top is negative and the panel inherited it.
+    ///
+    /// Horizontal was clamped from the start and vertical was not, which is why
+    /// this survived: the axes can fail identically and only one of them was
+    /// defended.
+    ///
+    /// It is worse than an awkward position. macOS does not let the user move
+    /// this window, and Accessibility reports it as present but unmovable — so
+    /// an off-screen panel is unreachable by any means the user has.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn the_panel_never_opens_above_the_screen_it_belongs_to() {
+        use super::{PANEL_GAP, PANEL_HEIGHT, clamp_vertical};
+
+        // A display mounted above the primary: origin y = -1080, 1080 tall. Its
+        // legal band for a 520-point panel is [-1074, -526], so a NEGATIVE y is
+        // perfectly valid here — which is exactly why a naive "reject negative"
+        // check would be wrong and a real clamp is needed.
+        assert_eq!(clamp_vertical(-800.0, -1080.0, 1080.0), -800.0, "a legal position is untouched");
+        assert_eq!(clamp_vertical(-2000.0, -1080.0, 1080.0), -1080.0 + PANEL_GAP, "above its own screen");
+        assert_eq!(
+            clamp_vertical(-241.0, -1080.0, 1080.0),
+            -1080.0 + 1080.0 - PANEL_HEIGHT - PANEL_GAP,
+            "far enough down that the panel would hang off the bottom"
+        );
+
+        // The primary at the origin: a negative y can only be off-screen.
+        assert_eq!(clamp_vertical(-241.0, 0.0, 1080.0), PANEL_GAP, "the observed failure");
+        assert_eq!(clamp_vertical(30.0, 0.0, 1080.0), 30.0, "just under the menu bar is fine");
+        assert_eq!(
+            clamp_vertical(1000.0, 0.0, 1080.0),
+            1080.0 - PANEL_HEIGHT - PANEL_GAP,
+            "below the bottom edge is pulled back up"
+        );
+    }
+
+    /// A monitor shorter than the panel must still produce a defined answer
+    /// rather than an inverted range — the same guarantee the horizontal clamp
+    /// makes for a narrow one.
+    #[allow(clippy::float_cmp)]
+    #[test]
+    fn a_screen_shorter_than_the_panel_still_yields_a_position() {
+        use super::{PANEL_GAP, clamp_vertical};
+        assert_eq!(clamp_vertical(500.0, 0.0, 200.0), PANEL_GAP);
+        assert_eq!(clamp_vertical(-500.0, 0.0, 200.0), PANEL_GAP);
     }
 }
