@@ -1180,9 +1180,6 @@ pub(crate) fn apply<S: BuildHasher>(
     request: SyncRequest<'_>,
     confirmation: &ConfirmationToken,
 ) -> Result<SyncReport, SyncError> {
-    let SyncRequest {
-        source, destination, ..
-    } = request;
     usable(request)?;
 
     // ONE walk, uncapped. `plan` caps its entry list for display, so this used
@@ -1206,6 +1203,72 @@ pub(crate) fn apply<S: BuildHasher>(
     };
     token::verify(keys, confirmation, generation, now_unix_ms, &[identity])
         .map_err(|_| SyncError::InvalidConfirmation)?;
+
+    Ok(copy_walked(request, generation, all))
+}
+
+/// Runs a sync that a saved schedule authorises.
+///
+/// **Takes no [`ConfirmationToken`] and mints none.** That is the point, not an
+/// omission. A confirmation means "a human looked at this exact file set and
+/// these exact counts, moments ago", and [`apply`] re-walks and re-verifies the
+/// shape so that meaning cannot drift. A schedule can never satisfy it — the
+/// whole purpose of scheduling is that the set at run time differs from any set
+/// a human reviewed, which is precisely the case a confirmation exists to
+/// reject. Minting one here would silently weaken every other call site's
+/// guarantee, invisibly, from a distance.
+///
+/// So the authority is different in kind: a schedule authorises a **policy** —
+/// this source, this destination, additive only — and never a **set**. The two
+/// are different objects and are deliberately spelled differently, so that the
+/// day someone wants scheduled runs to replace differing files it reads as an
+/// obvious widening of a named policy rather than as a flag flip on something
+/// called a confirmation.
+///
+/// It takes the request in parts rather than a [`SyncRequest`] for the same
+/// reason: [`OnDiffer`] is not a parameter here. It is forced to `Skip`, and a
+/// caller has no way to ask otherwise.
+///
+/// **This function does not check that the destination is the disk the schedule
+/// meant.** That is [`crate::schedules`]'s job and it must happen before this
+/// is called — see the device-identity check there, which is what stops a
+/// schedule filling an unmounted mount point on the boot disk.
+///
+/// # Errors
+///
+/// [`SyncError`] for a path that is relative, missing, not a directory, or that
+/// overlaps the other side.
+pub(crate) fn apply_scheduled(
+    generation: TreeGeneration,
+    source: &Path,
+    destination: &Path,
+    compare_mode: CompareMode,
+) -> Result<SyncReport, SyncError> {
+    let request = SyncRequest {
+        source,
+        destination,
+        compare_mode,
+        on_differ: OnDiffer::Skip,
+    };
+    usable(request)?;
+
+    let mut all = Vec::new();
+    let mut tally = Tally::default();
+    walk(request, Path::new(""), usize::MAX, &mut all, &mut tally);
+
+    Ok(copy_walked(request, generation, all))
+}
+/// Copies an already-walked set.
+///
+/// The half of applying that runs *after* something authorised it, shared by
+/// both entry points on purpose: a confirmed sync and a scheduled one must do
+/// exactly the same thing to the disk. What differs between them is what
+/// allowed them to run, and that difference belongs in the callers rather than
+/// in two copies of the copy logic that drift apart one bug fix at a time.
+fn copy_walked(request: SyncRequest<'_>, generation: TreeGeneration, all: Vec<PlannedCopy>) -> SyncReport {
+    let SyncRequest {
+        source, destination, ..
+    } = request;
 
     let mut report = SyncReport {
         generation,
@@ -1249,7 +1312,7 @@ pub(crate) fn apply<S: BuildHasher>(
     copy_individually(source, destination, batchable, &mut report);
     copy_individually(source, destination, individual, &mut report);
 
-    Ok(report)
+    report
 }
 
 /// True when a file the fallback is about to copy is already at the destination.

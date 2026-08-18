@@ -28,6 +28,7 @@ use crate::engine::{self, ScanOutcome, ScanRequest};
 use crate::query::Ancestor;
 use crate::relocate::{RelocateError, RelocateMode, RelocatePlan, RelocateReport, SourceDisposal};
 use crate::remote::{self, RemoteConfigError};
+use crate::schedules::SyncSchedule;
 use crate::settings::Theme;
 use crate::state::AppState;
 use crate::storage::{self, StorageReport};
@@ -59,7 +60,7 @@ const MAX_ERROR_SAMPLES: usize = 200;
 /// move alone.
 use rdirstat_core::MAX_REPORT_ENTRIES as MAX_BAND_ENTRIES;
 
-fn now_unix_ms() -> i64 {
+pub(crate) fn now_unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -1423,6 +1424,170 @@ pub(crate) async fn set_theme(app: tauri::AppHandle, theme: Theme) -> Result<Pre
 #[specta::specta]
 pub(crate) async fn check_for_updates() -> Result<ReleaseCheck, CommandError> {
     crate::updates::check().await.map_err(CommandError::Internal)
+}
+
+/// Every saved unattended sync.
+///
+/// # Errors
+///
+/// [`CommandError::Internal`] if the app data directory cannot be located.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn sync_schedules(app: tauri::AppHandle) -> Result<Vec<SyncSchedule>, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_data =
+            crate::snapshot_store::app_data_dir(&app).map_err(|error| CommandError::Internal(error.to_string()))?;
+        Ok(crate::settings::load(&app_data).schedules)
+    })
+    .await
+    .map_err(|error| CommandError::Internal(error.to_string()))?
+}
+
+/// One schedule as the form supplies it.
+///
+/// Bundled rather than passed as eight parameters, four of which are strings
+/// and two of which are bools — an argument list that long is one transposition
+/// away from syncing the destination into the source.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, specta::Type)]
+pub(crate) struct ScheduleInput {
+    /// Empty creates; anything else updates the schedule with that id.
+    pub id: String,
+    pub name: String,
+    pub source: String,
+    pub destination: String,
+    pub compare_mode: CompareMode,
+    pub every_minutes: u32,
+    pub enabled: bool,
+}
+
+/// Creates or updates one schedule, and returns the whole set.
+///
+/// An empty `id` creates. Saving records the device id of both endpoints so
+/// that [`crate::schedules::verify_endpoints`] has something to compare against
+/// before every later run — which is what stops a schedule writing to an
+/// unmounted mount point on the boot disk.
+///
+/// # Errors
+///
+/// [`CommandError::Internal`] with the validation reason for a path that is
+/// relative, missing, not a folder, or that overlaps the other side.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn save_sync_schedule(
+    app: tauri::AppHandle,
+    schedule: ScheduleInput,
+) -> Result<Vec<SyncSchedule>, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let ScheduleInput {
+            id,
+            name,
+            source,
+            destination,
+            compare_mode,
+            every_minutes,
+            enabled,
+        } = schedule;
+        let app_data =
+            crate::snapshot_store::app_data_dir(&app).map_err(|error| CommandError::Internal(error.to_string()))?;
+        let (source, destination) = (PathBuf::from(source), PathBuf::from(destination));
+        crate::schedules::validate(&source, &destination).map_err(CommandError::Internal)?;
+
+        let mut settings = crate::settings::load(&app_data);
+        let interval = every_minutes.max(crate::schedules::MINIMUM_INTERVAL_MINUTES);
+        let named = if name.trim().is_empty() {
+            source
+                .file_name()
+                .map_or_else(|| "Sync".to_owned(), |name| name.to_string_lossy().into_owned())
+        } else {
+            name.trim().to_owned()
+        };
+
+        match settings.schedules.iter_mut().find(|schedule| schedule.id == id) {
+            Some(existing) => {
+                existing.name = named;
+                existing.source.clone_from(&source);
+                existing.destination.clone_from(&destination);
+                existing.compare_mode = compare_mode;
+                existing.every_minutes = interval;
+                existing.enabled = enabled;
+                // Re-recorded, because the endpoints may have been edited to
+                // point somewhere else entirely.
+                existing.source_device = crate::schedules::device_of(&source);
+                existing.destination_device = crate::schedules::device_of(&destination);
+            }
+            None => settings.schedules.push(SyncSchedule {
+                // Not random: `Math.random` equivalents are unavailable in
+                // some of this workspace's contexts and a collision here would
+                // merge two schedules' histories. A monotonic count plus the
+                // clock is enough for a list a human curates by hand.
+                id: format!("s{}-{}", settings.schedules.len() + 1, now_unix_ms()),
+                name: named,
+                source_device: crate::schedules::device_of(&source),
+                destination_device: crate::schedules::device_of(&destination),
+                source,
+                destination,
+                compare_mode,
+                every_minutes: interval,
+                enabled,
+                last_run_unix_ms: None,
+                history: Vec::new(),
+            }),
+        }
+
+        crate::settings::save(&app_data, &settings)
+            .map_err(|error| CommandError::Internal(format!("could not save the schedule: {error}")))?;
+        Ok(settings.schedules)
+    })
+    .await
+    .map_err(|error| CommandError::Internal(error.to_string()))?
+}
+
+/// Removes one schedule.
+///
+/// # Errors
+///
+/// [`CommandError::Internal`] if the settings file cannot be written.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn delete_sync_schedule(app: tauri::AppHandle, id: String) -> Result<Vec<SyncSchedule>, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_data =
+            crate::snapshot_store::app_data_dir(&app).map_err(|error| CommandError::Internal(error.to_string()))?;
+        let mut settings = crate::settings::load(&app_data);
+        settings.schedules.retain(|schedule| schedule.id != id);
+        crate::settings::save(&app_data, &settings)
+            .map_err(|error| CommandError::Internal(format!("could not save the schedule: {error}")))?;
+        Ok(settings.schedules)
+    })
+    .await
+    .map_err(|error| CommandError::Internal(error.to_string()))?
+}
+
+/// Runs one schedule now, without waiting for it to come due.
+///
+/// **Long-running and blocking.** Takes the same path an unattended run takes,
+/// endpoint verification included — a "run now" that skipped the checks would
+/// be a different operation wearing the same name, and would not tell the user
+/// whether the scheduled version is going to work.
+///
+/// # Errors
+///
+/// [`CommandError::Internal`] if the app data directory cannot be located. A
+/// refusal is a successful call reporting a refusal, not an error.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn run_sync_schedule_now(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<Vec<SyncSchedule>, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_data =
+            crate::snapshot_store::app_data_dir(&app).map_err(|error| CommandError::Internal(error.to_string()))?;
+        crate::schedules::run_now(&app_data, &id, now_unix_ms());
+        Ok(crate::settings::load(&app_data).schedules)
+    })
+    .await
+    .map_err(|error| CommandError::Internal(error.to_string()))?
 }
 
 /// Mounted local volumes, for the launch screen.

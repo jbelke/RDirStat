@@ -402,6 +402,50 @@ export const commands = {
 	 */
 	checkForUpdates: () => typedError<ReleaseCheck, CommandError>(__TAURI_INVOKE("check_for_updates")),
 	/**
+	 *  Every saved unattended sync.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`CommandError::Internal`] if the app data directory cannot be located.
+	 */
+	syncSchedules: () => typedError<SyncSchedule_Serialize[], CommandError>(__TAURI_INVOKE("sync_schedules")),
+	/**
+	 *  Creates or updates one schedule, and returns the whole set.
+	 * 
+	 *  An empty `id` creates. Saving records the device id of both endpoints so
+	 *  that [`crate::schedules::verify_endpoints`] has something to compare against
+	 *  before every later run — which is what stops a schedule writing to an
+	 *  unmounted mount point on the boot disk.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`CommandError::Internal`] with the validation reason for a path that is
+	 *  relative, missing, not a folder, or that overlaps the other side.
+	 */
+	saveSyncSchedule: (schedule: ScheduleInput) => typedError<SyncSchedule_Serialize[], CommandError>(__TAURI_INVOKE("save_sync_schedule", { schedule })),
+	/**
+	 *  Removes one schedule.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`CommandError::Internal`] if the settings file cannot be written.
+	 */
+	deleteSyncSchedule: (id: string) => typedError<SyncSchedule_Serialize[], CommandError>(__TAURI_INVOKE("delete_sync_schedule", { id })),
+	/**
+	 *  Runs one schedule now, without waiting for it to come due.
+	 * 
+	 *  **Long-running and blocking.** Takes the same path an unattended run takes,
+	 *  endpoint verification included — a "run now" that skipped the checks would
+	 *  be a different operation wearing the same name, and would not tell the user
+	 *  whether the scheduled version is going to work.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`CommandError::Internal`] if the app data directory cannot be located. A
+	 *  refusal is a successful call reporting a refusal, not an error.
+	 */
+	runSyncScheduleNow: (id: string) => typedError<SyncSchedule_Serialize[], CommandError>(__TAURI_INVOKE("run_sync_schedule_now", { id })),
+	/**
 	 *  What two folders each hold, for the side-by-side view.
 	 * 
 	 *  Symmetric and read-only. It takes a left and a right rather than a source
@@ -2387,6 +2431,31 @@ export type RuleSyntax =
  */
 "regex";
 
+/**  What happened the last time a schedule ran. */
+export type RunOutcome = 
+/**  Files were copied, or there was nothing to copy. Carries the count. */
+{ outcome: "copied"; detail: {
+	files: number,
+	bytes: number,
+} } | 
+/**  Refused before touching anything, with the reason. */
+{ outcome: "refused"; detail: string } | 
+/**  The sync ran and reported per-file failures. */
+{ outcome: "failed"; detail: string };
+
+/**
+ *  One entry in a schedule's own log.
+ * 
+ *  Kept so that when something copies 400 GB at 03:00 the user can find out
+ *  what did it. A record that said "confirmed" would be a lie — the whole
+ *  point is that nobody confirmed anything at 03:00 — so these name the
+ *  schedule and nothing else.
+ */
+export type RunRecord = {
+	at_unix_ms: number,
+	outcome: RunOutcome,
+};
+
 /**
  *  Entry and node counts for one scan.
  * 
@@ -2785,6 +2854,24 @@ export type ScanTotals = {
 	 *  is not a promise of uniquely reclaimable space.
 	 */
 	allocated: number,
+};
+
+/**
+ *  One schedule as the form supplies it.
+ * 
+ *  Bundled rather than passed as eight parameters, four of which are strings
+ *  and two of which are bools — an argument list that long is one transposition
+ *  away from syncing the destination into the source.
+ */
+export type ScheduleInput = {
+	/**  Empty creates; anything else updates the schedule with that id. */
+	id: string,
+	name: string,
+	source: string,
+	destination: string,
+	compare_mode: CompareMode,
+	every_minutes: number,
+	enabled: boolean,
 };
 
 /**
@@ -3227,6 +3314,51 @@ export type SyncReport = {
 	bytes_copied: number,
 	/**  Per-file failures. A sync continues past one bad file. */
 	failures: SyncFailure[],
+};
+
+/**  A saved, unattended sync. */
+export type SyncSchedule = SyncSchedule_Serialize | SyncSchedule_Deserialize;
+
+/**  A saved, unattended sync. */
+export type SyncSchedule_Deserialize = {
+	/**  Stable across edits, so run history survives a rename. */
+	id: string,
+	name: string,
+	source: string,
+	destination: string,
+	compare_mode: CompareMode,
+	every_minutes: number,
+	enabled: boolean,
+	/**
+	 *  The device ids observed when the schedule was saved. `None` for a
+	 *  schedule written before this existed, which is treated as "unverified"
+	 *  and re-recorded on the next successful run rather than as "matches".
+	 */
+	source_device?: number | null,
+	destination_device?: number | null,
+	last_run_unix_ms?: number | null,
+	history?: RunRecord[],
+};
+
+/**  A saved, unattended sync. */
+export type SyncSchedule_Serialize = {
+	/**  Stable across edits, so run history survives a rename. */
+	id: string,
+	name: string,
+	source: string,
+	destination: string,
+	compare_mode: CompareMode,
+	every_minutes: number,
+	enabled: boolean,
+	/**
+	 *  The device ids observed when the schedule was saved. `None` for a
+	 *  schedule written before this existed, which is treated as "unverified"
+	 *  and re-recorded on the next successful run rather than as "matches".
+	 */
+	source_device?: number | null,
+	destination_device?: number | null,
+	last_run_unix_ms?: number | null,
+	history?: RunRecord[],
 };
 
 /**  Something the user should read before confirming. */

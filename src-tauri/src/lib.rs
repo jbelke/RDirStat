@@ -45,6 +45,7 @@ mod progress;
 mod query;
 mod relocate;
 mod remote;
+mod schedules;
 mod settings;
 mod snapshot_store;
 mod state;
@@ -123,6 +124,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::preferences,
             commands::set_theme,
             commands::check_for_updates,
+            commands::sync_schedules,
+            commands::save_sync_schedule,
+            commands::delete_sync_schedule,
+            commands::run_sync_schedule_now,
             commands::sync_diff,
             commands::sync_plan,
             commands::sync_apply,
@@ -251,6 +256,44 @@ fn install_tracing() {
 /// The frontend needs no signal: it polls `scan_status` while nothing is
 /// published, and this turns that poll into `Ready` with a generation, which is
 /// the same transition a finished scan produces.
+/// Starts the tick that runs unattended syncs.
+///
+/// One minute is the resolution, not the frequency: a tick loads the settings
+/// file, asks each schedule whether it is due, and almost always does nothing.
+/// The shortest interval a schedule may have is fifteen minutes, so the common
+/// case is a cheap read of a small JSON file once a minute.
+///
+/// Everything happens on a blocking thread because a sync is `ditto` and file
+/// I/O, and it is deliberately serial: two schedules that come due in the same
+/// minute run one after the other rather than competing for the same disk.
+///
+/// A missing app data directory is not a reason to refuse to start. Schedules
+/// simply do not run, which is the same state as having none.
+fn start_schedule_timer(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let Ok(app_data) = snapshot_store::app_data_dir(&app) else {
+            tracing::warn!("no app data directory; scheduled syncs are off for this run");
+            return;
+        };
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        // The first tick fires immediately, which would run every overdue
+        // schedule during launch — competing with the snapshot restore for the
+        // disk at the exact moment the user is waiting for a window.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let app_data = app_data.clone();
+            let ran =
+                tauri::async_runtime::spawn_blocking(move || schedules::run_due(&app_data, commands::now_unix_ms()))
+                    .await;
+            match ran {
+                Ok(0) | Err(_) => {}
+                Ok(count) => tracing::info!(count, "scheduled syncs finished"),
+            }
+        }
+    });
+}
+
 fn restore_last_scan(app: tauri::AppHandle) {
     let spawned = std::thread::Builder::new()
         .name("rdirstat-restore".to_owned())
@@ -349,6 +392,7 @@ pub fn run() -> tauri::Result<()> {
                 tracing::error!(%error, "could not create the tray icon; continuing without a menu-bar presence");
             }
             restore_last_scan(app.handle().clone());
+            start_schedule_timer(app.handle().clone());
             Ok(())
         })
         // Closing the main window hides it — the app stays in the menu bar and

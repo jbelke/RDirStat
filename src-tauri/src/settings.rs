@@ -83,6 +83,10 @@ pub(crate) struct Settings {
     /// key set to the default should not be different states on disk.
     #[serde(skip_serializing_if = "Theme::is_system")]
     pub(crate) theme: Theme,
+    /// Unattended folder syncs. Empty for everyone who has not made one, and
+    /// skipped when empty so the file stays `{}`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) schedules: Vec<crate::schedules::SyncSchedule>,
 }
 
 /// Which colour scheme the window uses.

@@ -3,8 +3,7 @@
  *
  * ## Only what exists
  *
- * There is one preference here today, and the panel says nothing about the
- * ones that do not exist yet. That is the same rule the tray panel and the
+ * The panel says nothing about preferences that do not exist yet. That is the same rule the tray panel and the
  * storage panel already follow: a settings page that lists unbuilt options
  * makes the built ones look provisional, and roadmap belongs in the repository
  * rather than in a surface someone opened to change something now.
@@ -21,6 +20,7 @@
 import { Loader2, MonitorSmartphone, Moon, Sun } from "lucide-react";
 
 import { SegmentedControl } from "@/components/SegmentedControl";
+import { SyncSchedules } from "@/components/SyncSchedules";
 import type { ThemeChoice } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 
@@ -83,6 +83,8 @@ export function SettingsPanel({
       </Row>
 
       {error !== null && <p className="mt-3 text-xs text-destructive">{error}</p>}
+
+      <SyncSchedules className="mt-3" />
     </div>
   );
 }
