@@ -279,9 +279,19 @@ export function StoragePanel({
         </p>
       </header>
 
-      <section className="mb-4 rounded border border-border/60 p-3">
+      {/* The store's own settings, deliberately not shaped like the scans below.
+        * Both used to be a bordered card with the same radius and the same
+        * border, which made the configured location read as the first row of
+        * the list — one item among the scans rather than the thing that
+        * contains them. A filled surface and a heavier border say "this is the
+        * setting", and the list gets a heading of its own so the boundary is
+        * stated rather than implied by spacing. */}
+      <section className="mb-6 rounded-lg border border-border bg-muted/30 p-4">
+        <h3 className="mb-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          Where scans are saved
+        </h3>
         <Location report={report} onReveal={onRevealDirectory} onChange={onChangeDirectory} />
-        <dl className="mt-2 grid grid-cols-3 gap-2 text-xs">
+        <dl className="mt-3 grid grid-cols-3 gap-2 text-xs">
           <Stat label="Saved scans" value={report.snapshots.length.toLocaleString()} />
           <Stat label="Disk used" value={formatSI(report.totalBytes)} />
           <Stat
@@ -291,6 +301,18 @@ export function StoragePanel({
           />
         </dl>
       </section>
+
+      {/* Only when there is a list to head. An empty store's explanation is its
+        * own answer and does not need a title above it. */}
+      {report.directoryState !== "missing" && report.snapshots.length > 0 && (
+        <div className="mb-2 flex items-baseline gap-2 border-t border-border/60 pt-4">
+          <h3 className="text-xs font-medium">Saved scans</h3>
+          <span className="text-xs text-muted-foreground">
+            {report.snapshots.length.toLocaleString()}
+            {report.snapshots.length === 1 ? " scan" : " scans"}, newest first
+          </span>
+        </div>
+      )}
 
       {report.directoryState === "missing" ? (
         <p className="text-sm text-muted-foreground">
