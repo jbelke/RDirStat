@@ -88,11 +88,18 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
 
 FROM deps AS test
 WORKDIR /app
-COPY tsconfig.json tsconfig.node.json vite.config.ts components.json index.html ./
-COPY scripts ./scripts
-COPY public ./public
-COPY src ./src
-COPY README.md AGENTS.md CLAUDE.md LICENSING.md ./
+
+# The whole context, not a hand-picked list. Two of these checks reach outside
+# the frontend on purpose: `categories.test.ts` reads
+# crates/rdirstat-classify/src/defaults.rs so the TypeScript category table
+# cannot drift from the Rust one, and check-docs walks the Markdown under
+# crates/ and src-tauri/. Enumerating files here means every such check is one
+# rename away from failing in the container and nowhere else.
+#
+# node_modules, target/ and the secrets are excluded by .dockerignore, so this
+# stays small; it costs a cache miss per source change, which is the right
+# trade for a job that only runs on demand.
+COPY . .
 CMD ["sh", "-c", "pnpm typecheck && pnpm test && node scripts/check-docs.mjs"]
 
 # ---------------------------------------------------------------------------

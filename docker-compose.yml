@@ -9,9 +9,9 @@
 #   ./rush.sh up dev                 Vite dev server         http://localhost:1420
 #   ./rush.sh up staging             built bundle, nginx     http://localhost:4174
 #   ./rush.sh up prod                built bundle, nginx     http://localhost:4175
-#   ./rush.sh run check              typecheck + tests + docs
-#   ./rush.sh run rust               fmt/clippy/test, portable crates
-#   ./rush.sh run assets             regenerate the brand icons
+#   ./rush.sh compose run --build --rm check              typecheck + tests + docs
+#   ./rush.sh compose run --build --rm rust               fmt/clippy/test, portable crates
+#   ./rush.sh compose run --build --rm assets             regenerate the brand icons
 #
 # or the same thing by hand:
 #
