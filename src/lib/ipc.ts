@@ -37,6 +37,7 @@ import {
   type LayoutKind,
   type Operation,
   type RelocatePlan,
+  type RunOutcome,
   type ScanError,
   type ScanOptions,
   type ScanState,
@@ -44,6 +45,7 @@ import {
   type Sort,
   type SortDirection,
   type SortKey,
+  type SyncSchedule_Serialize,
   type TransferJob,
 } from "@/lib/bindings";
 import { IpcError, MAX_CHILD_PAGE, num, SCAN_PROGRESS_EVENT, unwrap, type NumLike } from "@/lib/wire";
@@ -1256,6 +1258,99 @@ export async function syncDiff(
     leftAvailable: num(result.left_available),
     rightAvailable: num(result.right_available),
   };
+}
+
+/** What happened on one unattended run. */
+export type ScheduleOutcomeView =
+  | { readonly kind: "copied"; readonly files: number; readonly bytes: number }
+  | { readonly kind: "refused"; readonly reason: string }
+  | { readonly kind: "failed"; readonly reason: string };
+
+export interface ScheduleRunView {
+  readonly atUnixMs: number;
+  readonly outcome: ScheduleOutcomeView;
+}
+
+/**
+ * A saved unattended sync.
+ *
+ * `sourceDevice`/`destinationDevice` are the volumes the schedule was saved
+ * against. They are re-checked before every run — a folder that still exists
+ * on a different device is an unmounted mount point, and syncing to one fills
+ * the startup disk instead of the disk the user meant.
+ */
+export interface SyncScheduleView {
+  readonly id: string;
+  readonly name: string;
+  readonly source: string;
+  readonly destination: string;
+  readonly compareMode: CompareMode;
+  readonly everyMinutes: number;
+  readonly enabled: boolean;
+  readonly lastRunUnixMs: number | null;
+  readonly history: readonly ScheduleRunView[];
+}
+
+function toOutcome(outcome: RunOutcome): ScheduleOutcomeView {
+  if (outcome.outcome === "copied") {
+    return { kind: "copied", files: num(outcome.detail.files), bytes: num(outcome.detail.bytes) };
+  }
+  return { kind: outcome.outcome, reason: outcome.detail };
+}
+
+function toSchedule(row: SyncSchedule_Serialize): SyncScheduleView {
+  return {
+    id: row.id,
+    name: row.name,
+    source: row.source,
+    destination: row.destination,
+    compareMode: row.compare_mode,
+    everyMinutes: num(row.every_minutes),
+    enabled: row.enabled,
+    lastRunUnixMs: row.last_run_unix_ms ?? null,
+    history: (row.history ?? []).map((record) => ({
+      atUnixMs: num(record.at_unix_ms),
+      outcome: toOutcome(record.outcome),
+    })),
+  };
+}
+
+export async function syncSchedules(): Promise<readonly SyncScheduleView[]> {
+  return (await unwrap("sync_schedules", commands.syncSchedules())).map(toSchedule);
+}
+
+/** An empty `id` creates a new schedule. */
+export async function saveSyncSchedule(input: {
+  id: string;
+  name: string;
+  source: string;
+  destination: string;
+  compareMode: CompareMode;
+  everyMinutes: number;
+  enabled: boolean;
+}): Promise<readonly SyncScheduleView[]> {
+  const saved = await unwrap(
+    "save_sync_schedule",
+    commands.saveSyncSchedule({
+      id: input.id,
+      name: input.name,
+      source: input.source,
+      destination: input.destination,
+      compare_mode: input.compareMode,
+      every_minutes: input.everyMinutes,
+      enabled: input.enabled,
+    }),
+  );
+  return saved.map(toSchedule);
+}
+
+export async function deleteSyncSchedule(id: string): Promise<readonly SyncScheduleView[]> {
+  return (await unwrap("delete_sync_schedule", commands.deleteSyncSchedule(id))).map(toSchedule);
+}
+
+/** Long-running: takes the same path an unattended run takes, checks included. */
+export async function runSyncScheduleNow(id: string): Promise<readonly SyncScheduleView[]> {
+  return (await unwrap("run_sync_schedule_now", commands.runSyncScheduleNow(id))).map(toSchedule);
 }
 
 export async function syncPlan(
