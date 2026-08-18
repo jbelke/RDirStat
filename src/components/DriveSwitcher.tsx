@@ -1,6 +1,6 @@
 /**
  * Choose which drive is on screen. Lives in the breadcrumb, between the app
- * name and the path — `RDirStat › [NATO ⌄] › /Volumes/NATO`.
+ * name and the path — `RDirStat › [Archive ⌄] › /Volumes/Archive`.
  *
  * Without this, changing disks means navigating back to the Volumes route and
  * losing your place — which is a strange amount of ceremony for the question

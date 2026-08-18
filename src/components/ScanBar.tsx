@@ -49,7 +49,7 @@ export interface ScanBarProps {
    * The drive on screen, as a path. When it changes, the field resets to it.
    *
    * A path typed against the old drive is not merely unhelpful after a switch,
-   * it is wrong in a way that looks right: `/Volumes/NATO/TBD` left sitting in
+   * it is wrong in a way that looks right: `/Volumes/Archive/TBD` left sitting in
    * the field while `tuf8tb` is on screen reads as "this is where you are" and
    * is not. Resetting to the new root replaces a stale answer with a true one,
    * and leaves the field somewhere useful to type onward from.

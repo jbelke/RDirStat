@@ -93,7 +93,7 @@ export function volumeForRoot<V extends CoverageVolume>(
 /** Whether `root` is a volume's mount point rather than a directory inside it. */
 export function isVolumeRoot(volume: CoverageVolume | null, root: string | null): boolean {
   if (volume === null || root === null) return false;
-  // Trailing-slash tolerant: "/" and "/Volumes/NATO/" both name their mount.
+  // Trailing-slash tolerant: "/" and "/Volumes/Archive/" both name their mount.
   const strip = (path: string) => (path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path);
   return strip(root) === strip(volume.mountPoint);
 }

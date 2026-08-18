@@ -152,8 +152,8 @@ fn complete_path_blocking(prefix: &str) -> Vec<String> {
         })
         .collect();
 
-    // Case-insensitively, so `/Volumes/n` does not sort `NATO` away from
-    // `nato-scratch`. macOS is case-insensitive by default and the ordering
+    // Case-insensitively, so `/Volumes/a` does not sort `Archive` away from
+    // `archive-scratch`. macOS is case-insensitive by default and the ordering
     // should not contradict the matching.
     matches.sort_by_key(|path| path.to_lowercase());
     matches.truncate(MAX_PATH_COMPLETIONS);

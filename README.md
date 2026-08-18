@@ -1,8 +1,8 @@
 # RDirStat
 
-**STELLAR-RDIRSTAT** — a native macOS disk-usage and file-inventory app. A
-Tauri v2 + Rust rewrite of [QDirStat](https://github.com/shundhammer/qdirstat)
-built to answer two questions over volumes with tens of millions of entries:
+A native macOS disk-usage and file-inventory app. A Tauri v2 + Rust rewrite of
+[QDirStat](https://github.com/shundhammer/qdirstat) built to answer two questions
+over volumes with tens of millions of entries:
 
 1. Where is the selected tree's logical and allocated space concentrated?
 2. What kinds of files account for it, and what changed between saved scans?
@@ -88,7 +88,7 @@ with this repository.
 
 ## License
 
-RDirStat (STELLAR-RDIRSTAT) is dual-licensed.
+RDirStat is dual-licensed.
 
 - **Open source:** [GNU AGPL-3.0-only](LICENSE). Free to use, modify, and
   redistribute, provided derivatives stay AGPL-3.0-only, the attribution in

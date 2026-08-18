@@ -32,8 +32,8 @@ import {
 } from "./scanProgress.ts";
 
 const MACINTOSH_HD: CoverageVolume = { mountPoint: "/", usedBytes: 967_000_000_000 };
-const NATO: CoverageVolume = { mountPoint: "/Volumes/NATO", usedBytes: 135_000_000_000 };
-const VOLUMES = [MACINTOSH_HD, NATO];
+const ARCHIVE: CoverageVolume = { mountPoint: "/Volumes/Archive", usedBytes: 135_000_000_000 };
+const VOLUMES = [MACINTOSH_HD, ARCHIVE];
 
 function progress(overrides: Partial<CoverageProgress> = {}): CoverageProgress {
   return {
@@ -50,8 +50,8 @@ test("volumeForRoot prefers the most specific mount over the root filesystem", (
   // "/" is a prefix of every path, so a naive prefix match would always answer
   // "Macintosh HD" and every external volume's coverage would be measured
   // against the wrong disk.
-  assert.equal(volumeForRoot(VOLUMES, "/Volumes/NATO"), NATO);
-  assert.equal(volumeForRoot(VOLUMES, "/Volumes/NATO/projects"), NATO);
+  assert.equal(volumeForRoot(VOLUMES, "/Volumes/Archive"), ARCHIVE);
+  assert.equal(volumeForRoot(VOLUMES, "/Volumes/Archive/projects"), ARCHIVE);
 });
 
 test("volumeForRoot falls back to the root filesystem for a path on no other volume", () => {
@@ -59,8 +59,8 @@ test("volumeForRoot falls back to the root filesystem for a path on no other vol
 });
 
 test("volumeForRoot does not match a sibling whose name merely starts the same way", () => {
-  // "/Volumes/NATO-backup" must not resolve to the "/Volumes/NATO" volume.
-  assert.equal(volumeForRoot(VOLUMES, "/Volumes/NATO-backup"), MACINTOSH_HD);
+  // "/Volumes/Archive-backup" must not resolve to the "/Volumes/Archive" volume.
+  assert.equal(volumeForRoot(VOLUMES, "/Volumes/Archive-backup"), MACINTOSH_HD);
 });
 
 test("volumeForRoot has no answer without a root", () => {
@@ -71,12 +71,12 @@ test("volumeForRoot has no answer without a root", () => {
 test("isVolumeRoot distinguishes a whole volume from a directory inside it", () => {
   assert.equal(isVolumeRoot(MACINTOSH_HD, "/"), true);
   assert.equal(isVolumeRoot(MACINTOSH_HD, "/Users/josh"), false);
-  assert.equal(isVolumeRoot(NATO, "/Volumes/NATO"), true);
-  assert.equal(isVolumeRoot(NATO, "/Volumes/NATO/projects"), false);
+  assert.equal(isVolumeRoot(ARCHIVE, "/Volumes/Archive"), true);
+  assert.equal(isVolumeRoot(ARCHIVE, "/Volumes/Archive/projects"), false);
 });
 
 test("isVolumeRoot tolerates a trailing slash", () => {
-  assert.equal(isVolumeRoot(NATO, "/Volumes/NATO/"), true);
+  assert.equal(isVolumeRoot(ARCHIVE, "/Volumes/Archive/"), true);
 });
 
 test("a whole-volume scan measures bytes against the volume", () => {

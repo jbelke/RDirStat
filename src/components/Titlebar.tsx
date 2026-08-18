@@ -55,7 +55,7 @@ export interface TitlebarProps {
   onOpenSettings?: () => void;
   /**
    * Rendered **inside the breadcrumb**, between the app name and the scan
-   * root: `RDirStat › [NATO ⌄] › /Volumes/NATO`.
+   * root: `RDirStat › [Archive ⌄] › /Volumes/Archive`.
    *
    * That position is the point of it. Which drive you are looking at is the
    * outermost fact about the tree on screen — one level above the scan root —

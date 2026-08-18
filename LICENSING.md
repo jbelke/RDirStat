@@ -1,6 +1,6 @@
 # Licensing
 
-RDirStat (STELLAR-RDIRSTAT) is dual-licensed. Pick the track that matches what you are doing.
+RDirStat is dual-licensed. Pick the track that matches what you are doing.
 
 | | Open source track | Commercial track |
 | --- | --- | --- |
