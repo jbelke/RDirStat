@@ -51,7 +51,20 @@ export interface LayoutRequest {
    * present null.
    */
   readonly categories: readonly number[] | null;
+  /**
+   * Which byte count the tile AREAS encode.
+   *
+   * The toolbar's logical/allocated choice is not a label on the numbers, it is
+   * the picture: a treemap laid out from allocated bytes while the toolbar says
+   * "Logical" draws a compressed or cloned file at a size the user has no way
+   * to reconcile with the figure beside it. `undefined` leaves the backend's
+   * default (allocated).
+   */
+  readonly metric?: SizeMetric;
 }
+
+/** Which byte count a size is. Mirrors `rdirstat_treemap::SizeMetric`. */
+export type SizeMetric = "logical" | "allocated";
 
 /**
  * Fetches the Arrow IPC bytes for one `layout` call. Injectable so the shell can

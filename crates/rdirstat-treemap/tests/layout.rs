@@ -945,3 +945,105 @@ fn a_filter_keeps_directories_that_only_match_deeper_down() {
     );
     assert!(area_of(&tiles, &tree, b"code") < f32::EPSILON);
 }
+
+// ------------------------------------------------- the metric drives areas --
+
+/// A file whose two byte counts disagree by three orders of magnitude, beside
+/// one where they agree.
+///
+/// This is the shape APFS produces every day — a sparse file, a clone, a
+/// compressed binary — and it is the only shape that can tell a layout drawn
+/// from allocated bytes apart from one drawn from logical bytes.
+///
+/// ```text
+/// root
+///   sparse/sparse.bin   8 GiB logical, 0 allocated
+///   solid/solid.bin   300 MiB logical, 300 MiB allocated
+/// ```
+fn divergent_tree() -> Tree {
+    const SPARSE_LOGICAL: u64 = 8 * 1024 * 1024 * 1024;
+    const SOLID: u64 = 300 * 1024 * 1024;
+
+    let mut builder = TreeBuilder::new();
+    let root = push_dir(&mut builder, None, b"root").expect("root");
+
+    let sparse_dir = push_dir(&mut builder, Some(root), b"sparse").expect("sparse dir");
+    let name = builder.intern(b"sparse.bin").expect("intern");
+    builder
+        .push_child(sparse_dir, Node::leaf(name, Kind::File, SPARSE_LOGICAL, 0, MTIME))
+        .expect("sparse.bin");
+    if let Some(totals) = builder.dir_totals_mut(sparse_dir) {
+        totals.absorb_direct_file(SPARSE_LOGICAL, 0, MTIME);
+    }
+
+    let solid_dir = push_dir(&mut builder, Some(root), b"solid").expect("solid dir");
+    push_file(&mut builder, solid_dir, b"solid.bin", SOLID).expect("solid.bin");
+
+    builder.rollup().expect("rollup");
+    builder.finish().expect("finish")
+}
+
+/// The share of the drawn top-level area taken by the tile named `wanted`.
+///
+/// Named rather than positional: `Tree::children` does not promise insertion
+/// order, and a share computed against the wrong sibling is a test that passes
+/// for the wrong reason.
+fn area_share(tiles: &TileBuffer, tree: &Tree, wanted: &[u8]) -> f64 {
+    let total: f64 = tiles
+        .iter()
+        .filter(|tile| tile.depth == 1)
+        .map(|tile| f64::from(tile.w) * f64::from(tile.h))
+        .sum();
+    let mine: f64 = tiles
+        .iter()
+        .filter(|tile| tile.depth == 1 && tree.name_bytes(tile.node) == Some(wanted))
+        .map(|tile| f64::from(tile.w) * f64::from(tile.h))
+        .sum();
+    if total <= 0.0 { 0.0 } else { mine / total }
+}
+
+/// The size metric selects which byte count the AREAS encode.
+///
+/// The bug this pins was reported from a screenshot: the toolbar said
+/// "Logical", the tiles were laid out from allocated bytes, and the figures in
+/// the tooltip could not be reconciled with the rectangle under the cursor. An
+/// 8 GiB sparse file that occupies no blocks is the extreme case — it must
+/// dominate a logical layout and vanish from an allocated one.
+#[test]
+fn the_size_metric_decides_which_bytes_the_areas_encode() {
+    let tree = divergent_tree();
+    let root = NodeId::ROOT;
+
+    let viewport = Viewport {
+        width: 1_000.0,
+        height: 600.0,
+        device_pixel_ratio: 1.0,
+    };
+
+    let allocated = LayoutOptions::new(LayoutKind::Treemap, viewport, 1.0)
+        .expect("options")
+        .with_metric(SizeMetric::Allocated);
+    let logical = LayoutOptions::new(LayoutKind::Treemap, viewport, 1.0)
+        .expect("options")
+        .with_metric(SizeMetric::Logical);
+
+    let by_allocated = layout_tiles(&tree, root, &allocated).expect("allocated layout");
+    let by_logical = layout_tiles(&tree, root, &logical).expect("logical layout");
+
+    let allocated_share = area_share(&by_allocated, &tree, b"sparse");
+    let logical_share = area_share(&by_logical, &tree, b"sparse");
+    let solid_allocated = area_share(&by_allocated, &tree, b"solid");
+
+    assert!(
+        allocated_share < 0.01,
+        "a file that occupies no blocks must not occupy the canvas: {allocated_share}"
+    );
+    assert!(
+        logical_share > 0.90,
+        "8 GiB of logical bytes beside 300 MiB must dominate a logical layout: {logical_share}"
+    );
+    assert!(
+        solid_allocated > 0.99,
+        "and the file that does occupy blocks must own the allocated layout: {solid_allocated}"
+    );
+}

@@ -31,6 +31,7 @@ export type {
   NodeDescription,
   SelectionChange,
   SelectionSource,
+  SizeMetric,
   Viewport,
 } from "./types.ts";
 export { LAYOUT_KINDS } from "./types.ts";

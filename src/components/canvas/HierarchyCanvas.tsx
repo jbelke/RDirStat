@@ -40,6 +40,7 @@ import type {
   LayoutKind,
   NodeDescriber,
   SelectionChange,
+  SizeMetric,
   SelectionSource,
 } from "./types.ts";
 import { useLayoutBatch } from "./useLayoutBatch.ts";
@@ -105,6 +106,11 @@ export interface HierarchyCanvasProps {
    * the click instant feedback.
    */
   readonly categoryFilter?: readonly number[] | null;
+  /**
+   * Which byte count the tile areas encode. The shell owns the toolbar toggle;
+   * the canvas draws whatever it is handed and says so in the tooltip.
+   */
+  readonly metric?: SizeMetric;
   readonly onNavigate?: (node: number, stack: readonly number[]) => void;
   readonly onPaint?: (report: PaintReport) => void;
 
@@ -145,6 +151,7 @@ export function HierarchyCanvas({
   trashEnabled = false,
   colorBy = "category",
   categoryFilter = null,
+  metric = "allocated",
   onNavigate,
   onPaint,
   formatBytes = formatSi,
@@ -202,6 +209,10 @@ export function HierarchyCanvas({
     height: size.height,
     devicePixelRatio,
     minPx,
+    // Which byte count the AREAS encode. Sent to the backend rather than
+    // applied here: geometry is Rust's, and a picture that disagreed with the
+    // toolbar would be the exact ambiguity the toggle exists to remove.
+    metric,
     // Re-proportioning, not just recolouring: the backend drops filtered-out
     // bytes from the areas, so a kept category fills the canvas instead of
     // keeping the share it had in the unfiltered view.
@@ -548,6 +559,8 @@ export function HierarchyCanvas({
           logical={hoveredDescription?.logical === undefined ? null : formatBytes(hoveredDescription.logical)}
           allocated={hoveredDescription?.allocated === undefined ? null : formatBytes(hoveredDescription.allocated)}
           share={hoveredShare}
+          areaMetric={metric}
+          filtered={filterSet !== null}
           visible={hover !== null && menu === null}
           reducedMotion={reducedMotion}
         />

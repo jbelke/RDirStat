@@ -47,6 +47,7 @@ mod settings;
 mod snapshot_store;
 mod state;
 mod storage;
+mod sync;
 mod token;
 mod tray;
 mod volumes;

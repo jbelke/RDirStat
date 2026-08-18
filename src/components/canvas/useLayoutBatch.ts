@@ -16,7 +16,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { decodeLayoutBatch } from "./arrow.ts";
 import { LayoutError, describeTransportFailure } from "./errors.ts";
 import { normalizeGeneration } from "./generation.ts";
-import type { Generation, LayoutBatch, LayoutFetcher, LayoutKind } from "./types.ts";
+import type { Generation, LayoutBatch, LayoutFetcher, LayoutKind, SizeMetric } from "./types.ts";
 
 export interface UseLayoutBatchOptions {
   readonly generation: Generation;
@@ -29,6 +29,11 @@ export interface UseLayoutBatchOptions {
   readonly fetchLayout: LayoutFetcher;
   /** Category ids to keep, or `null` for everything. Part of the request key. */
   readonly categories?: readonly number[] | null;
+  /**
+   * Which byte count the areas encode. Part of the request key: changing it is
+   * a different picture of the same tree, not a relabelling of this one.
+   */
+  readonly metric?: SizeMetric;
   /** Suppress the request (no scan loaded, zero-sized container). */
   readonly enabled: boolean;
 }
@@ -43,8 +48,19 @@ export interface LayoutBatchState {
 }
 
 export function useLayoutBatch(options: UseLayoutBatchOptions): LayoutBatchState {
-  const { generation, root, kind, width, height, devicePixelRatio, minPx, categories = null, fetchLayout, enabled } =
-    options;
+  const {
+    generation,
+    root,
+    kind,
+    width,
+    height,
+    devicePixelRatio,
+    minPx,
+    categories = null,
+    metric,
+    fetchLayout,
+    enabled,
+  } = options;
 
   const [batch, setBatch] = useState<LayoutBatch | null>(null);
   const [error, setError] = useState<LayoutError | null>(null);
@@ -97,6 +113,7 @@ export function useLayoutBatch(options: UseLayoutBatchOptions): LayoutBatchState
             viewport: { width, height, devicePixelRatio },
             minPx,
             categories,
+            metric,
           },
           controller.signal,
         );
@@ -126,7 +143,20 @@ export function useLayoutBatch(options: UseLayoutBatchOptions): LayoutBatchState
       cancelled = true;
       controller.abort();
     };
-  }, [categoriesKey, enabled, normalizedGeneration, generation, root, kind, width, height, devicePixelRatio, minPx, nonce]);
+  }, [
+    categoriesKey,
+    metric,
+    enabled,
+    normalizedGeneration,
+    generation,
+    root,
+    kind,
+    width,
+    height,
+    devicePixelRatio,
+    minPx,
+    nonce,
+  ]);
 
   const refetch = useRef(() => setNonce((value) => value + 1)).current;
 

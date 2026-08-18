@@ -108,6 +108,9 @@ export const invokeLayout: LayoutFetcher = async (request: LayoutRequest, signal
       // deserialises its arguments as a struct, and a missing field is not the
       // same thing as a present null.
       categories: request.categories === null ? null : [...request.categories],
+      // Same reasoning as `categories`: explicitly null when unset, because the
+      // command deserialises its arguments as a struct.
+      metric: request.metric ?? null,
     });
     return toBinary(raw);
   } catch (cause) {
