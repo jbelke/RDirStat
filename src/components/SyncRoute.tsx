@@ -363,8 +363,10 @@ export function SyncRoute() {
 
       {direction === "both" && (
         <p className="mt-2 text-xs text-muted-foreground">
-          Both ways gives each side what only the other has. It does not make the two identical —
-          that would mean deleting something, and nothing here does.
+          Both ways gives each side what only the other has. It never deletes and never
+          overwrites, so a file that exists on both sides with different contents is left alone on
+          both — the two folders can still differ afterwards, and that is the guarantee, not a
+          failure.
         </p>
       )}
 
