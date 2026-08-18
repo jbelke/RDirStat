@@ -129,11 +129,20 @@ require_space() {
 # manifest_of DIR — a comparable description of a tree, including the metadata a
 # size-and-mtime diff cannot see.
 #
-# One line per entry, sorted, NUL-walked so newlines in names cannot split a
-# record. For each entry it records the kind, the relative path, and then:
+# One NUL-terminated record per entry, sorted. The walk is NUL-delimited and so
+# are the records: a newline in a filename would otherwise end a record early,
+# and this manifest is what authorises `rm -rf` on the source. For each entry it
+# records the kind, the relative path, and then:
 #   file     size, extended-attribute names, ACL
 #   dir      extended-attribute names, ACL
 #   symlink  its target — never followed, so a link is compared as a link
+#
+# Known limit, and it is narrower than the record framing above: the ACL field
+# comes from `ls -lde`, which is line-oriented, so for a name containing a
+# newline the ACL column absorbs a fragment of the name. Both sides derive it
+# the same way from the same names, so a faithful copy still matches and an
+# unfaithful one still differs — the comparison is less specific for those
+# entries, not wrong. Fixing it needs an ACL source that is not `ls`.
 #
 # com.apple.provenance is filtered out deliberately: macOS applies and reapplies
 # it on its own, so it differs across a faithful copy and would produce false
@@ -151,16 +160,16 @@ manifest_of() {
       | LC_ALL=C sort -z \
       | while IFS= read -r -d '' p; do
           if [[ -L "$p" ]]; then
-            printf 'l\t%s\t%s\n' "$p" "$(readlink -- "$p")"
+            printf 'l\t%s\t%s\0' "$p" "$(readlink -- "$p")"
           else
             local xa acl kind size
             xa="$(xattr -- "$p" 2>/dev/null | grep -v '^com\.apple\.provenance$' | LC_ALL=C sort | tr '\n' ',')"
             acl="$(ls -lde -- "$p" 2>/dev/null | sed -n '2,$p' | tr -d ' ' | tr '\n' ',')"
             if [[ -d "$p" ]]; then
-              printf 'd\t%s\t%s\t%s\n' "$p" "$xa" "$acl"
+              printf 'd\t%s\t%s\t%s\0' "$p" "$xa" "$acl"
             else
               size="$(stat -f %z -- "$p" 2>/dev/null)"
-              printf 'f\t%s\t%s\t%s\t%s\n' "$p" "$size" "$xa" "$acl"
+              printf 'f\t%s\t%s\t%s\t%s\0' "$p" "$size" "$xa" "$acl"
             fi
           fi
         done )
@@ -200,22 +209,44 @@ move_verified() {
   fi
 
   say "  ${DIM}verifying (structure, sizes, xattrs, ACLs)...${RESET}"
-  local src_manifest dst_manifest
-  src_manifest="$(manifest_of "$src")" || { say "  ${RED}could not read source to verify${RESET}"; return 1; }
-  dst_manifest="$(manifest_of "$dst")" || { say "  ${RED}could not read destination to verify${RESET}"; return 1; }
 
-  if [[ "$src_manifest" != "$dst_manifest" ]]; then
-    say "  ${RED}verification failed — destination does not match source; source left intact${RESET}"
-    diff <(printf '%s\n' "$src_manifest") <(printf '%s\n' "$dst_manifest") \
-      | head -20 | sed 's/^/    /'
+  # The manifests go to files, not variables. A bash variable cannot hold a NUL
+  # byte, so "$(manifest_of ...)" would strip the very delimiter that makes a
+  # record unambiguous, and command substitution would eat trailing ones too.
+  local src_manifest dst_manifest empty=0
+  src_manifest="$(mktemp -t offload-src)" || return 1
+  dst_manifest="$(mktemp -t offload-dst)" || { rm -f -- "$src_manifest"; return 1; }
+
+  if ! manifest_of "$src" > "$src_manifest"; then
+    say "  ${RED}could not read source to verify${RESET}"
+    rm -f -- "$src_manifest" "$dst_manifest"
     return 1
   fi
+  if ! manifest_of "$dst" > "$dst_manifest"; then
+    say "  ${RED}could not read destination to verify${RESET}"
+    rm -f -- "$src_manifest" "$dst_manifest"
+    return 1
+  fi
+
+  # Byte-for-byte on the raw streams. Comparing the rendered text would reopen
+  # the hole the NUL delimiters close.
+  if ! cmp -s "$src_manifest" "$dst_manifest"; then
+    say "  ${RED}verification failed — destination does not match source; source left intact${RESET}"
+    # Rendered for reading only, never for deciding.
+    diff <(tr '\0' '\n' < "$src_manifest") <(tr '\0' '\n' < "$dst_manifest") \
+      | head -20 | sed 's/^/    /'
+    rm -f -- "$src_manifest" "$dst_manifest"
+    return 1
+  fi
+
+  [[ -s "$src_manifest" ]] || empty=1
+  rm -f -- "$src_manifest" "$dst_manifest"
 
   # An empty manifest on both sides means the walk found nothing. That is a
   # legitimate result for an empty source, but it is also what a silently failed
   # copy looks like, so say which one it was rather than deleting on an
   # unexamined match.
-  if [[ -z "$src_manifest" ]]; then
+  if [[ $empty -eq 1 ]]; then
     say "  ${DIM}source was empty; nothing to verify, nothing removed${RESET}"
     rmdir "$src" 2>/dev/null || true
     return 0
