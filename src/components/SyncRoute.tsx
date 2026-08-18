@@ -70,6 +70,7 @@ import {
   type SyncDiffEntryView,
   type SyncDiffView,
   type SyncReportView,
+  type SyncWarningView,
 } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 
@@ -181,6 +182,26 @@ const STATUS_TITLE: Record<SyncDiffEntryView["status"], string> = {
   same: "The same on both sides",
 };
 
+/** A direction that copied nothing, carrying the plan's reasons for refusing. */
+interface SyncRefusal {
+  readonly source: string;
+  readonly destination: string;
+  readonly warnings: readonly SyncWarningView[];
+  readonly bytesToCopy: number;
+  readonly destinationAvailable: number;
+}
+
+/**
+ * What one direction did. A refusal is a result, not the absence of one.
+ *
+ * `runOneWay` used to return `null` when the plan withheld its token, and the
+ * caller pushed nothing — so a destination with no room reached the user as an
+ * unchanged screen.
+ */
+type SyncOutcome =
+  | { readonly kind: "copied"; readonly report: SyncReportView }
+  | { readonly kind: "refused"; readonly refusal: SyncRefusal };
+
 export function SyncRoute() {
   const [left, setLeft] = useState("");
   const [right, setRight] = useState("");
@@ -195,7 +216,7 @@ export function SyncRoute() {
   const [diff, setDiff] = useState<SyncDiffView | null>(null);
   const [comparing, setComparing] = useState(false);
   const [copying, setCopying] = useState(false);
-  const [reports, setReports] = useState<readonly SyncReportView[]>([]);
+  const [outcomes, setOutcomes] = useState<readonly SyncOutcome[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const ready = left.trim().length > 0 && right.trim().length > 0;
@@ -215,7 +236,7 @@ export function SyncRoute() {
   const compare = async () => {
     setComparing(true);
     setError(null);
-    setReports([]);
+    setOutcomes([]);
     try {
       setDiff(await syncDiff(left.trim(), right.trim(), compareMode, differencesOnly));
     } catch (cause) {
@@ -226,30 +247,46 @@ export function SyncRoute() {
     }
   };
 
-  /** One direction, planned and confirmed on its own. `null` when there is nothing to do. */
-  const runOneWay = async (from: string, to: string): Promise<SyncReportView | null> => {
+  /**
+   * One direction, planned and confirmed on its own.
+   *
+   * A withheld token is reported rather than swallowed: the plan already
+   * carries the reasons it refused, and those are the only explanation the
+   * user will ever get for a copy that did not happen.
+   */
+  const runOneWay = async (from: string, to: string): Promise<SyncOutcome> => {
     const plan = await syncPlan(from, to, compareMode, effectiveOnDiffer);
-    if (plan.token === null) return null;
-    return await syncApply(from, to, compareMode, effectiveOnDiffer, plan.token);
+    if (plan.token === null) {
+      return {
+        kind: "refused",
+        refusal: {
+          source: plan.source,
+          destination: plan.destination,
+          warnings: plan.warnings,
+          bytesToCopy: plan.bytesToCopy,
+          destinationAvailable: plan.destinationAvailable,
+        },
+      };
+    }
+    const report = await syncApply(from, to, compareMode, effectiveOnDiffer, plan.token);
+    return { kind: "copied", report };
   };
 
   const copy = async () => {
     setCopying(true);
     setError(null);
     try {
-      const done: SyncReportView[] = [];
+      const done: SyncOutcome[] = [];
       // Sequential, and each direction plans against the disk as it is when
       // its turn comes — which is what stops the second leg from copying back
       // what the first just delivered.
       if (direction !== "to_left") {
-        const report = await runOneWay(left.trim(), right.trim());
-        if (report !== null) done.push(report);
+        done.push(await runOneWay(left.trim(), right.trim()));
       }
       if (direction !== "to_right") {
-        const report = await runOneWay(right.trim(), left.trim());
-        if (report !== null) done.push(report);
+        done.push(await runOneWay(right.trim(), left.trim()));
       }
-      setReports(done);
+      setOutcomes(done);
       // The panes described a state that no longer exists. Re-read rather than
       // leave stale rows on screen inviting a second copy of the same files.
       setDiff(await syncDiff(left.trim(), right.trim(), compareMode, differencesOnly));
@@ -265,7 +302,7 @@ export function SyncRoute() {
     setLeft(right);
     setRight(left);
     setDiff(null);
-    setReports([]);
+    setOutcomes([]);
   };
 
   const toCopy = countForDirection(diff, direction, effectiveOnDiffer);
@@ -378,9 +415,13 @@ export function SyncRoute() {
         </Alert>
       )}
 
-      {reports.map((report) => (
-        <SyncResult key={report.destination} report={report} />
-      ))}
+      {outcomes.map((outcome) =>
+        outcome.kind === "copied" ? (
+          <SyncResult key={`copied:${outcome.report.destination}`} report={outcome.report} />
+        ) : (
+          <SyncRefused key={`refused:${outcome.refusal.destination}`} refusal={outcome.refusal} />
+        ),
+      )}
 
       {diff !== null && (
         <>
@@ -639,6 +680,65 @@ function Labelled({ label, children }: { label: string; children: React.ReactNod
     <div className="flex flex-col gap-1">
       <span className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</span>
       {children}
+    </div>
+  );
+}
+
+/**
+ * A direction that copied nothing, and the plan's own reasons why.
+ *
+ * `sync.rs` computes these codes — `nothing-to-do`, `metadata-loss`,
+ * `no-room` — and withholds the confirmation token when it refuses. The plan
+ * used to be read for its token alone and discarded, so "the destination has
+ * no room" reached the user as a screen that simply did not change.
+ *
+ * Severity deliberately stays off `destructive`. That variant means a copy ran
+ * and files failed; nothing ran here. And a refusal whose only reason is that
+ * the folders already match is not a problem at all, so it keeps the plain
+ * check — the same axis the red-success bug established.
+ */
+function SyncRefused({ refusal }: { refusal: SyncRefusal }) {
+  const benign = refusal.warnings.length > 0 && refusal.warnings.every((warning) => warning.code === "nothing-to-do");
+  const shortfall = refusal.bytesToCopy - refusal.destinationAvailable;
+
+  return (
+    <div className="mt-4">
+      <Alert>
+        {benign ? <Check aria-hidden /> : <TriangleAlert aria-hidden />}
+        <AlertTitle>
+          {benign ? "Nothing to copy" : `Nothing was copied to ${refusal.destination}`}
+        </AlertTitle>
+        <AlertDescription>
+          {benign
+            ? `${refusal.source} has nothing that ${refusal.destination} is missing.`
+            : "The copy was refused before it started, so both folders are unchanged."}
+        </AlertDescription>
+      </Alert>
+
+      {!benign && refusal.warnings.length > 0 && (
+        <ul className="mt-2 flex flex-col gap-1">
+          {refusal.warnings.map((warning) => (
+            <li key={warning.code} className="rounded border border-border/60 p-2 text-xs">
+              <p className="font-mono text-muted-foreground">{warning.code}</p>
+              <p className="mt-0.5">{warning.message}</p>
+              {warning.code === "no-room" && shortfall > 0 && (
+                <p className="mt-0.5 text-muted-foreground">
+                  Needs {formatSI(refusal.bytesToCopy)}, {formatSI(refusal.destinationAvailable)} free —{" "}
+                  {formatSI(shortfall)} short.
+                </p>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* A refusal with no stated reason is still a refusal; say so rather than
+          rendering an empty list and letting the screen imply success. */}
+      {!benign && refusal.warnings.length === 0 && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          The plan gave no reason. This is a bug — please report it.
+        </p>
+      )}
     </div>
   );
 }
