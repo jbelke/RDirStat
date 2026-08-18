@@ -15,6 +15,12 @@ ignore = []
 [licenses]
 version = 2
 confidence-threshold = 0.8
+# This workspace ships under AGPL-3.0-only (LICENSE, LICENSING.md) and every
+# member sets `publish = false`, so our own crates are skipped here. The allow
+# list below governs *dependencies* only, and deliberately excludes copyleft:
+# a GPL/AGPL dependency would belong to its author and could not be covered by
+# the commercial license, so it must be a conscious `exceptions` entry.
+private = { ignore = true }
 allow = [
   "Apache-2.0",
   "BSD-2-Clause",

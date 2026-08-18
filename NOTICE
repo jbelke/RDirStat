@@ -1,0 +1,23 @@
+STELLAR-RDIRSTAT
+Copyright (C) 2026 Joshua Belke (https://github.com/jbelke)
+
+This product is licensed under the GNU Affero General Public License,
+version 3 only (AGPL-3.0-only). See LICENSE for the full text, and
+LICENSING.md for the commercial licensing option.
+
+Attribution
+-----------
+The AGPL requires that this notice, the copyright statement, and the
+license text travel with every copy, modified version, or derivative
+work, and that recipients be told how to obtain the source. Do not strip
+this file, the in-app credit, or the copyright headers.
+
+If you redistribute a modified version, mark your changes as yours and
+keep the credit above intact.
+
+Third-party components
+----------------------
+Dependency licenses are reported by `just audit` (cargo-deny for Rust,
+pnpm for JavaScript). Nothing under `reference-code/` is vendored, built,
+or distributed with this software; those checkouts are read-only
+references and carry their own licenses. See reference-code/AGENTS.md.

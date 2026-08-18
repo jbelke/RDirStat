@@ -35,6 +35,11 @@
     "active": true,
     "targets": "all",
     "category": "Utility",
+    "publisher": "Joshua Belke",
+    "homepage": "https://github.com/jbelke",
+    "copyright": "Copyright (C) 2026 Joshua Belke. Licensed under AGPL-3.0-only; commercial licensing at LICENSING.md.",
+    "license": "AGPL-3.0-only",
+    "licenseFile": "../LICENSE",
     "shortDescription": "Disk usage and file inventory for macOS",
     "longDescription": "RDirStat maps where space goes on very large macOS volumes: a scanned tree, a treemap, file-type and size reports, and an honest account of what macOS will and will not let it read.",
     "icon": [

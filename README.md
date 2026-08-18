@@ -96,6 +96,7 @@ hardware-profile rules that make a result comparable.
 | `src/` | React + TypeScript frontend. |
 | `Justfile`, `scripts/` | Local task surface and repository validators. |
 | `.github/` | macOS CI. |
+| `LICENSE`, `NOTICE`, `LICENSING.md` | AGPL-3.0-only text, the attribution notice that must survive redistribution, and the dual-licensing policy. |
 
 `.agents/` holds the installer-managed `rust-skills` payload. It is downloaded
 rather than authored here, so it is untracked; `skills/rust-skills` and
@@ -115,3 +116,23 @@ just dev           # Tauri development app
 
 `just ci` combines the deterministic gate and dependency reports. GitHub Actions
 runs it on macOS for pushes to `main` and pull requests.
+
+## License
+
+STELLAR-RDIRSTAT is dual-licensed.
+
+- **Open source:** [GNU AGPL-3.0-only](LICENSE). Free to use, modify, and
+  redistribute, provided derivatives stay AGPL-3.0-only, the attribution in
+  [NOTICE](NOTICE) survives, and users you serve over a network can get the
+  complete source.
+- **Commercial:** for closed-source or proprietary products, hosted services that
+  do not publish source, or relaxed attribution, buy a commercial license.
+  Contact **Joshua Belke — joshbelke@gmail.com** ([@jbelke](https://github.com/jbelke)).
+
+[LICENSING.md](LICENSING.md) explains both tracks, the contributor CLA, and why
+third-party copyleft code is never pasted into this repository.
+
+```
+SPDX-License-Identifier: AGPL-3.0-only
+Copyright (C) 2026 Joshua Belke
+```
