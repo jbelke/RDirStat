@@ -90,6 +90,18 @@ specta-typescript = "=0.0.12"
 # --- macOS actions: NSFileManager trashItem, never fs::remove_file ---
 trash = { workspace = true }
 
+# --- remote destinations: S3, WebDAV and SFTP ---
+rdirstat-remote = { workspace = true }
+# The Keychain, for the one thing that must not go in a file. Not a new
+# dependency: `native-tls` already links it for the system trust store, so this
+# names a crate the tree contains rather than adding one. Used only through
+# `passwords::{get,set,delete}_generic_password` in `src/remote.rs`.
+security-framework = { workspace = true }
+# `opendal` is async and the transfer manager is a long-lived task, so
+# src-tauri names tokio directly rather than reaching it through tauri's
+# re-export. `sync` is the cancellation primitives, `fs` the streaming reads.
+tokio = { workspace = true, features = ["fs", "sync", "time", "io-util"] }
+
 # --- bounded channels between the reader workers and the single builder ---
 crossbeam-channel = { workspace = true }
 

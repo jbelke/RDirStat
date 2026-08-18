@@ -179,21 +179,56 @@ struct Tally {
     unreadable: u64,
 }
 
-/// Describes what an upload to `destination` would do.
+/// What the caller wants planned.
+///
+/// Bundled for the same reason `sync::SyncRequest` is: these travel together,
+/// several of them are booleans and integers that would silently swap at a call
+/// site, and `max_entries` in particular changes what the result *means* rather
+/// than merely how much of it is shown.
+#[derive(Clone, Copy, Debug)]
+pub struct RemotePlanRequest<'a> {
+    /// The local folder being uploaded.
+    pub source: &'a Path,
+    /// The target's address, credential-free. Display only.
+    pub destination: &'a str,
+    /// Everything already at the destination, from one recursive listing.
+    pub listing: &'a [RemoteEntry],
+    /// Whether that listing hit its cap. A truncated listing makes the plan a
+    /// *ceiling* on what is already there, so unseen files are re-uploaded.
+    pub listing_truncated: bool,
+    /// What evidence this endpoint can offer. From [`crate::Remote::comparison`].
+    pub available_comparison: Comparison,
+    pub compare: RemoteCompare,
+    pub on_differ: OnDiffer,
+    /// Bounds only the **listed** entries; the counts are always exact.
+    ///
+    /// An argument rather than a constant because the two callers want
+    /// different answers and the difference matters: a plan being reviewed on
+    /// screen passes [`MAX_PLANNED_ENTRIES`], and a transfer about to run
+    /// passes `usize::MAX`. Uploading the truncated list would copy 5,000 of
+    /// 40,000 files and report success — the same silent-partial-success shape
+    /// the local copier was fixed for (nato-b6h.1).
+    pub max_entries: usize,
+}
+
+/// Describes what an upload would do.
 ///
 /// Takes the remote listing as an argument rather than fetching it, so the
 /// whole decision procedure is a pure function of (local tree, remote listing,
 /// settings) and can be tested exhaustively with no network.
 #[must_use]
-pub fn plan(
-    source: &Path,
-    destination: &str,
-    listing: &[RemoteEntry],
-    listing_truncated: bool,
-    available_comparison: Comparison,
-    compare: RemoteCompare,
-    on_differ: OnDiffer,
-) -> RemotePlan {
+pub fn plan(request: RemotePlanRequest<'_>) -> RemotePlan {
+    let RemotePlanRequest {
+        source,
+        destination,
+        listing,
+        listing_truncated,
+        available_comparison,
+        compare,
+        on_differ,
+        max_entries,
+    } = request;
+
     let remote: HashMap<&str, &RemoteEntry> = listing
         .iter()
         .map(|entry| (entry.relative_path.as_str(), entry))
@@ -209,15 +244,14 @@ pub fn plan(
 
     let mut entries = Vec::new();
     let mut tally = Tally::default();
-    walk(
-        source,
-        Path::new(""),
-        &remote,
-        effective,
+    let context = WalkContext {
+        root: source,
+        remote: &remote,
+        compare: effective,
         on_differ,
-        &mut entries,
-        &mut tally,
-    );
+        max_entries,
+    };
+    walk(&context, Path::new(""), &mut entries, &mut tally);
 
     let warnings = advisories(
         &tally,
@@ -251,15 +285,22 @@ pub fn plan(
 }
 
 /// Walks one directory of the source, recursing.
-fn walk(
-    root: &Path,
-    relative: &Path,
-    remote: &HashMap<&str, &RemoteEntry>,
+struct WalkContext<'a, 'b> {
+    root: &'a Path,
+    remote: &'a HashMap<&'b str, &'b RemoteEntry>,
     compare: RemoteCompare,
     on_differ: OnDiffer,
-    entries: &mut Vec<RemoteSyncEntry>,
-    tally: &mut Tally,
-) {
+    max_entries: usize,
+}
+
+fn walk(context: &WalkContext<'_, '_>, relative: &Path, entries: &mut Vec<RemoteSyncEntry>, tally: &mut Tally) {
+    let WalkContext {
+        root,
+        remote,
+        compare,
+        on_differ,
+        max_entries,
+    } = *context;
     let Ok(reader) = fs::read_dir(root.join(relative)) else {
         tally.unreadable = tally.unreadable.saturating_add(1);
         return;
@@ -285,7 +326,7 @@ fn walk(
             if SKIPPED_DIRECTORY_NAMES.iter().any(|skipped| name == *skipped) {
                 continue;
             }
-            walk(root, &child, remote, compare, on_differ, entries, tally);
+            walk(context, &child, entries, tally);
             continue;
         }
 
@@ -329,7 +370,7 @@ fn walk(
             Some(RemoteReason::Missing) => {
                 tally.total_to_copy = tally.total_to_copy.saturating_add(1);
                 tally.bytes_to_copy = tally.bytes_to_copy.saturating_add(bytes);
-                if entries.len() < MAX_PLANNED_ENTRIES {
+                if entries.len() < max_entries {
                     entries.push(RemoteSyncEntry {
                         relative_path: key,
                         bytes,
@@ -340,7 +381,7 @@ fn walk(
             Some(differing) if on_differ == OnDiffer::Replace => {
                 tally.total_to_copy = tally.total_to_copy.saturating_add(1);
                 tally.bytes_to_copy = tally.bytes_to_copy.saturating_add(bytes);
-                if entries.len() < MAX_PLANNED_ENTRIES {
+                if entries.len() < max_entries {
                     entries.push(RemoteSyncEntry {
                         relative_path: key,
                         bytes,
@@ -495,16 +536,21 @@ mod tests {
             .expect("the fixture file should be writable");
     }
 
-    fn quick(source: &Path, listing: &[RemoteEntry]) -> RemotePlan {
-        plan(
+    fn request<'a>(source: &'a Path, listing: &'a [RemoteEntry]) -> RemotePlanRequest<'a> {
+        RemotePlanRequest {
             source,
-            "s3://b/",
+            destination: "s3://b/",
             listing,
-            false,
-            Comparison::Size,
-            RemoteCompare::Quick,
-            OnDiffer::Skip,
-        )
+            listing_truncated: false,
+            available_comparison: Comparison::Size,
+            compare: RemoteCompare::Quick,
+            on_differ: OnDiffer::Skip,
+            max_entries: MAX_PLANNED_ENTRIES,
+        }
+    }
+
+    fn quick(source: &Path, listing: &[RemoteEntry]) -> RemotePlan {
+        plan(request(source, listing))
     }
 
     #[test]
@@ -547,15 +593,15 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         write(dir.path(), "a.txt", b"hello");
 
-        let result = plan(
-            dir.path(),
-            "s3://b/",
-            &[entry("a.txt", 99, None)],
-            false,
-            Comparison::Size,
-            RemoteCompare::Quick,
-            OnDiffer::Replace,
-        );
+        let result = plan(RemotePlanRequest {
+            listing: &[entry("a.txt", 99, None)],
+            listing_truncated: false,
+            available_comparison: Comparison::Size,
+            compare: RemoteCompare::Quick,
+            on_differ: OnDiffer::Replace,
+            max_entries: MAX_PLANNED_ENTRIES,
+            ..request(dir.path(), &[])
+        });
         assert_eq!(result.total_to_copy, 1);
         assert_eq!(result.entries[0].reason, RemoteReason::SizeDiffers);
         assert!(result.warnings.iter().any(|warning| warning.code == "replacing"));
@@ -569,15 +615,15 @@ mod tests {
 
         // MD5("hello") is 5d41402a…; this is a different digest of the same length.
         let listing = [entry("a.txt", 5, Some("00000000000000000000000000000000"))];
-        let result = plan(
-            dir.path(),
-            "s3://b/",
-            &listing,
-            false,
-            Comparison::SizeAndDigest,
-            RemoteCompare::Verify,
-            OnDiffer::Replace,
-        );
+        let result = plan(RemotePlanRequest {
+            listing: &listing,
+            listing_truncated: false,
+            available_comparison: Comparison::SizeAndDigest,
+            compare: RemoteCompare::Verify,
+            on_differ: OnDiffer::Replace,
+            max_entries: MAX_PLANNED_ENTRIES,
+            ..request(dir.path(), &[])
+        });
         assert_eq!(result.total_to_copy, 1);
         assert_eq!(result.entries[0].reason, RemoteReason::ContentDiffers);
     }
@@ -591,15 +637,15 @@ mod tests {
         assert_eq!(digest, "5d41402abc4b2a76b9719d911017c592");
 
         let listing = [entry("a.txt", 5, Some(&digest))];
-        let result = plan(
-            dir.path(),
-            "s3://b/",
-            &listing,
-            false,
-            Comparison::SizeAndDigest,
-            RemoteCompare::Verify,
-            OnDiffer::Replace,
-        );
+        let result = plan(RemotePlanRequest {
+            listing: &listing,
+            listing_truncated: false,
+            available_comparison: Comparison::SizeAndDigest,
+            compare: RemoteCompare::Verify,
+            on_differ: OnDiffer::Replace,
+            max_entries: MAX_PLANNED_ENTRIES,
+            ..request(dir.path(), &[])
+        });
         assert_eq!(result.total_to_copy, 0);
         assert_eq!(result.already_present, 1);
     }
@@ -611,15 +657,15 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         write(dir.path(), "a.txt", b"hello");
 
-        let result = plan(
-            dir.path(),
-            "s3://b/",
-            &[entry("a.txt", 5, None)],
-            false,
-            Comparison::Size,
-            RemoteCompare::Verify,
-            OnDiffer::Skip,
-        );
+        let result = plan(RemotePlanRequest {
+            listing: &[entry("a.txt", 5, None)],
+            listing_truncated: false,
+            available_comparison: Comparison::Size,
+            compare: RemoteCompare::Verify,
+            on_differ: OnDiffer::Skip,
+            max_entries: MAX_PLANNED_ENTRIES,
+            ..request(dir.path(), &[])
+        });
         assert_eq!(result.compare, RemoteCompare::Quick);
         assert!(result.warnings.iter().any(|warning| warning.code == "no_digest"));
     }
@@ -629,15 +675,15 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         write(dir.path(), "a.txt", b"hello");
 
-        let result = plan(
-            dir.path(),
-            "s3://b/",
-            &[],
-            true,
-            Comparison::Size,
-            RemoteCompare::Quick,
-            OnDiffer::Skip,
-        );
+        let result = plan(RemotePlanRequest {
+            listing: &[],
+            listing_truncated: true,
+            available_comparison: Comparison::Size,
+            compare: RemoteCompare::Quick,
+            on_differ: OnDiffer::Skip,
+            max_entries: MAX_PLANNED_ENTRIES,
+            ..request(dir.path(), &[])
+        });
         assert!(result.listing_truncated);
         assert!(
             result
@@ -734,6 +780,29 @@ mod tests {
         let result = quick(dir.path(), &[]);
         assert_eq!(result.total_to_copy, 1);
         assert_eq!(result.special_skipped, 1);
+    }
+
+    // The transfer path passes usize::MAX. If this ever silently returns the
+    // display cap instead, a large job copies 5,000 files and reports success.
+    #[test]
+    fn an_uncapped_plan_lists_every_file_it_counted() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        for index in 0..(MAX_PLANNED_ENTRIES + 10) {
+            write(dir.path(), &format!("f{index}.bin"), b"x");
+        }
+
+        let result = plan(RemotePlanRequest {
+            listing: &[],
+            listing_truncated: false,
+            available_comparison: Comparison::Size,
+            compare: RemoteCompare::Quick,
+            on_differ: OnDiffer::Skip,
+            max_entries: usize::MAX,
+            ..request(dir.path(), &[])
+        });
+        assert_eq!(result.total_to_copy, MAX_PLANNED_ENTRIES as u64 + 10);
+        assert_eq!(result.entries.len(), MAX_PLANNED_ENTRIES + 10);
+        assert!(!result.entries_truncated);
     }
 
     #[test]

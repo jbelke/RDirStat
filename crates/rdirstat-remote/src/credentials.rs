@@ -50,8 +50,12 @@ impl std::fmt::Debug for Secret {
 /// machine with `~/.aws/credentials`, an SSO session or an IAM role needs no
 /// stored key, and an SFTP target needs nothing ever. `Default` is therefore
 /// the *normal* value, not a placeholder.
+///
+/// Not `#[non_exhaustive]`, unlike the error enums in this crate: those travel
+/// outward and gain variants, whereas this is an **input** the shell
+/// constructs. Sealing it would block `RemoteCredentials { .. }` — and even
+/// `..Default::default()` — from `src-tauri`, which is the only caller there is.
 #[derive(Debug, Default)]
-#[non_exhaustive]
 pub struct RemoteCredentials {
     /// S3 access key id. Paired with `secret_key`; one without the other is
     /// treated as neither.

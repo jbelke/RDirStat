@@ -140,6 +140,9 @@ tokio = { version = "1.49.0", default-features = false }
 # links `md-5` for Content-MD5 on upload, so this names a crate the tree
 # already contains rather than adding one.
 md-5 = "0.10.6"
+# The macOS Keychain. Already in the tree via native-tls; named here so the one
+# module that stores a credential declares it rather than borrowing it.
+security-framework = "3.7.0"
 
 # --- macOS actions ---
 trash = "5.2.6"

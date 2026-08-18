@@ -43,12 +43,14 @@ mod fsident;
 mod progress;
 mod query;
 mod relocate;
+mod remote;
 mod settings;
 mod snapshot_store;
 mod state;
 mod storage;
 mod sync;
 mod token;
+mod transfers;
 mod tray;
 mod volumes;
 
