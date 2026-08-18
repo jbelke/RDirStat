@@ -83,13 +83,14 @@ pub(crate) enum CompareMode {
 }
 
 /// What to do about a file that exists on both sides but differs.
-///
-/// Defined in `rdirstat-remote` and re-exported here, so the local and the
-/// remote planner share one type rather than two identical ones. That is not
-/// tidiness: `specta` generates a TypeScript type per Rust type, and two called
-/// `OnDiffer` would collide in `bindings.ts`. The serde representation is
-/// unchanged — `"skip"` and `"replace"` on the wire, exactly as before.
-pub(crate) use rdirstat_remote::plan::OnDiffer;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OnDiffer {
+    /// Leave it. The destination keeps whatever it has. The default.
+    Skip,
+    /// Overwrite it from the source. The only setting that destroys anything.
+    Replace,
+}
 
 /// Why one file is in the plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
@@ -112,6 +113,22 @@ pub(crate) struct SyncEntry {
     pub relative_path: String,
     pub bytes: u64,
     pub reason: SyncReason,
+}
+
+/// One planned copy, with the path the filesystem actually uses.
+///
+/// [`SyncEntry::relative_path`] is a `String` because it crosses IPC, and it is
+/// built with `Path::display()`, which replaces invalid UTF-8 with U+FFFD. That
+/// is fine for showing a user, and unusable for addressing a file: two distinct
+/// names can collapse to the SAME string, and joining that string back onto the
+/// root can name a file that does not exist — or, worse, a different one.
+///
+/// So everything that touches the filesystem uses `relative`, and only the
+/// display string crosses the wire.
+#[derive(Clone, Debug)]
+struct PlannedCopy {
+    relative: PathBuf,
+    entry: SyncEntry,
 }
 
 /// Something the user should read before confirming.
@@ -365,7 +382,7 @@ fn walk(
     request: SyncRequest<'_>,
     relative: &Path,
     cap: usize,
-    entries: &mut Vec<SyncEntry>,
+    entries: &mut Vec<PlannedCopy>,
     tally: &mut Tally,
 ) {
     let (source_root, destination_root) = (request.source, request.destination);
@@ -446,10 +463,13 @@ fn walk(
         tally.total_to_copy = tally.total_to_copy.saturating_add(1);
         tally.bytes_to_copy = tally.bytes_to_copy.saturating_add(size);
         if entries.len() < cap {
-            entries.push(SyncEntry {
-                relative_path: child_relative.display().to_string(),
-                bytes: size,
-                reason,
+            entries.push(PlannedCopy {
+                entry: SyncEntry {
+                    relative_path: child_relative.display().to_string(),
+                    bytes: size,
+                    reason,
+                },
+                relative: child_relative.clone(),
             });
         }
     }
@@ -611,7 +631,7 @@ pub(crate) fn plan<S: BuildHasher>(
         compare_mode,
         on_differ,
         entries_truncated: tally.total_to_copy > entries.len() as u64,
-        entries,
+        entries: entries.into_iter().map(|planned| planned.entry).collect(),
         total_to_copy: tally.total_to_copy,
         bytes_to_copy: tally.bytes_to_copy,
         already_present: tally.already_present,
@@ -687,8 +707,21 @@ impl Drop for Scratch {
 /// That is precisely the defect filed against `rgigasync` as nato-b6h.3, and it
 /// is not worth reintroducing for the handful of files it affects: those take
 /// the per-file path instead.
-fn bom_can_carry(relative_path: &str) -> bool {
-    !relative_path.contains('\n')
+fn bom_can_carry(relative: &Path) -> bool {
+    // Two independent reasons a path cannot go in a bom, and both must be
+    // checked against the REAL path rather than its display string.
+    //
+    // `mkbom -i` reads its list one path per line with no NUL-delimited form,
+    // so a newline would split one entry into two bogus ones — the defect filed
+    // against `rgigasync` as nato-b6h.3.
+    //
+    // And a bom is a text file, so a name that is not valid UTF-8 cannot be
+    // written into one faithfully. Such a name is perfectly copyable one file
+    // at a time, because that path never round-trips through a string.
+    match relative.to_str() {
+        Some(text) => !text.contains('\n'),
+        None => false,
+    }
 }
 
 /// The `mkbom` input for a planned set: every path, every directory above it,
@@ -698,7 +731,7 @@ fn bom_can_carry(relative_path: &str) -> bool {
 /// whose parent it has not already seen — and lexicographic order puts `.`
 /// ahead of everything and `./a` ahead of `./a/b`. The sort is not cosmetic; it
 /// is what makes the bom build at all.
-fn bom_lines(entries: &[SyncEntry]) -> BTreeSet<String> {
+fn bom_lines(entries: &[PlannedCopy]) -> BTreeSet<String> {
     let mut lines = BTreeSet::new();
     lines.insert(".".to_owned());
     for entry in entries {
@@ -706,7 +739,7 @@ fn bom_lines(entries: &[SyncEntry]) -> BTreeSet<String> {
         // `./a/b` has those entries rejected one by one and yields a bom that
         // copies less than it was asked to, while exiting 0.
         let mut prefix = PathBuf::new();
-        for part in Path::new(&entry.relative_path).components() {
+        for part in entry.relative.components() {
             prefix.push(part);
             lines.insert(format!("./{}", prefix.display()));
         }
@@ -742,7 +775,7 @@ fn bom_lines(entries: &[SyncEntry]) -> BTreeSet<String> {
 /// Returns the reason when the scratch directory, `mkbom` or `ditto` fails. The
 /// caller falls back to per-file copies so the report can still say which files
 /// did not make it.
-fn copy_planned(source: &Path, destination: &Path, entries: &[SyncEntry]) -> Result<(), String> {
+fn copy_planned(source: &Path, destination: &Path, entries: &[PlannedCopy]) -> Result<(), String> {
     let lines = bom_lines(entries);
     let scratch = Scratch::new().map_err(|error| format!("could not create a scratch directory: {error}"))?;
     let list = scratch.0.join("list");
@@ -879,8 +912,8 @@ pub(crate) fn apply<S: BuildHasher>(
 
     // The planned set goes into ONE `ditto --bom`; see `copy_planned`. Only the
     // paths a bom cannot describe fall back to a process each.
-    let (batchable, individual): (Vec<SyncEntry>, Vec<SyncEntry>) =
-        all.into_iter().partition(|entry| bom_can_carry(&entry.relative_path));
+    let (batchable, individual): (Vec<PlannedCopy>, Vec<PlannedCopy>) =
+        all.into_iter().partition(|planned| bom_can_carry(&planned.relative));
 
     if !batchable.is_empty()
         && let Err(reason) = copy_planned(source, destination, &batchable)
@@ -923,12 +956,24 @@ pub(crate) fn apply<S: BuildHasher>(
 /// a 500 GB transfer that failed at 400 GB would serially re-copy all 500 GB,
 /// one process per file, on the exact path where the user most wants out.
 ///
-/// Size is the right test here and content is not, with one exception. An entry
-/// is in the plan because the destination lacked it or had it at a different
-/// size, so a destination file at the source's size is one this run put there.
-/// The exception is [`SyncReason::ContentDiffers`], which by definition means
-/// the sizes already matched and only the bytes differed — for those, a size
-/// match proves nothing and the copy must be redone.
+/// Size is a sound test here for a reason worth writing down precisely, because
+/// the obvious reason is wrong. It is NOT that a half-written file would have a
+/// different size and so be re-copied: `ditto` writes to a hidden `.BC.T_*`
+/// temporary beside the target and renames it, so the target path is always
+/// either absent or complete, and a short file never appears there at all. On
+/// ENOSPC it removes its own temporary. Were `ditto` ever replaced by a copier
+/// that writes in place, this function would need a content check, not a
+/// bigger size check.
+///
+/// What makes size sufficient is the plan: an entry is here because the
+/// destination lacked the file or had it at a different size, so a destination
+/// file at the source's size is one this run put there. The exception is
+/// [`SyncReason::ContentDiffers`], which by definition means the sizes already
+/// matched and only the bytes differed — for those a size match proves nothing
+/// and the copy is redone.
+///
+/// The comparison is by the entry's REAL path, never its display string; see
+/// [`PlannedCopy`] for why that distinction is load-bearing rather than tidy.
 fn already_landed(entry: &SyncEntry, target: &Path) -> bool {
     if entry.reason == SyncReason::ContentDiffers {
         return false;
@@ -937,22 +982,21 @@ fn already_landed(entry: &SyncEntry, target: &Path) -> bool {
 }
 
 /// Copies entries one process at a time, recording a verdict for each.
-fn copy_individually(source: &Path, destination: &Path, entries: Vec<SyncEntry>, report: &mut SyncReport) {
-    for entry in entries {
-        let relative = Path::new(&entry.relative_path);
-        let target = destination.join(relative);
-        if already_landed(&entry, &target) {
+fn copy_individually(source: &Path, destination: &Path, entries: Vec<PlannedCopy>, report: &mut SyncReport) {
+    for planned in entries {
+        let target = destination.join(&planned.relative);
+        if already_landed(&planned.entry, &target) {
             report.copied = report.copied.saturating_add(1);
-            report.bytes_copied = report.bytes_copied.saturating_add(entry.bytes);
+            report.bytes_copied = report.bytes_copied.saturating_add(planned.entry.bytes);
             continue;
         }
-        match copy_one(&source.join(relative), &target) {
+        match copy_one(&source.join(&planned.relative), &target) {
             Ok(()) => {
                 report.copied = report.copied.saturating_add(1);
-                report.bytes_copied = report.bytes_copied.saturating_add(entry.bytes);
+                report.bytes_copied = report.bytes_copied.saturating_add(planned.entry.bytes);
             }
             Err(reason) => report.failures.push(SyncFailure {
-                relative_path: entry.relative_path,
+                relative_path: planned.entry.relative_path,
                 reason,
             }),
         }
@@ -993,6 +1037,13 @@ mod tests {
         on_differ: OnDiffer,
     ) -> SyncRequest<'a> {
         SyncRequest { source, destination, compare_mode, on_differ }
+    }
+
+    fn planned(relative_path: &str, bytes: u64, reason: SyncReason) -> PlannedCopy {
+        PlannedCopy {
+            relative: PathBuf::from(relative_path),
+            entry: SyncEntry { relative_path: relative_path.to_owned(), bytes, reason },
+        }
     }
 
     fn plan_of(source: &Path, destination: &Path, mode: CompareMode, on_differ: OnDiffer) -> SyncPlan {
@@ -1142,6 +1193,46 @@ mod tests {
         );
     }
 
+    /// Two entries that SHARE a display string must not both be credited.
+    ///
+    /// `SyncEntry::relative_path` is built with `Path::display()`, which
+    /// replaces invalid UTF-8 with U+FFFD — so two distinct filenames can
+    /// collapse to the same string. The old code addressed files through that
+    /// string, which meant the bom deduplicated them to one line, one file
+    /// landed, and the reconciliation then credited BOTH: a silent under-copy
+    /// with a clean report, the same category as nato-b6h.1.
+    ///
+    /// `PlannedCopy` carries the real path, so the two are addressed
+    /// separately. Asserted here on the reconciliation directly, because the
+    /// natural end-to-end fixture cannot be built on this filesystem: APFS
+    /// refuses to create a name that is not valid UTF-8 at all (`File::create`
+    /// returns `EILSEQ`). exFAT, NTFS and SMB volumes carry such names, and
+    /// this app is pointed at those.
+    #[test]
+    fn two_entries_sharing_a_display_string_are_not_both_credited() {
+        let source = scratch();
+        let destination = scratch();
+        write(source.path(), "collide.txt", b"first");
+
+        // Same display string, different real paths. Only the first exists.
+        let landed = planned("collide.txt", 5, SyncReason::Missing);
+        let mut ghost = planned("collide.txt", 5, SyncReason::Missing);
+        ghost.relative = PathBuf::from("other-real-name.txt");
+
+        let mut report = SyncReport {
+            generation: GEN,
+            source: display(source.path()),
+            destination: display(destination.path()),
+            copied: 0,
+            bytes_copied: 0,
+            failures: Vec::new(),
+        };
+        copy_individually(source.path(), destination.path(), vec![landed, ghost], &mut report);
+
+        assert_eq!(report.copied, 1, "only the entry whose real file exists may be credited");
+        assert_eq!(report.failures.len(), 1, "the other must be reported, got {:?}", report.failures);
+    }
+
     /// The report may never claim a file was copied that is not there.
     ///
     /// `ditto --bom` exits 0 for a bom naming a path that is not in the source:
@@ -1160,8 +1251,8 @@ mod tests {
         write(source.path(), "real.txt", b"here");
 
         let entries = vec![
-            SyncEntry { relative_path: "real.txt".to_owned(), bytes: 4, reason: SyncReason::Missing },
-            SyncEntry { relative_path: "ghost.txt".to_owned(), bytes: 9, reason: SyncReason::Missing },
+            planned("real.txt", 4, SyncReason::Missing),
+            planned("ghost.txt", 9, SyncReason::Missing),
         ];
 
         // The batch reports success even though `ghost.txt` is not there.
@@ -1200,19 +1291,15 @@ mod tests {
         write(destination.path(), "done.txt", b"already");
         write(source.path(), "todo.txt", b"missing");
 
-        let done = SyncEntry { relative_path: "done.txt".to_owned(), bytes: 7, reason: SyncReason::Missing };
-        let landed = already_landed(&done, &destination.path().join("done.txt"));
+        let done = planned("done.txt", 7, SyncReason::Missing);
+        let landed = already_landed(&done.entry, &destination.path().join("done.txt"));
         assert!(landed, "a file already at the destination at the right size must be skipped");
 
         // ...but a file whose bytes differ at the same size must NOT be skipped,
         // because that is exactly what ContentDiffers means.
-        let same_size_different_bytes = SyncEntry {
-            relative_path: "done.txt".to_owned(),
-            bytes: 7,
-            reason: SyncReason::ContentDiffers,
-        };
+        let same_size_different_bytes = planned("done.txt", 7, SyncReason::ContentDiffers);
         assert!(
-            !already_landed(&same_size_different_bytes, &destination.path().join("done.txt")),
+            !already_landed(&same_size_different_bytes.entry, &destination.path().join("done.txt")),
             "a size match proves nothing when only the contents differed"
         );
     }
@@ -1373,8 +1460,8 @@ mod tests {
     #[test]
     fn a_bom_list_names_every_directory_above_every_file() {
         let entries = vec![
-            SyncEntry { relative_path: "deep/nested/file.txt".to_owned(), bytes: 1, reason: SyncReason::Missing },
-            SyncEntry { relative_path: "top.txt".to_owned(), bytes: 1, reason: SyncReason::Missing },
+            planned("deep/nested/file.txt", 1, SyncReason::Missing),
+            planned("top.txt", 1, SyncReason::Missing),
         ];
         let lines: Vec<String> = bom_lines(&entries).into_iter().collect();
         assert_eq!(lines, vec![".", "./deep", "./deep/nested", "./deep/nested/file.txt", "./top.txt"]);
