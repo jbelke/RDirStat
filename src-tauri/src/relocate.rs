@@ -958,7 +958,20 @@ const SELF_MANAGED_XATTR: &str = ": com.apple.provenance";
 /// than implied by silence.
 fn extended_attributes(root: &Path) -> Result<Vec<String>, RelocateError> {
     let output = Command::new("/usr/bin/xattr")
-        .arg("-r")
+        // `-s` acts on a symlink itself instead of following it. Two reasons,
+        // and the first is a hard requirement:
+        //
+        //   Without it, `xattr` exits 1 on a DANGLING symlink ("No such file"),
+        //   which would fail verification for any tree containing one — and
+        //   this repository's own `node_modules` holds 1,527 of them.
+        //   `node_modules`, Homebrew's `opt` and DerivedData are exactly the
+        //   trees a user reaches for this feature to offload.
+        //
+        //   It is also the correct comparison. Following a symlink reports its
+        //   TARGET's attributes against the link's own path, so a link and its
+        //   target both report the target's — and `verify_tree` already states
+        //   the rule this restores: a symlink is compared as a symlink.
+        .arg("-rs")
         .arg(".")
         // From inside the tree, so every line is relative and the two sides are
         // comparable without string surgery on absolute paths.
@@ -1322,6 +1335,27 @@ mod tests {
             assert!(set.success(), "the fixture itself must carry {name}");
         }
         fs::write(root.join("sub/other.txt/..namedfork/rsrc"), b"resource-fork").expect("resource fork");
+    }
+
+    /// A tree containing a broken symlink must still verify.
+    ///
+    /// `xattr -r` exits 1 on a dangling symlink ("No such file"), which would
+    /// fail verification AFTER the copy — leaving the user a full duplicate on
+    /// disk, the source intact, and an error about attributes for a tree that
+    /// copied perfectly. This is not a corner case: this repository's own
+    /// `node_modules` contains over 1,500 dangling symlinks, and `node_modules`
+    /// is exactly the kind of tree this feature exists to offload.
+    #[test]
+    fn a_tree_with_a_broken_symlink_still_verifies() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let source = scratch.path().join("source");
+        let destination = scratch.path().join("destination");
+        tree_with_metadata(&source);
+        std::os::unix::fs::symlink("/nonexistent/target", source.join("dangling.link")).expect("symlink");
+
+        ditto(&source, &destination).expect("ditto copies a dangling symlink as a symlink");
+        verify_extended_attributes(&source, &destination)
+            .expect("a broken symlink must not fail the attribute check");
     }
 
     /// A faithful copy passes. Without this the refusal test below could pass
