@@ -104,8 +104,24 @@ test("hit-testing thousands of tiles is microseconds, so a quadtree is premature
   const perProbeUs = ((performance.now() - started) / probes) * 1000;
 
   assert.ok(hits > 0, "the probe grid never hit a tile, so the timing is meaningless");
-  // Generous bound: this is a regression guard, not a published benchmark.
-  assert.ok(perProbeUs < 500, `hit test took ${perProbeUs.toFixed(1)}us per probe over ${batch.count} tiles`);
+  // What this guards is an ALGORITHMIC regression -- the day a linear scan
+  // stops being adequate and a quadtree is actually warranted. That shows up
+  // as one or two orders of magnitude, never as a small multiple.
+  //
+  // The bound was 500us, and it flaked: measured 842.7us on a 16-core host at
+  // load average 463 (several agent sessions and cargo builds competing).
+  // Since d5b2990 put this suite into `just check`, that flake failed the gate
+  // for everyone. A wall-clock assertion inside a determinism gate has to be
+  // slack enough to survive a busy machine, or it is not a correctness test at
+  // all -- it is an unpinned benchmark that fails other people's builds.
+  //
+  // 5 ms keeps a 10x headroom over the worst observed contention while still
+  // catching the regression this exists for. The number is always logged, so a
+  // gradual drift is visible even when the assertion does not fire.
+  assert.ok(
+    perProbeUs < 5000,
+    `hit test took ${perProbeUs.toFixed(1)}us per probe over ${batch.count} tiles`,
+  );
   console.log(`      hit-test: ${perProbeUs.toFixed(1)}us/probe over ${batch.count} tiles`);
 });
 
