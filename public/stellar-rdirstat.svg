@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 1024 1024" fill="none" role="img" aria-label="Stellar RDIRSTAT">
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1c1544"/>
+      <stop offset="1" stop-color="#070511"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="220" fill="url(#plate)"/>
+  <rect x="108" y="108" width="469" height="809" rx="35" fill="#945ff9"/>
+  <rect x="601" y="108" width="316" height="421" rx="35" fill="#f0ab55"/>
+  <rect x="601" y="553" width="160" height="363" rx="32" fill="#7cca7f"/>
+  <rect x="785" y="553" width="132" height="363" rx="32" fill="#ea6878"/>
+</svg>

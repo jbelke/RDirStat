@@ -62,7 +62,7 @@ export function AboutPanel({ version, onOpenUrl, className }: AboutPanelProps) {
   return (
     <div className={cn("flex min-h-0 flex-1 flex-col overflow-auto p-4", className)}>
       <section className="rounded border border-border/60 p-3">
-        <h3 className="text-sm font-medium">RDirStat</h3>
+        <h3 className="text-sm font-medium">Stellar RDIRSTAT</h3>
         <p className="mt-1 text-xs text-muted-foreground">
           A disk-usage tool for macOS: what is on the disk, what it costs, and where it could go
           instead.

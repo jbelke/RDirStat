@@ -1,0 +1,53 @@
+# Keep the build context small and keep host build output from leaking into a
+# container that would then reuse it. The `target/` exclusion is the important
+# one: a macOS target directory is tens of gigabytes and none of it is valid
+# for a Linux toolchain.
+
+.git
+.github
+.beads
+.agents
+.claude
+.settings
+.vscode
+.idea
+
+node_modules
+**/node_modules
+dist
+dist-ssr
+.vite
+target
+src-tauri/target
+src-tauri/gen/schemas
+.local
+
+# Secrets and machine-local configuration. The `.example` templates are kept:
+# they are the documentation of what a container may be handed.
+.env
+.env.*
+!.env.*.example
+
+*.rdstat
+*.duckdb
+*.duckdb.wal
+*.parquet
+scans
+bench-results
+criterion
+
+*.p12
+*.pem
+*.key
+*.cer
+*.mobileprovision
+
+.DS_Store
+**/.DS_Store
+*.swp
+*~
+
+reference-code
+skills
+Dockerfile
+docker-compose.yml

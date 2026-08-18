@@ -58,9 +58,9 @@ const MENU_BAR_POINTS: f64 = 26.0;
 /// Whatever Tauri reports when the icon image cannot be decoded or the tray
 /// cannot be registered with the platform.
 pub(crate) fn build(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "tray:open", "Open RDirStat", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "tray:open", "Open Stellar RDIRSTAT", true, None::<&str>)?;
     let panel = MenuItem::with_id(app, "tray:panel", "Show Status Panel", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "tray:quit", "Quit RDirStat", true, Some("Cmd+Q"))?;
+    let quit = MenuItem::with_id(app, "tray:quit", "Quit Stellar RDIRSTAT", true, Some("Cmd+Q"))?;
     let menu = Menu::with_items(app, &[&open, &panel, &PredefinedMenuItem::separator(app)?, &quit])?;
 
     TrayIconBuilder::with_id("rdirstat")

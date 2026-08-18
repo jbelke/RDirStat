@@ -222,7 +222,7 @@ function Credits({ onOpenAuthor }: { onOpenAuthor?: () => void }) {
   const address = "github.com/jbelke";
   return (
     <footer className="mt-6 border-t border-border/60 pt-3 text-xs text-muted-foreground">
-      RDirStat by Josh Belke —{" "}
+      Stellar RDIRSTAT by Josh Belke —{" "}
       {onOpenAuthor === undefined ? (
         <span className="font-mono">{address}</span>
       ) : (

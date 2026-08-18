@@ -48,6 +48,9 @@ pnpm-debug.log*
 .env
 .env.*
 !.env.example
+# Per-environment templates ARE tracked; the real .env.<environment>
+# files they are copied to are not. See rush.sh --help.
+!.env.*.example
 # Developer ID / notarization material (phase 5). Never committed.
 *.p12
 *.pem
