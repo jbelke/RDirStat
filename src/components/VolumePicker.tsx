@@ -8,9 +8,15 @@
  * clicking a row never starts a 69M-entry operation**."
  *
  * That last clause is the whole interaction design, so it is enforced
- * structurally rather than by discipline: a row's click handler can only reach
- * `setPreflight`. `onScan` is reachable from exactly one button, inside the
- * expanded preflight, and that button names the volume it will walk.
+ * structurally rather than by discipline: **a row's click handler can only
+ * reach `setPreflight`.** Clicking a row expands it and does nothing else.
+ *
+ * `onScan` is reachable only from a button that exists to start a scan and
+ * names the volume it will walk. There are now two of them — one on the row and
+ * one inside the preflight — because requiring a disclosure to be opened before
+ * the primary action became visible made the common case ("scan this disk")
+ * cost an extra click and a hunt, for no safety the explicit button does not
+ * already provide. The invariant is unchanged: the row is not the trigger.
  *
  * ---------------------------------------------------------------------------
  * WHY THIS IS GROUPED, AND WHERE EACH NUMBER COMES FROM
@@ -432,11 +438,17 @@ interface VolumeRowItemProps {
 function VolumeRowItem({ volume, container, expanded, busy, onSelect, onScan }: VolumeRowItemProps) {
   return (
     <li className="border-b border-border/40 last:border-b-0">
+      {/* A row and its Scan control are SIBLINGS, not nested. The disclosure
+        * used to be the whole row, which is why the scan button could only live
+        * inside the expansion — a button cannot contain a button. Splitting
+        * them is what lets the primary action sit on the row without the row
+        * itself becoming the trigger. */}
+      <div className="flex items-center gap-2 pr-3 transition-colors hover:bg-accent/40">
       <button
         type="button"
         onClick={onSelect}
         aria-expanded={expanded}
-        className="flex w-full items-baseline gap-3 px-4 py-2 text-left transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        className="flex min-w-0 flex-1 items-baseline gap-3 px-4 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
         {expanded ? (
           <ChevronDown aria-hidden className="size-3 shrink-0 translate-y-0.5 text-muted-foreground" />
@@ -464,6 +476,24 @@ function VolumeRowItem({ volume, container, expanded, busy, onSelect, onScan }: 
           {formatSI(volume.usedBytes)} used
         </span>
       </button>
+
+        {/* Named for a screen reader, short on screen. Six rows each announcing
+          * "Scan" and nothing else would be six identical controls in the
+          * rotor; the visible label stays "Scan" because the row beside it
+          * already says which volume. */}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onScan}
+          disabled={busy}
+          aria-label={`Scan ${volume.name}`}
+          title={`Scan ${volume.name}`}
+          className="shrink-0"
+        >
+          {busy && <Loader aria-hidden className="animate-spin" />}
+          Scan
+        </Button>
+      </div>
 
       {expanded && (
         <div className="flex flex-col gap-3 bg-background/40 px-4 py-3">
