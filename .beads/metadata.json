@@ -2,6 +2,6 @@
   "database": "dolt",
   "backend": "dolt",
   "dolt_mode": "embedded",
-  "dolt_database": "nato",
+  "dolt_database": "rds",
   "project_id": "1a402fc3-bf1a-47a9-95a6-5b14ead2ccc7"
 }
