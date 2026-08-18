@@ -100,6 +100,23 @@ export interface UiState {
   detailsPinned: boolean;
 
   /**
+   * Two panes: what is big on the left, where it should go on the right.
+   *
+   * Off by default. The second pane is only meaningful when you are moving
+   * something, and a permanent half-width destination browser would charge
+   * every "what is filling this disk" session for a feature it is not using.
+   */
+  splitView: boolean;
+
+  /**
+   * The destination pane's current folder.
+   *
+   * A path rather than a node id, because a destination is not part of the
+   * scan — it can be on a volume that has never been read.
+   */
+  destinationPath: string;
+
+  /**
    * Whether the destructive actions are live.
    *
    * **Off by default, and it is never persisted.** Moving items to the Trash is
@@ -137,6 +154,8 @@ export interface UiState {
   toggleDetails: () => void;
   setDetailsOpen: (open: boolean) => void;
   setDetailsPinned: (pinned: boolean) => void;
+  setSplitView: (split: boolean) => void;
+  setDestinationPath: (path: string) => void;
   /** Arms or disarms Trash. Only ever called from an explicit user gesture. */
   setDeletionArmed: (armed: boolean) => void;
 }
@@ -182,6 +201,8 @@ export const useUiStore = create<UiState>((set) => ({
   sizeMetric: "allocated",
   detailsOpen: false,
   detailsPinned: readPinned(),
+  splitView: false,
+  destinationPath: "",
   deletionArmed: false,
 
   setRoute: (route) => set({ route }),
@@ -262,6 +283,10 @@ export const useUiStore = create<UiState>((set) => ({
   toggleDetails: () => set((state) => ({ detailsOpen: !state.detailsOpen })),
 
   setDetailsOpen: (detailsOpen) => set({ detailsOpen }),
+
+  setSplitView: (splitView) => set({ splitView }),
+
+  setDestinationPath: (destinationPath) => set({ destinationPath }),
 
   setDetailsPinned: (detailsPinned) => {
     writePinned(detailsPinned);

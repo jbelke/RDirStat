@@ -391,6 +391,48 @@ export async function scanStart(root: string, options: ScanOptions = defaultScan
  */
 export const OPEN_SETTINGS_EVENT = "rdirstat://open-settings";
 
+/** One child directory in a destination listing. */
+export interface BrowseEntryView {
+  readonly name: string;
+  readonly path: string;
+}
+
+/** What is inside a directory, for choosing a move destination. */
+export interface BrowseListingView {
+  /** The directory actually read, after `~` expansion and canonicalisation. */
+  readonly path: string;
+  /** `null` at the filesystem root, where there is no "up". */
+  readonly parent: string | null;
+  readonly directories: readonly BrowseEntryView[];
+  /** The listing was cut. Say so; a silent cut hides the folder being sought. */
+  readonly truncated: boolean;
+  /**
+   * Why nothing could be listed. `null` and an empty `directories` are
+   * different states — "empty" and "I could not look" must never render alike,
+   * or a permission error reads as a valid, empty destination.
+   */
+  readonly unreadable: string | null;
+}
+
+/**
+ * Lists the child directories of a path, for the destination pane.
+ *
+ * Unlike `completePath` this reports failure, because it answers a different
+ * question: a completion is a guess offered mid-keystroke, where an error is
+ * noise; a browse is a deliberate "show me what is in here", where "you cannot
+ * read this" is the answer.
+ */
+export async function browseDirectories(path: string): Promise<BrowseListingView> {
+  const listing = await commands.browseDirectories(path);
+  return {
+    path: listing.path,
+    parent: listing.parent,
+    directories: listing.directories,
+    truncated: listing.truncated,
+    unreadable: listing.unreadable,
+  };
+}
+
 /**
  * Directory completions for a partially typed path.
  *

@@ -160,6 +160,129 @@ fn complete_path_blocking(prefix: &str) -> Vec<String> {
     matches
 }
 
+/// The most child directories one listing will return.
+///
+/// A destination browser is for steering, not for reading a directory out.
+/// `/usr/share` has thousands of children and nobody picks a move target by
+/// scrolling past two thousand rows — they type. The listing says when it has
+/// been cut rather than pretending it is complete.
+const MAX_BROWSE_ENTRIES: usize = 500;
+
+/// One child directory offered by [`browse_directories`].
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+pub(crate) struct BrowseEntry {
+    /// The leaf name, for display.
+    pub name: String,
+    /// The full path, which is what a later action is given.
+    pub path: String,
+}
+
+/// What is inside a directory, for choosing a destination.
+///
+/// Deliberately NOT a scan: choosing where to put something needs the shape of
+/// the filesystem, not the size of it. A destination on an 8 TB disk would cost
+/// minutes to measure and the answer is not used — `relocate_plan` takes a
+/// path, checks the destination's own properties, and never asks how big its
+/// subtree is.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+pub(crate) struct BrowseListing {
+    /// The directory actually read, after `~` expansion and canonicalisation.
+    /// Echoed back because it may not be the string that was asked for.
+    pub path: String,
+    /// The parent, or `None` at the filesystem root, where "up" is not a move.
+    pub parent: Option<String>,
+    pub directories: Vec<BrowseEntry>,
+    /// The listing was cut at [`MAX_BROWSE_ENTRIES`]. Said out loud: a browser
+    /// that silently truncates is one that hides the folder you were looking
+    /// for and lets you conclude it does not exist.
+    pub truncated: bool,
+    /// Why nothing could be listed. `Some` means the directory was not read at
+    /// all, which is different from a directory that is genuinely empty, and
+    /// the UI must be able to tell those apart.
+    pub unreadable: Option<String>,
+}
+
+/// Lists the child directories of `path`, for the destination pane.
+///
+/// Unlike [`complete_path`] this reports failure, because the two answer
+/// different questions. A completion is a guess offered while someone types and
+/// an error there is noise; a browse is a deliberate "show me what is in here",
+/// and "you cannot read this" is the answer rather than an interruption.
+///
+/// Files are omitted. A move target is a directory, and listing files would
+/// offer choices that can only be refused later.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn browse_directories(path: String) -> BrowseListing {
+    // Kept for the failure arm: the closure takes ownership, and a join error
+    // still has to report which path it was asked about.
+    let asked = path.clone();
+    tauri::async_runtime::spawn_blocking(move || browse_blocking(&path))
+        .await
+        .unwrap_or_else(|error| BrowseListing {
+            path: asked,
+            parent: None,
+            directories: Vec::new(),
+            truncated: false,
+            unreadable: Some(error.to_string()),
+        })
+}
+
+fn browse_blocking(requested: &str) -> BrowseListing {
+    let expanded = expand_tilde(requested);
+    let raw = if expanded.is_empty() { "/".to_owned() } else { expanded };
+
+    // Canonicalise so the echoed path and every child path are absolute and
+    // symlink-free. A destination reached through a symlink is exactly how
+    // `check_disjoint` used to be fooled into copying a tree into itself.
+    let resolved = std::fs::canonicalize(&raw).unwrap_or_else(|_| PathBuf::from(&raw));
+    let display = resolved.to_string_lossy().into_owned();
+    let parent = resolved
+        .parent()
+        .map(|parent| parent.to_string_lossy().into_owned());
+
+    let entries = match std::fs::read_dir(&resolved) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return BrowseListing {
+                path: display,
+                parent,
+                directories: Vec::new(),
+                truncated: false,
+                unreadable: Some(error.to_string()),
+            };
+        }
+    };
+
+    let mut directories: Vec<BrowseEntry> = entries
+        .flatten()
+        .filter(|entry| entry.metadata().is_ok_and(|meta| meta.is_dir()))
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // Dot-directories are hidden here, unlike in completion, because
+            // there is no typed prefix to ask for them. `.Trashes` and
+            // `.Spotlight-V100` are never a destination anyone means.
+            if name.starts_with('.') {
+                return None;
+            }
+            let path = entry.path().to_string_lossy().into_owned();
+            Some(BrowseEntry { name, path })
+        })
+        .collect();
+
+    directories.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    let truncated = directories.len() > MAX_BROWSE_ENTRIES;
+    directories.truncate(MAX_BROWSE_ENTRIES);
+
+    BrowseListing {
+        path: display,
+        parent,
+        directories,
+        truncated,
+        unreadable: None,
+    }
+}
+
 /// Expands a leading `~`, which users type and no syscall accepts.
 fn expand_tilde(raw: &str) -> String {
     let Some(rest) = raw.strip_prefix('~') else {
@@ -1438,6 +1561,68 @@ mod tests {
         assert!(complete_path_blocking("").is_empty());
         // No separator: nothing to anchor the listing against.
         assert!(complete_path_blocking("Movies").is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // browse_directories
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn browsing_lists_child_directories_and_omits_files_and_dot_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["Movies", "Archive", ".Trashes"] {
+            std::fs::create_dir(dir.path().join(name)).expect("mkdir");
+        }
+        std::fs::write(dir.path().join("note.txt"), b"x").expect("write");
+
+        let listing = browse_blocking(&dir.path().to_string_lossy());
+        let names: Vec<&str> = listing.directories.iter().map(|e| e.name.as_str()).collect();
+        // Sorted case-insensitively, files dropped, dot-directories dropped:
+        // none of the three is a destination anyone means to pick.
+        assert_eq!(names, vec!["Archive", "Movies"], "{listing:?}");
+        assert!(listing.unreadable.is_none());
+        assert!(!listing.truncated);
+    }
+
+    #[test]
+    fn a_child_path_is_absolute_so_an_action_can_use_it_directly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("Target")).expect("mkdir");
+        let listing = browse_blocking(&dir.path().to_string_lossy());
+        let entry = listing.directories.first().expect("one entry");
+        assert!(std::path::Path::new(&entry.path).is_absolute(), "{entry:?}");
+        assert!(entry.path.ends_with("/Target"), "{entry:?}");
+    }
+
+    #[test]
+    fn an_unreadable_directory_says_so_rather_than_looking_empty() {
+        // The distinction the UI depends on: "nothing in here" and "I could not
+        // look" must not render the same, or a permission problem reads as an
+        // empty destination and the user picks it.
+        let listing = browse_blocking("/nonexistent-abcxyz-browse");
+        assert!(listing.unreadable.is_some(), "{listing:?}");
+        assert!(listing.directories.is_empty());
+    }
+
+    #[test]
+    fn browsing_is_capped_and_admits_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for index in 0..(MAX_BROWSE_ENTRIES + 5) {
+            std::fs::create_dir(dir.path().join(format!("d{index:04}"))).expect("mkdir");
+        }
+        let listing = browse_blocking(&dir.path().to_string_lossy());
+        assert_eq!(listing.directories.len(), MAX_BROWSE_ENTRIES);
+        assert!(listing.truncated, "a cut listing must say it was cut");
+    }
+
+    #[test]
+    fn the_root_has_no_parent_and_everything_else_does() {
+        assert_eq!(browse_blocking("/").parent, None);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let child = dir.path().join("child");
+        std::fs::create_dir(&child).expect("mkdir");
+        let listing = browse_blocking(&child.to_string_lossy());
+        assert!(listing.parent.is_some(), "{listing:?}");
     }
 
     #[test]

@@ -271,6 +271,18 @@ export const commands = {
 	 */
 	completePath: (prefix: string) => __TAURI_INVOKE<string[]>("complete_path", { prefix }),
 	/**
+	 *  Lists the child directories of `path`, for the destination pane.
+	 * 
+	 *  Unlike [`complete_path`] this reports failure, because the two answer
+	 *  different questions. A completion is a guess offered while someone types and
+	 *  an error there is noise; a browse is a deliberate "show me what is in here",
+	 *  and "you cannot read this" is the answer rather than an interruption.
+	 * 
+	 *  Files are omitted. A move target is a directory, and listing files would
+	 *  offer choices that can only be refused later.
+	 */
+	browseDirectories: (path: string) => __TAURI_INVOKE<BrowseListing>("browse_directories", { path }),
+	/**
 	 *  Mounted local volumes, for the launch screen.
 	 * 
 	 *  # Errors
@@ -765,6 +777,46 @@ export type ArenaError =
 	/**  The offending parent. */
 	parent: NodeId,
 } };
+
+/**  One child directory offered by [`browse_directories`]. */
+export type BrowseEntry = {
+	/**  The leaf name, for display. */
+	name: string,
+	/**  The full path, which is what a later action is given. */
+	path: string,
+};
+
+/**
+ *  What is inside a directory, for choosing a destination.
+ * 
+ *  Deliberately NOT a scan: choosing where to put something needs the shape of
+ *  the filesystem, not the size of it. A destination on an 8 TB disk would cost
+ *  minutes to measure and the answer is not used — `relocate_plan` takes a
+ *  path, checks the destination's own properties, and never asks how big its
+ *  subtree is.
+ */
+export type BrowseListing = {
+	/**
+	 *  The directory actually read, after `~` expansion and canonicalisation.
+	 *  Echoed back because it may not be the string that was asked for.
+	 */
+	path: string,
+	/**  The parent, or `None` at the filesystem root, where "up" is not a move. */
+	parent: string | null,
+	directories: BrowseEntry[],
+	/**
+	 *  The listing was cut at [`MAX_BROWSE_ENTRIES`]. Said out loud: a browser
+	 *  that silently truncates is one that hides the folder you were looking
+	 *  for and lets you conclude it does not exist.
+	 */
+	truncated: boolean,
+	/**
+	 *  Why nothing could be listed. `Some` means the directory was not read at
+	 *  all, which is different from a directory that is genuinely empty, and
+	 *  the UI must be able to tell those apart.
+	 */
+	unreadable: string | null,
+};
 
 /**  How far cancellation has progressed. */
 export type CancelState = 

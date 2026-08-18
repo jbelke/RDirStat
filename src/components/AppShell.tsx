@@ -31,6 +31,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import type { SortingState } from "@tanstack/react-table";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { DestinationPane } from "@/components/DestinationPane";
 import { DetailsPanel } from "@/components/DetailsPanel";
 import { DriveSwitcher } from "@/components/DriveSwitcher";
 import { RelocateDialog } from "@/components/RelocateDialog";
@@ -59,6 +60,7 @@ import { Titlebar, type Crumb } from "@/components/Titlebar";
 import { TreeTable } from "@/components/TreeTable";
 import { VolumePicker } from "@/components/VolumePicker";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import { formatSI } from "@/lib/format";
 import { categoryOf } from "@/lib/categories";
 import {
@@ -97,7 +99,7 @@ import {
 import { cn } from "@/lib/utils";
 import { GENERATION_NONE, isRealNode } from "@/lib/wire";
 import { useCurrentRoot, useSoleSelection, useUiStore, type Route } from "@/state/store";
-import { CircleAlert, PanelRightOpen, X } from "lucide-react";
+import { CircleAlert, Columns2, PanelRightOpen, X } from "lucide-react";
 
 /**
  * The report routes, all of them live.
@@ -195,6 +197,10 @@ export function AppShell() {
   const detailsPinned = useUiStore((state) => state.detailsPinned);
   const setDetailsOpen = useUiStore((state) => state.setDetailsOpen);
   const setDetailsPinned = useUiStore((state) => state.setDetailsPinned);
+  const splitView = useUiStore((state) => state.splitView);
+  const setSplitView = useUiStore((state) => state.setSplitView);
+  const destinationPath = useUiStore((state) => state.destinationPath);
+  const setDestinationPath = useUiStore((state) => state.setDestinationPath);
   const setRoute = useUiStore((state) => state.setRoute);
   const generation = useUiStore((state) => state.generation);
   const navStack = useUiStore((state) => state.navStack);
@@ -375,6 +381,13 @@ export function AppShell() {
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [detailsOpen, detailsPinned, setDetailsOpen]);
+
+  /*
+   * The destination the move dialog should open on, when the split view
+   * proposed one. Cleared on close so the next move from the tree's own
+   * action does not inherit a folder chosen minutes ago for something else.
+   */
+  const [relocateDestination, setRelocateDestination] = useState<string | null>(null);
 
   const handleCancel = useCallback(async () => {
     if (activeScan === null) return;
@@ -899,7 +912,8 @@ export function AppShell() {
           )}
 
           {route === "tree" && currentRoot !== null && (
-            <div className="flex min-h-0 flex-1 flex-col">
+            <div className="flex min-h-0 flex-1">
+              <div className="flex min-h-0 min-w-0 flex-1 flex-col">
               <div className="flex items-center gap-3 border-b border-border/60 px-3 py-2">
                 <SegmentedControl
                   label="Hierarchy layout"
@@ -913,6 +927,25 @@ export function AppShell() {
                   value={sizeMetric}
                   onChange={setSizeMetric}
                 />
+                {/* Opening the split view seeds the destination with the
+                  * volume list rather than with nothing: an empty path field is
+                  * a question, and "/Volumes" is the answer for every move that
+                  * goes to another disk, which is what this is for. */}
+                <Button
+                  size="sm"
+                  variant={splitView ? "default" : "ghost"}
+                  aria-pressed={splitView}
+                  title={splitView ? "Close the destination pane" : "Split: choose where things go"}
+                  onClick={() => {
+                    if (!splitView && destinationPath.trim().length === 0) {
+                      setDestinationPath("/Volumes");
+                    }
+                    setSplitView(!splitView);
+                  }}
+                >
+                  <Columns2 aria-hidden />
+                  Split
+                </Button>
                 <span className="ml-auto text-xs text-muted-foreground">
                   {rootDetails.data !== undefined && (
                     <>
@@ -1004,6 +1037,24 @@ export function AppShell() {
                 onTrash={(node) => handleTrash([node])}
                 trashEnabled={deletionArmed}
               />
+              </div>
+
+              {/* The second pane is a sibling of the tree column, not an
+                * overlay: both are being read at once, and a destination you
+                * have to dismiss to see what you are moving is not a split
+                * view. */}
+              {splitView && (
+                <DestinationPane
+                  className="w-96 shrink-0"
+                  path={destinationPath}
+                  onPathChange={setDestinationPath}
+                  selectionCount={selection.size}
+                  onMoveHere={(destination) => {
+                    setRelocateDestination(destination);
+                    setRelocating([...selection]);
+                  }}
+                />
+              )}
             </div>
           )}
         </main>
@@ -1068,7 +1119,11 @@ export function AppShell() {
         sourcePath={relocating.length === 1 ? (relocatingDetails.data?.path ?? null) : null}
         scanRootPath={summary?.rootPath ?? null}
         deletionArmed={deletionArmed}
-        onClose={() => setRelocating([])}
+        initialDestination={relocateDestination}
+        onClose={() => {
+          setRelocating([]);
+          setRelocateDestination(null);
+        }}
         onRelocated={handleRelocated}
       />
 

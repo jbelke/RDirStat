@@ -65,6 +65,15 @@ export interface RelocateDialogProps {
    */
   scanRootPath: string | null;
   deletionArmed: boolean;
+  /**
+   * A destination proposed by the split view.
+   *
+   * Only ever a *starting point*: the field stays editable and the plan is
+   * still minted by the backend against whatever the field finally says. A
+   * pre-filled path that could not be changed would move the decision out of
+   * the dialog that owns the safety rules and into the pane that suggested it.
+   */
+  initialDestination?: string | null;
   onClose: () => void;
   /** Called after a successful relocation: the tree on screen is now wrong. */
   onRelocated: (report: RelocateReportView) => void;
@@ -76,11 +85,24 @@ export function RelocateDialog({
   sourcePath,
   scanRootPath,
   deletionArmed,
+  initialDestination = null,
   onClose,
   onRelocated,
 }: RelocateDialogProps) {
   const volumes = useVolumes();
-  const [destination, setDestination] = useState("");
+  const [destination, setDestination] = useState(initialDestination ?? "");
+  /*
+   * Adopt a destination proposed by the split view.
+   *
+   * Keyed on the proposal itself rather than on `nodes`, so opening the dialog
+   * again for the same folder re-seeds it, while anything typed in the field
+   * afterwards survives — the effect does not run again until the proposal
+   * changes.
+   */
+  useEffect(() => {
+    if (initialDestination !== null) setDestination(initialDestination);
+  }, [initialDestination]);
+
   const [mode, setMode] = useState<RelocateMode>("migrate");
   const [disposal, setDisposal] = useState<SourceDisposal>("trash");
   const [plans, setPlans] = useState<readonly RelocatePlanView[] | null>(null);
