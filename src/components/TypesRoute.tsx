@@ -222,9 +222,9 @@ export function TypesRoute({
               route.
             </p>
             <p>
-              A category with no files here is absent rather than shown as a zero row: this build
-              defines twenty-five categories out of a possible 256, and padding the table with the
-              rest would be inventing rows.
+              A category with no files here is absent rather than shown as a zero row. Padding the
+              table with every category the app knows about would be inventing rows for things this
+              folder does not contain.
             </p>
             <p>
               Allocated and logical are never summed. Allocated is what the filesystem spent,

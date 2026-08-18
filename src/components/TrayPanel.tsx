@@ -20,9 +20,11 @@
  *   not a stream. The 10 Hz progress event is deliberately not subscribed here:
  *   a menu-bar popover that re-renders ten times a second while hidden is a
  *   battery bug.
- * - **It reports the catalog honestly.** The Parquet/DuckDB catalog is phase 6
- *   and not in this build, so the panel says so instead of drawing an empty
- *   frame that looks like a bug.
+ * - **It says nothing about the build.** An earlier version carried a "Catalog"
+ *   section explaining that Parquet/DuckDB reporting was a later phase. A
+ *   menu-bar popover is the smallest surface in the app and it was spending a
+ *   third of it on a feature that does not exist. Roadmap belongs in the repo,
+ *   not in a panel someone opens to check free space.
  */
 
 import { Loader, PanelTopOpen, RefreshCw } from "lucide-react";
@@ -142,13 +144,6 @@ export function TrayPanel() {
           </p>
         )}
 
-        <h2 className="mb-1 mt-4 text-[10px] uppercase tracking-wide text-muted-foreground">
-          Catalog
-        </h2>
-        <p className="text-[11px] text-muted-foreground">
-          Saved scans, Parquet partitions and the DuckDB reports are phase 6 and are not compiled
-          into this build. When they land, their statistics appear here.
-        </p>
       </div>
 
       <footer className="flex shrink-0 items-center gap-2 border-t border-border/60 px-3 py-2">
