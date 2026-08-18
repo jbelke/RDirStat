@@ -310,35 +310,42 @@ pub(crate) fn upsert(
         _ => {}
     }
 
-    // Read the existing secret BEFORE the rename, so an edit that only changes
-    // the folder carries the stored credential across to the new name instead
-    // of silently dropping it.
-    let carried = previous
+    let old_name = previous
         .and_then(|index| registry.targets.get(index))
-        .map(|old| read_secret(&old.name))
-        .transpose()?
-        .unwrap_or_default();
+        .map(|old| old.name.clone());
+    let renaming = old_name.as_ref().is_some_and(|old| old != &clean.name);
 
-    let mut merged = carried;
-    merged.apply(secret);
-
-    if let Some(index) = previous {
-        let old_name = registry.targets.get(index).map(|target| target.name.clone());
-        if let Some(slot) = registry.targets.get_mut(index) {
-            *slot = clean.clone();
-        }
+    // An edit that names no secret and does not rename never touches the
+    // Keychain. Worth arranging rather than merely saving a syscall: reading
+    // and re-writing a Keychain item can raise a system prompt, and prompting
+    // somebody because they corrected a folder name is how people learn to hit
+    // Allow without reading what they are allowing.
+    if !secret.is_empty() || renaming {
+        // Read BEFORE the rename, so an edit that only changes the folder
+        // carries the stored credential to the new name rather than dropping
+        // it.
+        let mut merged = match &old_name {
+            Some(old) => read_secret(old)?,
+            None => StoredSecret::default(),
+        };
+        merged.apply(secret);
         // Write the new entry first, then drop the old one: the reverse order
         // loses the credential if the write fails.
         write_secret(&clean.name, &merged)?;
-        if let Some(old_name) = old_name.filter(|old| old != &clean.name) {
-            forget_secret(&old_name)?;
+        if let Some(old) = old_name.filter(|old| old != &clean.name) {
+            forget_secret(&old)?;
+        }
+    }
+
+    if let Some(index) = previous {
+        if let Some(slot) = registry.targets.get_mut(index) {
+            *slot = clean.clone();
         }
     } else {
         if registry.targets.len() >= MAX_TARGETS {
             return Err(RemoteConfigError::TooMany(MAX_TARGETS));
         }
         registry.targets.push(clean.clone());
-        write_secret(&clean.name, &merged)?;
     }
 
     save(app_data, &registry).map_err(|error| RemoteConfigError::Internal(error.to_string()))?;
@@ -520,6 +527,87 @@ mod tests {
         let json = serde_json::to_vec(&stored).expect("the stored secret serialises");
         let parsed: StoredSecret = serde_json::from_slice(&json).expect("and parses back");
         assert_eq!(parsed.key_path.as_deref(), Some("/home/josh/.ssh/id_ed25519"));
+    }
+
+    // Adding a target with no secret must not write a Keychain item at all —
+    // which is the ordinary case for SFTP and for an S3 bucket reached through
+    // the AWS chain. Asserted through the saved list, since touching the real
+    // Keychain in a test would prompt whoever is running it.
+    #[test]
+    fn saving_a_target_with_no_secret_leaves_the_list_correct() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let target = RemoteTarget {
+            kind: RemoteKind::Sftp,
+            endpoint: "nas.lan".to_owned(),
+            bucket: String::new(),
+            ..s3("nas")
+        };
+
+        let saved = upsert(dir.path(), &target, SecretInput::default(), None).expect("a valid target saves");
+        assert_eq!(saved.name, "nas");
+        assert_eq!(load(dir.path()).targets.len(), 1);
+    }
+
+    #[test]
+    fn a_duplicate_name_is_refused_before_anything_is_written() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let target = RemoteTarget {
+            kind: RemoteKind::Sftp,
+            endpoint: "nas.lan".to_owned(),
+            bucket: String::new(),
+            ..s3("nas")
+        };
+        upsert(dir.path(), &target, SecretInput::default(), None).expect("the first save works");
+
+        let error = upsert(dir.path(), &target, SecretInput::default(), None).expect_err("the second must be refused");
+        assert!(matches!(error, RemoteConfigError::DuplicateName(_)), "{error:?}");
+        assert_eq!(
+            load(dir.path()).targets.len(),
+            1,
+            "the refused save must not have appended"
+        );
+    }
+
+    #[test]
+    fn editing_a_target_in_place_replaces_rather_than_appends() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let target = RemoteTarget {
+            kind: RemoteKind::Sftp,
+            endpoint: "nas.lan".to_owned(),
+            bucket: String::new(),
+            ..s3("nas")
+        };
+        upsert(dir.path(), &target, SecretInput::default(), None).expect("the first save works");
+
+        let moved = RemoteTarget {
+            root: "/volume2/".to_owned(),
+            ..target
+        };
+        upsert(dir.path(), &moved, SecretInput::default(), Some("nas")).expect("the edit saves");
+
+        let saved = load(dir.path()).targets;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].root, "/volume2/");
+    }
+
+    #[test]
+    fn a_target_that_does_not_validate_is_never_written() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let bad = RemoteTarget {
+            bucket: String::new(),
+            ..s3("broken")
+        };
+
+        let error = upsert(dir.path(), &bad, SecretInput::default(), None).expect_err("S3 needs a bucket");
+        assert!(matches!(error, RemoteConfigError::Invalid(_)), "{error:?}");
+        assert!(load(dir.path()).targets.is_empty());
+    }
+
+    #[test]
+    fn removing_a_target_that_is_not_there_says_so() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let error = remove(dir.path(), "ghost").expect_err("there is no such target");
+        assert!(matches!(error, RemoteConfigError::NotFound(_)), "{error:?}");
     }
 
     #[test]
