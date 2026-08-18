@@ -137,6 +137,19 @@ safe_to_remove() {
   return 0
 }
 
+# force_rm PATH — remove PATH, coping with read-only trees (cargo marks its
+# registry sources 0555, which makes a plain `rm -rf` fail on the directory
+# rather than the files inside it). A path we cannot remove is reported and
+# skipped; it must not abort the run.
+force_rm() {
+  local p="$1"
+  rm -rf -- "$p" 2>/dev/null && return 0
+  chmod -R u+w -- "$p" 2>/dev/null || true
+  rm -rf -- "$p" 2>/dev/null && return 0
+  say "  ${YELLOW}could not fully remove $p — skipped${RESET}"
+  return 0
+}
+
 # remove LABEL PATH [PATH...]
 # Sizes every path, records the plan, and deletes only under --apply.
 remove() {
@@ -161,7 +174,7 @@ remove() {
     for p in "$@"; do
       [[ -e "$p" ]] || continue
       safe_to_remove "$p" || continue
-      rm -rf -- "$p"
+      force_rm "$p"
     done
   fi
 }
@@ -443,8 +456,10 @@ if [[ $ASSUME_YES -eq 0 ]]; then
 fi
 
 AFTER_FREE=$(free_kb)
-printf '\n%sFreed %s%s  %s(free: %s -> %s)%s\n' \
-  "$GREEN" "$(human $((AFTER_FREE - BEFORE_FREE)))" "$RESET" \
+# Report what was removed, not the df delta: anything else writing to the disk
+# during the run makes that delta smaller than the work done, or even negative.
+printf '\n%sRemoved %s%s  %s(free: %s -> %s)%s\n' \
+  "$GREEN" "$(human "$TOTAL_KB")" "$RESET" \
   "$DIM" "$(human "$BEFORE_FREE")" "$(human "$AFTER_FREE")" "$RESET"
 
 if ! command -v sccache >/dev/null 2>&1 && want rust; then
