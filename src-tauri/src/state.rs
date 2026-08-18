@@ -255,6 +255,25 @@ pub(crate) enum Admission {
     Wait { scan_id: ScanId, reason: WaitReason },
 }
 
+impl Admission {
+    /// The scan, asserting it started.
+    ///
+    /// Panics rather than returning an `Option` because every use is an
+    /// assertion about admission, and an `expect` on a `None` would lose the
+    /// reason the scan was held — which is the only interesting part of the
+    /// failure.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn started(self, what: &str) -> WaitingScan {
+        match self {
+            Self::Start(pending) => *pending,
+            Self::Wait { reason, .. } => {
+                panic!("{what} should have started, but is waiting: {reason:?}")
+            }
+        }
+    }
+}
+
 /// A scan that has an id but has not been allowed to start yet.
 ///
 /// It carries the request verbatim because `state.rs` decides *when* a scan

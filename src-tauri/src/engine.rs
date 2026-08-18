@@ -300,6 +300,169 @@ mod tests {
         ScanOptions::default()
     }
 
+    /// Two scans running at once, through the real engine, publishing two
+    /// real trees into one `AppState`.
+    ///
+    /// Everything in `state.rs` drives the admission machine with fixture
+    /// device numbers and never starts a thread. That leaves the join between
+    /// the two halves — admit, run, publish, query both — untested, and it is
+    /// exactly the join the feature is. This test walks it end to end with the
+    /// scanner actually reading directories.
+    ///
+    /// The two roots are given **different device numbers** so admission
+    /// permits them concurrently; a fixture cannot conjure a second physical
+    /// disk, and what is under test here is the concurrency of the engine and
+    /// the plurality of the published map, not `st_dev` itself.
+    #[test]
+    fn two_scans_run_at_once_and_both_trees_are_queryable() {
+        use crate::state::AppState;
+        use std::sync::Arc as StdArc;
+
+        let left = tempfile::tempdir().expect("tempdir");
+        let right = tempfile::tempdir().expect("tempdir");
+        for (dir, count) in [(&left, 8_usize), (&right, 12_usize)] {
+            for index in 0..count {
+                std::fs::write(dir.path().join(format!("f{index}.bin")), vec![b'x'; 64]).expect("write");
+            }
+            std::fs::create_dir(dir.path().join("nested")).expect("mkdir");
+            std::fs::write(dir.path().join("nested/deep.bin"), b"deep").expect("write");
+        }
+
+        let state = StdArc::new(AppState::new());
+
+        // Distinct devices, so admission starts both rather than queueing one.
+        let first = state
+            .accept(left.path().to_path_buf(), display_of(left.path()), 101, options())
+            .expect("accepted")
+            .started("the first scan");
+        let second = state
+            .accept(right.path().to_path_buf(), display_of(right.path()), 202, options())
+            .expect("accepted")
+            .started("the second scan");
+
+        assert_eq!(state.status().running.len(), 2, "both scans are admitted");
+
+        // Genuinely simultaneous: both threads are spawned before either is
+        // joined, so the engines overlap rather than running back to back.
+        let handles: Vec<_> = [first, second]
+            .into_iter()
+            .map(|pending| {
+                let state = StdArc::clone(&state);
+                std::thread::spawn(move || {
+                    let outcome = run(ScanRequest {
+                        root: pending.root.clone(),
+                        options: pending.options.clone(),
+                        scan_id: pending.scan_id,
+                        generation: pending.generation,
+                        cancel: StdArc::clone(&pending.cancel),
+                        counters: StdArc::clone(&pending.counters),
+                    });
+                    match outcome {
+                        ScanOutcome::Completed(scan) => {
+                            state.publish(StdArc::from(scan));
+                            pending.generation
+                        }
+                        other => panic!("a fixture scan must complete, got {other:?}"),
+                    }
+                })
+            })
+            .collect();
+
+        let generations: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("the scan thread must not panic"))
+            .collect();
+        assert_eq!(generations.len(), 2);
+
+        // The property that matters: BOTH trees are addressable afterwards.
+        // Under the old single-slot machine the second publish replaced the
+        // first, and this assertion is what would have caught that.
+        for generation in &generations {
+            let tree = state
+                .tree_for_query(*generation)
+                .unwrap_or_else(|error| panic!("generation {generation:?} must be resident: {error:?}"));
+            assert_eq!(tree.generation, *generation);
+            assert!(tree.tree.len() > 1, "a scanned tree has nodes");
+            assert!(tree.tree.retained_bytes() > 0, "and reports its memory");
+        }
+
+        let status = state.status();
+        assert!(status.running.is_empty(), "both scans retired");
+        assert_eq!(status.ready.len(), 2, "and both trees are offered");
+        // Different roots, so the two must not be the same tree twice.
+        assert_ne!(status.ready[0].root, status.ready[1].root);
+    }
+
+    /// Two scans on the SAME device: the second waits, then runs when the
+    /// first ends, and its tree joins the first rather than replacing it.
+    #[test]
+    fn a_same_device_scan_waits_then_runs_and_both_trees_survive() {
+        use crate::state::AppState;
+        use std::sync::Arc as StdArc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let left = dir.path().join("left");
+        let right = dir.path().join("right");
+        for path in [&left, &right] {
+            std::fs::create_dir(path).expect("mkdir");
+            std::fs::write(path.join("a.bin"), b"hello").expect("write");
+        }
+
+        let state = AppState::new();
+        // One device for both, which is the real shape: two folders on one disk.
+        let first = state
+            .accept(left.clone(), display_of(&left), 7, options())
+            .expect("accepted")
+            .started("the first scan");
+        let waited = state
+            .accept(right.clone(), display_of(&right), 7, options())
+            .expect("accepted");
+        assert!(
+            matches!(waited, crate::state::Admission::Wait { .. }),
+            "a same-device scan must wait, got {waited:?}"
+        );
+
+        let ScanOutcome::Completed(scan) = run(ScanRequest {
+            root: first.root.clone(),
+            options: first.options.clone(),
+            scan_id: first.scan_id,
+            generation: first.generation,
+            cancel: StdArc::clone(&first.cancel),
+            counters: StdArc::clone(&first.counters),
+        }) else {
+            panic!("the first scan must complete");
+        };
+        state.publish(StdArc::from(scan));
+
+        // The device is free, so the queued scan is released.
+        let released = state.take_admissible();
+        assert_eq!(released.len(), 1, "the waiting scan is released");
+        let second = &released[0];
+
+        let ScanOutcome::Completed(scan) = run(ScanRequest {
+            root: second.root.clone(),
+            options: second.options.clone(),
+            scan_id: second.scan_id,
+            generation: second.generation,
+            cancel: StdArc::clone(&second.cancel),
+            counters: StdArc::clone(&second.counters),
+        }) else {
+            panic!("the second scan must complete");
+        };
+        state.publish(StdArc::from(scan));
+
+        assert!(
+            state.tree_for_query(first.generation).is_ok(),
+            "the first tree survived"
+        );
+        assert!(state.tree_for_query(second.generation).is_ok(), "and so did the second");
+        assert_eq!(state.status().ready.len(), 2);
+    }
+
+    fn display_of(path: &std::path::Path) -> rdirstat_core::DisplayPath {
+        rdirstat_core::DisplayPath::from_bytes(path.as_os_str().as_encoded_bytes())
+    }
+
     /// The live error log is fed by the scan, not by the completed result.
     ///
     /// This is the whole point of the `ErrorSink` seam: a user watching "334
