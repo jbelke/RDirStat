@@ -68,6 +68,12 @@ const TILE_INSET = 0.105;
 
 // ---------------------------------------------------------------------------
 // A very small renderer: RGBA float canvas, source-over, SDF coverage.
+//
+// The buffer holds PREMULTIPLIED alpha, because that is the form in which
+// source-over is a plain lerp and compositing stays associative. PNG stores
+// straight alpha, so `encodePng` divides it back out. Skipping that step is
+// the classic dark-fringe bug: an edge pixel at half coverage would ship as
+// half-brightness colour AND half alpha, and get composited to a quarter.
 // ---------------------------------------------------------------------------
 
 function canvas(width, height) {
@@ -132,15 +138,18 @@ function compose(target, source, x, y, alpha) {
       const tx = x + sx;
       if (tx < 0 || tx >= target.width) continue;
       const si = (sy * source.width + sx) * 4;
-      const a = source.data[si + 3] * alpha;
-      if (a <= 0) continue;
+      const sourceAlpha = source.data[si + 3] * alpha;
+      if (sourceAlpha <= 0) continue;
       const ti = (ty * target.width + tx) * 4;
-      const inverse = 1 - a;
+      const inverse = 1 - sourceAlpha;
+      // `source` is already premultiplied, so the constant `alpha` is the only
+      // extra factor its colour channels take. Scaling them by `sourceAlpha`
+      // here would apply the source's own alpha a second time.
       for (let channel = 0; channel < 3; channel += 1) {
         target.data[ti + channel] =
-          source.data[si + channel] * a + target.data[ti + channel] * inverse;
+          source.data[si + channel] * alpha + target.data[ti + channel] * inverse;
       }
-      target.data[ti + 3] = a + target.data[ti + 3] * inverse;
+      target.data[ti + 3] = sourceAlpha + target.data[ti + 3] * inverse;
     }
   }
 }
@@ -191,16 +200,22 @@ function encodePng(target) {
   // Filter type 0 on every scanline. The art is large flat areas, so the
   // adaptive filters buy almost nothing and cost determinism.
   const raw = Buffer.alloc(height * (1 + width * 4));
+  const byte = (value) => Math.max(0, Math.min(255, Math.round(value * 255)));
   let offset = 0;
   for (let y = 0; y < height; y += 1) {
     raw[offset] = 0;
     offset += 1;
     for (let x = 0; x < width; x += 1) {
       const i = (y * width + x) * 4;
-      for (let channel = 0; channel < 4; channel += 1) {
-        raw[offset] = Math.max(0, Math.min(255, Math.round(data[i + channel] * 255)));
+      const alpha = data[i + 3];
+      for (let channel = 0; channel < 3; channel += 1) {
+        // Un-premultiply. A fully transparent pixel has no colour to recover,
+        // and dividing by its zero alpha would produce NaN.
+        raw[offset] = alpha > 0 ? byte(data[i + channel] / alpha) : 0;
         offset += 1;
       }
+      raw[offset] = byte(alpha);
+      offset += 1;
     }
   }
 
