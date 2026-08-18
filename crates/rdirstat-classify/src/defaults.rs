@@ -4,7 +4,7 @@
 //!
 //! Authored from public format knowledge for this repository. The suffix
 //! tables, the category set, the keys, and the palette are **not** transcribed
-//! from any other project; `reference-code/` is GPL-2.0 and docs/04 fixes the
+//! from any other project; QDirStat is GPL-2.0 and docs/04 fixes the
 //! rule that we reproduce *behaviour*, never tables. Where a suffix is
 //! genuinely ambiguous the choice is written down in a comment next to it,
 //! because the interesting part of a taxonomy is the tie-breaks.

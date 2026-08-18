@@ -8,8 +8,8 @@
 //! against the fields OpenDAL actually takes, which is why it is smaller, has
 //! no icons, and carries a `required` list Cyberduck has no equivalent of.
 //!
-//! Worth stating explicitly because `reference-code/cyberduck` is checked out
-//! in this repo and is GPL-3.0. An idea is not copyrightable and a vendor's own
+//! Worth stating explicitly because Cyberduck is checked out locally for
+//! reference and is GPL-3.0. An idea is not copyrightable and a vendor's own
 //! endpoint hostname is a fact, but a copied plist would be neither.
 //!
 //! The list is short on purpose. A profile earns its place by removing a

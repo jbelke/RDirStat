@@ -278,7 +278,7 @@ fn with_scheme(endpoint: &str) -> String {
 /// file over the multipart threshold on every run is worse than no comparison
 /// at all. The `-` is the tell, and the only reliable one.
 ///
-/// (`reference-code/rustfs/crates/checksums` is the same rule from the server
+/// (RustFS's `crates/checksums` is the same rule from the server
 /// side: it keeps the streaming-hash registry separate from the composite one.)
 #[must_use]
 pub fn usable_etag(etag: Option<&str>) -> Option<String> {
