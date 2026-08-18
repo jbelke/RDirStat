@@ -541,6 +541,28 @@ fn advisories(
     warnings
 }
 
+/// Rejects a request that cannot be acted on at all.
+///
+/// Shared by [`plan`] and [`apply`] so the two cannot drift: an apply that
+/// validated less than the plan it is authorised by would be a way in.
+fn usable(request: SyncRequest<'_>) -> Result<(), SyncError> {
+    for path in [request.source, request.destination] {
+        if !acceptable(path) {
+            return Err(SyncError::BadPath {
+                path: display(path),
+                reason: "it must be an absolute path with no `..` segments".to_owned(),
+            });
+        }
+        if !path.is_dir() {
+            return Err(SyncError::BadPath {
+                path: display(path),
+                reason: "it is not a directory".to_owned(),
+            });
+        }
+    }
+    check_disjoint(request.source, request.destination)
+}
+
 /// Describes what a sync would do, and mints the token that authorizes it.
 ///
 /// Returns a plan even when the sync cannot proceed, for the same reason
@@ -559,21 +581,7 @@ pub(crate) fn plan<S: BuildHasher>(
     request: SyncRequest<'_>,
 ) -> Result<SyncPlan, SyncError> {
     let SyncRequest { source, destination, compare_mode, on_differ } = request;
-    for path in [source, destination] {
-        if !acceptable(path) {
-            return Err(SyncError::BadPath {
-                path: display(path),
-                reason: "it must be an absolute path with no `..` segments".to_owned(),
-            });
-        }
-        if !path.is_dir() {
-            return Err(SyncError::BadPath {
-                path: display(path),
-                reason: "it is not a directory".to_owned(),
-            });
-        }
-    }
-    check_disjoint(source, destination)?;
+    usable(request)?;
 
     let mut entries = Vec::new();
     let mut tally = Tally::default();
@@ -831,12 +839,26 @@ pub(crate) fn apply<S: BuildHasher>(
     confirmation: &ConfirmationToken,
 ) -> Result<SyncReport, SyncError> {
     let SyncRequest { source, destination, .. } = request;
-    let fresh = plan(keys, generation, now_unix_ms, request)?;
+    usable(request)?;
 
+    // ONE walk, uncapped. `plan` caps its entry list for display, so this used
+    // to call `plan` and then walk a second time to get the full set — which
+    // under `CompareMode::Verify` byte-compared the entire overlap TWICE
+    // before the first byte was copied. The walk already produces both the
+    // entries and the tally the token is checked against, so the second pass
+    // was buying nothing.
+    let mut all = Vec::new();
+    let mut tally = Tally::default();
+    walk(request, Path::new(""), usize::MAX, &mut all, &mut tally);
+
+    // Re-derived from THIS walk, not from the caller's plan: the frontend's
+    // copy of the plan is display state, and a token that verified against
+    // numbers supplied by the webview would authorise nothing. A source that
+    // changed between the review and the confirm fails closed here.
     let identity = ItemIdentity {
         node: rdirstat_core::NodeId::from_raw(0),
-        device: fresh.total_to_copy,
-        inode: fresh.bytes_to_copy,
+        device: tally.total_to_copy,
+        inode: tally.bytes_to_copy,
     };
     token::verify(keys, confirmation, generation, now_unix_ms, &[identity])
         .map_err(|_| SyncError::InvalidConfirmation)?;
@@ -849,13 +871,6 @@ pub(crate) fn apply<S: BuildHasher>(
         bytes_copied: 0,
         failures: Vec::new(),
     };
-
-    // Re-walked UNCAPPED rather than using `fresh.entries`, which is
-    // truncated for display. A plan that listed 5,000 of 40,000 files must
-    // still copy all 40,000.
-    let mut all = Vec::new();
-    let mut tally = Tally::default();
-    walk(request, Path::new(""), usize::MAX, &mut all, &mut tally);
 
     // The planned set goes into ONE `ditto --bom`; see `copy_planned`. Only the
     // paths a bom cannot describe fall back to a process each.
