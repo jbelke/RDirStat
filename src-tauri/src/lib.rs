@@ -54,12 +54,34 @@ mod transfers;
 mod tray;
 mod volumes;
 
-pub use crate::events::ScanProgressEvent;
+pub use crate::events::{ScanProgressEvent, TransferProgressEvent};
 pub use crate::state::AppState;
 
 /// Commands that answer with raw bytes instead of JSON. Exported as a constant
 /// so the generated TypeScript names them rather than leaving them folklore.
 const BINARY_COMMANDS: [&str; 2] = ["layout", "report"];
+
+/// Loads the saved transfer queue and wires its change events to the frontend.
+///
+/// The listener is installed here, at the one place that has an `AppHandle`,
+/// so that `TransferManager` itself never holds one — which is what keeps every
+/// test in `transfers.rs` runnable without a window.
+fn install_transfer_queue(app: &tauri::AppHandle) -> std::sync::Arc<transfers::TransferManager> {
+    use tauri_specta::Event as _;
+
+    let app_data = snapshot_store::app_data_dir(app).unwrap_or_else(|error| {
+        tracing::warn!(%error, "no app data directory; transfers will not survive a restart");
+        std::env::temp_dir().join("rdirstat-transfers")
+    });
+    let emitter = app.clone();
+    std::sync::Arc::new(
+        transfers::TransferManager::load(&app_data).with_listener(Box::new(move |job| {
+            // A failed emit means the window is gone. The job carries on, and
+            // its state is on disk, so there is nothing to recover here.
+            drop(events::TransferProgressEvent(job.clone()).emit(&emitter));
+        })),
+    )
+}
 
 /// Builds the `tauri-specta` command and event registry.
 ///
@@ -98,8 +120,20 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::export_snapshot,
             commands::relocate_plan,
             commands::relocate_apply,
+            commands::remote_profiles,
+            commands::remote_targets,
+            commands::remote_save_target,
+            commands::remote_delete_target,
+            commands::remote_probe,
+            commands::remote_plan,
+            commands::transfers,
+            commands::transfer_enqueue,
+            commands::transfer_pause,
+            commands::transfer_resume,
+            commands::transfer_cancel,
+            commands::transfers_clear,
         ])
-        .events(tauri_specta::collect_events![ScanProgressEvent])
+        .events(tauri_specta::collect_events![ScanProgressEvent, TransferProgressEvent])
         // Argument types for the two binary commands, so the frontend still has
         // generated types for a hand-written `invoke<ArrayBuffer>` call.
         .typ::<rdirstat_core::LayoutKind>()
@@ -288,6 +322,15 @@ pub fn run() -> tauri::Result<()> {
         .manage(AppState::new())
         .setup(move |app| {
             builder.mount_events(app);
+            // The transfer queue needs the app data directory, which needs the
+            // handle — so it is managed here rather than beside `AppState`. A
+            // queue that cannot find its directory is not a reason to refuse to
+            // start: the app is a disk-usage tool first, and an in-memory queue
+            // still works for the session.
+            {
+                use tauri::Manager as _;
+                app.manage(install_transfer_queue(app.handle()));
+            }
             // The menu-bar presence. A tray that cannot be created is not a
             // reason to refuse to start: the main window is the product, and
             // the tray is how you watch it without one.

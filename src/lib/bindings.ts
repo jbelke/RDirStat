@@ -418,11 +418,134 @@ export const commands = {
 	 *  so in its message.
 	 */
 	relocateApply: (generation: TreeGeneration, node: NodeId, destination: string, mode: RelocateMode, disposal: SourceDisposal, confirmation: ConfirmationToken) => typedError<RelocateReport, RelocateError>(__TAURI_INVOKE("relocate_apply", { generation, node, destination, mode, disposal, confirmation })),
+	/**
+	 *  The presets the destination editor offers.
+	 * 
+	 *  A constant, so this needs no state and cannot fail.
+	 */
+	remoteProfiles: () => __TAURI_INVOKE<Profile[]>("remote_profiles"),
+	/**
+	 *  The saved destinations, with whether each has a stored secret — never the
+	 *  secret itself.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`RemoteConfigError::Internal`] if the app data directory is unavailable.
+	 */
+	remoteTargets: () => typedError<TargetView[], RemoteConfigError>(__TAURI_INVOKE("remote_targets")),
+	/**
+	 *  Adds a destination, or updates the one named by `replacing`.
+	 * 
+	 *  The secret fields follow the rule in [`remote::SecretInput`]: absent means
+	 *  *leave what is stored alone*, and an empty string means *remove it*. The UI
+	 *  cannot send back a secret it was never shown, so this is what lets a user
+	 *  edit a bucket's folder without re-entering a key.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`RemoteConfigError`] for a bad field, a duplicate name, a full list, or a
+	 *  keychain that refused.
+	 */
+	remoteSaveTarget: (target: RemoteTarget, secret: SecretInput, replacing: string | null) => typedError<RemoteTarget, RemoteConfigError>(__TAURI_INVOKE("remote_save_target", { target, secret, replacing })),
+	/**
+	 *  Forgets a destination and its stored secret.
+	 * 
+	 *  Does **not** touch anything at the destination. Removing a bucket from this
+	 *  list is removing a bookmark, and a delete button that quietly deleted 400 GB
+	 *  of backups would be the worst button in the app.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`RemoteConfigError::NotFound`], or a keychain failure.
+	 */
+	remoteDeleteTarget: (name: string) => typedError<null, RemoteConfigError>(__TAURI_INVOKE("remote_delete_target", { name })),
+	/**
+	 *  Confirms a destination is reachable and its credentials work.
+	 * 
+	 *  Cheap and non-destructive: it does not list, because a bucket the user can
+	 *  write but not list is an ordinary least-privilege setup and probing with a
+	 *  list would call a working destination broken.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`RemoteConfigError::Invalid`] carrying what the endpoint said.
+	 */
+	remoteProbe: (name: string) => typedError<null, RemoteConfigError>(__TAURI_INVOKE("remote_probe", { name })),
+	/**
+	 *  Describes what uploading `source` to a destination would do.
+	 * 
+	 *  **Long-running.** One recursive listing of the destination, then a local
+	 *  walk against it; under `Verify` it also reads every same-sized local file in
+	 *  full to hash it.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`RemoteConfigError`] when the destination cannot be opened or listed.
+	 */
+	remotePlan: (request: TransferRequest) => typedError<RemotePlanView, RemoteConfigError>(__TAURI_INVOKE("remote_plan", { request })),
+	/**
+	 *  Every transfer, newest first.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`RemoteConfigError::Internal`] if the app data directory is unavailable.
+	 */
+	transfers: () => typedError<TransferJob[], RemoteConfigError>(__TAURI_INVOKE("transfers")),
+	/**
+	 *  Queues an upload and starts it.
+	 * 
+	 *  Re-plans before copying and checks the token against the fresh shape, so a
+	 *  source that changed between the review and the confirm fails closed — the
+	 *  same rule as [`sync_apply`].
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`RemoteConfigError::Invalid`] when the confirmation no longer matches the
+	 *  plan, or the destination cannot be opened.
+	 */
+	transferEnqueue: (request: TransferRequest, confirmation: ConfirmationToken) => typedError<TransferJob, RemoteConfigError>(__TAURI_INVOKE("transfer_enqueue", { request, confirmation })),
+	/**
+	 *  Asks a transfer to stop where it is. Resumable.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`RemoteConfigError::NotFound`] for an unknown transfer.
+	 */
+	transferPause: (id: TransferId) => typedError<TransferJob, RemoteConfigError>(__TAURI_INVOKE("transfer_pause", { id })),
+	/**
+	 *  Restarts a paused or failed transfer.
+	 * 
+	 *  Re-plans from scratch, which is the whole resume mechanism: files that made
+	 *  it are found at the destination and skipped. See `transfers`' module docs.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`RemoteConfigError::NotFound`], or [`RemoteConfigError::Invalid`] when the
+	 *  transfer is not in a state that can be resumed.
+	 */
+	transferResume: (id: TransferId) => typedError<TransferJob, RemoteConfigError>(__TAURI_INVOKE("transfer_resume", { id })),
+	/**
+	 *  Stops a transfer for good. What already arrived stays where it is.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`RemoteConfigError::NotFound`] for an unknown transfer.
+	 */
+	transferCancel: (id: TransferId) => typedError<TransferJob, RemoteConfigError>(__TAURI_INVOKE("transfer_cancel", { id })),
+	/**
+	 *  Removes finished transfers from the list. Running ones are left alone.
+	 * 
+	 *  # Errors
+	 * 
+	 *  Infallible today; typed for symmetry with the rest of the queue commands.
+	 */
+	transfersClear: () => typedError<number, RemoteConfigError>(__TAURI_INVOKE("transfers_clear")),
 };
 
 /** Events */
 export const events = {
 	scanProgress: makeEvent<ScanProgressEvent>("scan:progress"),
+	transferProgress: makeEvent<TransferProgressEvent>("transfer:progress"),
 };
 
 /* Constants */
@@ -832,6 +955,28 @@ export type CompareMode =
 "quick" | 
 /**  Also compares contents when sizes match. Reads both sides in full. */
 "verify";
+
+/**
+ *  What a backend can prove about a file it already holds.
+ * 
+ *  This is the remote answer to `sync::CompareMode`, and it is not a user
+ *  setting because it is not a choice: it is a fact about the endpoint. A local
+ *  sync can always fall back to reading both sides. A remote one cannot —
+ *  "compare the contents" against S3 means downloading the object, which costs
+ *  egress and takes longer than re-uploading it.
+ */
+export type Comparison = 
+/**
+ *  Size only. The honest answer for a backend that returns no digest, and
+ *  for S3 objects whose ETag is a multipart digest (see
+ *  [`usable_etag`]).
+ */
+"size" | 
+/**
+ *  Size, and an MD5 the endpoint computed itself. Catches a file edited in
+ *  place without changing length — the case size alone is blind to.
+ */
+"size_and_digest";
 
 /**
  *  A hex-encoded configuration digest.
@@ -1395,6 +1540,48 @@ export type ExclusionRule = {
 };
 
 /**
+ *  A field the user must still supply, and what to call it on screen.
+ * 
+ *  Which fields these are is the whole value of a profile: R2 asks for an
+ *  account id where AWS asks for a region, and a dialog that shows both to
+ *  both is the dialog people abandon.
+ */
+export type Field = 
+/**  An S3 bucket, a WebDAV collection, or an SFTP directory. */
+"bucket" | 
+/**  Where in that container this target is confined to. */
+"root" | 
+/**  The host, when the profile cannot know it (self-hosted, or per-account). */
+"endpoint" | "region" | "user" | 
+/**  S3 access key and secret, or a WebDAV password. */
+"secret";
+
+/**  Where a job is in its life. */
+export type JobState = 
+/**  Accepted, not started. Waiting for a worker slot. */
+"queued" | 
+/**
+ *  Walking the source and listing the destination. No bytes moving yet, and
+ *  worth its own state because on a large tree it is where the time goes
+ *  before anything appears to happen.
+ */
+"planning" | "running" | 
+/**  Stopped by the user, or by the process exiting. Resumable. */
+"paused" | 
+/**
+ *  Finished. `failures` may still be non-empty — a job that copied 9,998 of
+ *  10,000 files is done, and the two are named.
+ */
+"done" | 
+/**
+ *  Could not proceed at all: the destination was unreachable, the source
+ *  vanished, the credentials were refused.
+ */
+"failed" | 
+/**  Stopped by the user and not resumable. What was already uploaded stays. */
+"cancelled";
+
+/**
  *  What kind of filesystem object a node is.
  * 
  *  Stored as [`Node::kind`], a `u8`. `#[non_exhaustive]` because filesystem
@@ -1464,7 +1651,13 @@ export type LayoutKind =
  */
 export type NodeId = number;
 
-/**  What to do about a file that exists on both sides but differs. */
+/**
+ *  What to do about a file that exists on both sides but differs.
+ * 
+ *  Defined here rather than in `src-tauri` so the local and remote planners
+ *  share one type — and therefore one generated TypeScript type, and one
+ *  meaning of "Keep theirs" in the UI.
+ */
 export type OnDiffer = 
 /**  Leave it. The destination keeps whatever it has. The default. */
 "skip" | 
@@ -1497,6 +1690,35 @@ export type Operation =
 "trash" | 
 /**  Writing or reading a snapshot or catalog artifact. */
 "persist";
+
+/**
+ *  A named service preset.
+ * 
+ *  `Serialize` but deliberately not `Deserialize`: the profile list is a
+ *  compile-time constant that travels to the UI and never comes back. Making it
+ *  round-trip would mean owning every string, for a table nothing parses.
+ */
+export type Profile = {
+	/**
+	 *  Stable identifier. Persisted with a target so the UI can show which
+	 *  preset it came from; never shown raw.
+	 */
+	id: string,
+	label: string,
+	kind: RemoteKind,
+	/**  One line saying what this is, for a user who does not recognise the name. */
+	summary: string,
+	/**
+	 *  Endpoint, with `{}` where a user-supplied fragment goes — an account id
+	 *  for R2, a host for a self-hosted service. Empty means the backend's own
+	 *  default resolves it.
+	 */
+	endpoint_template: string,
+	/**  Pinned when the service has exactly one valid answer. */
+	region: string,
+	/**  What the user must still fill in, in the order it should be asked. */
+	required: Field[],
+};
 
 /**
  *  A read-only query against a published tree failed.
@@ -1706,6 +1928,185 @@ export type RelocateWarning = {
 	/**  Stable identifier, so the UI can style or suppress a specific warning. */
 	code: string,
 	/**  Plain sentence, already written for a human. */
+	message: string,
+};
+
+/**  How hard to look before calling a remote object the same as a local file. */
+export type RemoteCompare = 
+/**
+ *  Path and size, from the listing alone. No extra requests, no local
+ *  reads. The default, and the only mode that is free.
+ */
+"quick" | 
+/**
+ *  Also compares digests where the endpoint published a usable one, which
+ *  means reading every same-sized local file in full to hash it. Catches a
+ *  file edited in place without changing length. Costs a full read of the
+ *  overlap locally and nothing remotely.
+ */
+"verify";
+
+/**
+ *  What went wrong with a target the user was editing.
+ * 
+ *  `Display` and `Error` are hand-written rather than derived, matching
+ *  [`crate::sync::SyncError`] and [`crate::relocate::RelocateError`]:
+ *  docs/08-RUST-PRACTICES.md reserves `thiserror` for libraries and has the
+ *  shell convert to a typed IPC error at the boundary, so `src-tauri` does not
+ *  depend on it and adding it for one enum is the wrong end of that trade.
+ */
+export type RemoteConfigError = 
+/**  A field did not validate. Carries the field name. */
+{ kind: "invalid"; detail: string } | 
+/**  Another target already uses this name. */
+{ kind: "duplicate_name"; detail: string } | { kind: "not_found"; detail: string } | { kind: "too_many"; detail: number } | 
+/**  The Keychain refused. Usually a locked keychain or a denied prompt. */
+{ kind: "keychain"; detail: string } | { kind: "internal"; detail: string };
+
+/**
+ *  Which protocol a target speaks.
+ * 
+ *  Deliberately three, not the thirty-odd OpenDAL can register. Each one here
+ *  is reachable from a stock macOS with no extra software, has a credential
+ *  story this app can actually honour, and answers a question the disk-usage
+ *  tool it hangs off asks: *where do I put the 400 GB I just found?*
+ */
+export type RemoteKind = 
+/**
+ *  Amazon S3 and everything that speaks its API — MinIO, Backblaze B2,
+ *  Wasabi, Cloudflare R2, DigitalOcean Spaces, Ceph.
+ */
+"s3" | 
+/**  WebDAV, which in practice means Nextcloud, ownCloud, Box or a Synology. */
+"web_dav" | 
+/**
+ *  SFTP over SSH. Also what "SCP" means to everyone who asks for SCP: the
+ *  scp(1) protocol itself was deprecated by OpenSSH in favour of this, and
+ *  `scp` on a modern macOS is already an SFTP client wearing scp's flags.
+ */
+"sftp";
+
+/**  What an upload would do. */
+export type RemotePlan = {
+	source: DisplayPath,
+	/**  The target's address, credential-free. */
+	destination: string,
+	compare: RemoteCompare,
+	on_differ: OnDiffer,
+	/**
+	 *  What evidence this endpoint could actually offer. Under
+	 *  [`RemoteCompare::Verify`] against a [`Comparison::Size`] endpoint, the
+	 *  plan degrades to size-only and says so in a warning rather than
+	 *  pretending it verified.
+	 */
+	available_comparison: Comparison,
+	/**  The files that would be uploaded, capped at [`MAX_PLANNED_ENTRIES`]. */
+	entries: RemoteSyncEntry[],
+	entries_truncated: boolean,
+	/**  True count, even when `entries` was truncated. */
+	total_to_copy: number,
+	bytes_to_copy: number,
+	already_present: number,
+	/**  Differ, and being left alone because `on_differ` is `Skip`. */
+	differing_skipped: number,
+	/**  Sockets, FIFOs and device nodes. Nothing can upload them. */
+	special_skipped: number,
+	/**  Files whose names are not valid UTF-8 and so have no remote key. */
+	unnameable_skipped: number,
+	/**  Local directories that could not be read. The plan is a floor. */
+	unreadable: number,
+	/**
+	 *  **Always `None`.** A bucket has no free-space figure, and the field
+	 *  exists so that a UI written against the local plan renders "unknown"
+	 *  instead of a fabricated zero.
+	 */
+	destination_available: number | null,
+	/**
+	 *  The remote listing hit its cap, so some objects were not seen. Files
+	 *  past the cap will be treated as missing and re-uploaded.
+	 */
+	listing_truncated: boolean,
+	warnings: RemoteWarning[],
+};
+
+/**
+ *  A remote plan plus the token that authorizes acting on it.
+ * 
+ *  Two structs rather than a `token` field on `RemotePlan` itself, because the
+ *  plan is computed by a crate that knows nothing about this process's token
+ *  keys — and should not, since minting one is the act of authorizing a write.
+ */
+export type RemotePlanView = {
+	/**  `None` when the transfer cannot proceed. The UI keys its button on this. */
+	token: ConfirmationToken | null,
+	plan: RemotePlan,
+};
+
+/**  Why one file is in the plan. */
+export type RemoteReason = 
+/**  No object at that key. */
+"missing" | 
+/**  Present, but a different length. */
+"size_differs" | 
+/**
+ *  Present and the same length, but the digests disagree. Only ever
+ *  produced under [`RemoteCompare::Verify`], and only where the endpoint
+ *  published a digest that means what it appears to mean.
+ */
+"content_differs";
+
+/**  One file the transfer would upload. */
+export type RemoteSyncEntry = {
+	/**
+	 *  Path relative to the source root, which is also its key under the
+	 *  target's root. Shown to the user; never used as authority.
+	 */
+	relative_path: string,
+	bytes: number,
+	reason: RemoteReason,
+};
+
+/**  A saved remote endpoint. Persisted. Contains no credential. */
+export type RemoteTarget = {
+	/**
+	 *  What the user calls it, and the Keychain account its secret is filed
+	 *  under. Unique across the target list.
+	 */
+	name: string,
+	kind: RemoteKind,
+	/**
+	 *  The host or service URL.
+	 * 
+	 *  For S3 this is the API endpoint (`s3.us-west-2.amazonaws.com`,
+	 *  `minio.lan:9000`) and may be empty, in which case the region picks the
+	 *  AWS default. For WebDAV it is the collection URL. For SFTP it is
+	 *  `host` or `host:port`.
+	 */
+	endpoint: string,
+	/**  S3 only. Empty for the other kinds. */
+	bucket: string,
+	/**
+	 *  S3 only, and it is not optional in the way it looks: SigV4 signs the
+	 *  region, so a wrong one fails to authenticate rather than failing to
+	 *  route. Empty means "let the SDK's own resolution decide".
+	 */
+	region: string,
+	/**
+	 *  The subtree this target is confined to. Everything this app reads or
+	 *  writes is under it, and a path that would escape it is rejected before
+	 *  a request is built.
+	 */
+	root: string,
+	/**
+	 *  The account name, where the protocol has one. S3 does not — its
+	 *  identity is the access key.
+	 */
+	user: string,
+};
+
+/**  Something the user should read before confirming. */
+export type RemoteWarning = {
+	code: string,
 	message: string,
 };
 
@@ -2203,6 +2604,22 @@ export type ScanTotals = {
 };
 
 /**
+ *  What the caller wants stored for a target, if anything.
+ * 
+ *  `None` on a field means *leave whatever is already in the Keychain alone*,
+ *  which is what lets the user edit a target's folder without re-typing a
+ *  secret the UI never received in the first place — the editor is populated
+ *  from `remotes.json`, which by construction has no secret in it.
+ */
+export type SecretInput = {
+	access_key: string | null,
+	secret_key: string | null,
+	session_token: string | null,
+	password: string | null,
+	key_path: string | null,
+};
+
+/**
  *  One file inside a band, for the breakdown.
  * 
  *  Carries its resolved path because the whole point of expanding a band is to
@@ -2567,6 +2984,98 @@ export type SyncReport = {
 export type SyncWarning = {
 	code: string,
 	message: string,
+};
+
+/**  One target as the UI sees it: the saved fields, plus whether a secret exists. */
+export type TargetView = {
+	/**  True when the Keychain holds something for this target. Never the value. */
+	has_secret: boolean,
+	/**
+	 *  True when this kind authenticates without anything stored, so the UI can
+	 *  say "uses your SSH keys" instead of showing an empty password field.
+	 */
+	uses_ambient_credentials: boolean,
+} & RemoteTarget;
+
+/**  One file that did not make it, and why. */
+export type TransferFailure = {
+	relative_path: string,
+	reason: string,
+};
+
+/**  A job's identifier. Monotonic within a run, persisted across runs. */
+export type TransferId = number;
+
+/**
+ *  A queued or completed upload.
+ * 
+ *  Serialised verbatim into `transfers.json`, so every field here is one the
+ *  app is willing to still understand after a restart and an upgrade.
+ * 
+ *  `pub`, not `pub(crate)`, because [`crate::events::TransferProgressEvent`]
+ *  carries one and an event cannot be less private than its payload.
+ */
+export type TransferJob = {
+	id: TransferId,
+	/**  The local folder being uploaded. */
+	source: string,
+	/**
+	 *  The saved target's name — not its resolved address. A target the user
+	 *  re-pointed at a different bucket should send the *next* run of this job
+	 *  to the new one, and a job holding a stale endpoint would not.
+	 */
+	target_name: string,
+	/**  The target's address at the time the job was made, for display only. */
+	destination: string,
+	compare: RemoteCompare,
+	on_differ: OnDiffer,
+	state: JobState,
+	/**  Files the most recent plan said to copy. Zero until the first plan. */
+	files_total: number,
+	bytes_total: number,
+	files_done: number,
+	bytes_done: number,
+	/**
+	 *  Capped, because a job whose destination went away would otherwise
+	 *  record one failure per file and grow the queue file without bound.
+	 */
+	failures: TransferFailure[],
+	failures_truncated: boolean,
+	/**  Why the job as a whole stopped, when it was not per-file. */
+	message: string | null,
+	created_unix_ms: number,
+	updated_unix_ms: number,
+};
+
+/**
+ *  One transfer's state, whenever it changes.
+ * 
+ *  The whole job rather than a delta, because a job is small — a dozen scalars
+ *  and a capped failure list — and a delta would need the frontend to hold a
+ *  reconstruction of state the backend already has correct on disk. It is also
+ *  what makes a late-arriving or dropped event harmless: every event is a
+ *  complete answer, so there is no sequence to fall behind.
+ * 
+ *  Emitted after the queue file is written, never before, so an event never
+ *  describes a state a crash one instruction later would lose.
+ */
+export type TransferProgressEvent = TransferJob;
+
+/**
+ *  What the caller wants uploaded, and how carefully.
+ * 
+ *  One struct shared by [`remote_plan`] and [`transfer_enqueue`], so the two
+ *  cannot disagree: the token minted against a plan is only valid for a
+ *  transfer made from the *same* settings, and four loose arguments repeated at
+ *  two call sites is how they drift.
+ */
+export type TransferRequest = {
+	/**  The local folder to upload. Absolute. */
+	source: string,
+	/**  The saved destination's name. */
+	target: string,
+	compare: RemoteCompare,
+	on_differ: OnDiffer,
 };
 
 /**  What happened to one item in a Trash request. */

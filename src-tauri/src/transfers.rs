@@ -96,11 +96,11 @@ const PROGRESS_EVERY: u64 = 32;
 /// A job's identifier. Monotonic within a run, persisted across runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, specta::Type)]
 #[serde(transparent)]
-pub(crate) struct TransferId(u64);
+pub struct TransferId(u64);
 
 impl TransferId {
     #[must_use]
-    pub(crate) const fn get(self) -> u64 {
+    pub const fn get(self) -> u64 {
         self.0
     }
 }
@@ -108,7 +108,7 @@ impl TransferId {
 /// Where a job is in its life.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum JobState {
+pub enum JobState {
     /// Accepted, not started. Waiting for a worker slot.
     Queued,
     /// Walking the source and listing the destination. No bytes moving yet, and
@@ -131,20 +131,20 @@ pub(crate) enum JobState {
 impl JobState {
     /// Whether this job is doing something right now.
     #[must_use]
-    pub(crate) const fn is_active(self) -> bool {
+    pub const fn is_active(self) -> bool {
         matches!(self, Self::Queued | Self::Planning | Self::Running)
     }
 
     /// Whether the user can still start it.
     #[must_use]
-    pub(crate) const fn is_resumable(self) -> bool {
+    pub const fn is_resumable(self) -> bool {
         matches!(self, Self::Paused | Self::Failed)
     }
 }
 
 /// One file that did not make it, and why.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
-pub(crate) struct TransferFailure {
+pub struct TransferFailure {
     pub relative_path: String,
     pub reason: String,
 }
@@ -153,8 +153,11 @@ pub(crate) struct TransferFailure {
 ///
 /// Serialised verbatim into `transfers.json`, so every field here is one the
 /// app is willing to still understand after a restart and an upgrade.
+///
+/// `pub`, not `pub(crate)`, because [`crate::events::TransferProgressEvent`]
+/// carries one and an event cannot be less private than its payload.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
-pub(crate) struct TransferJob {
+pub struct TransferJob {
     pub id: TransferId,
     /// The local folder being uploaded.
     pub source: String,
@@ -217,10 +220,19 @@ struct Control {
     cancelled: AtomicBool,
 }
 
+/// Called whenever a job changes, so the UI can be told rather than poll.
+///
+/// A boxed closure set once at startup rather than an `AppHandle` field,
+/// because a manager that owns an `AppHandle` cannot be constructed in a test.
+/// Everything else in this module is testable without a window; this is what
+/// keeps it that way.
+type Listener = Box<dyn Fn(&TransferJob) + Send + Sync>;
+
 /// The live queue: the persisted jobs plus the running tasks' controls.
-#[derive(Debug)]
 pub(crate) struct TransferManager {
     app_data: PathBuf,
+    /// `None` in tests and until `run` installs one.
+    listener: Option<Listener>,
     /// One lock over the whole queue. Contention is not a concern — mutations
     /// are a user clicking a button and a worker ticking every
     /// [`PROGRESS_EVERY`] files — and one lock is why a job cannot be observed
@@ -228,6 +240,15 @@ pub(crate) struct TransferManager {
     inner: Mutex<Queue>,
     controls: Mutex<BTreeMap<TransferId, Arc<Control>>>,
     next_id: AtomicU64,
+}
+
+impl std::fmt::Debug for TransferManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransferManager")
+            .field("app_data", &self.app_data)
+            .field("listening", &self.listener.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl TransferManager {
@@ -265,9 +286,27 @@ impl TransferManager {
             .max(queue.jobs.iter().map(|job| job.id.0 + 1).max().unwrap_or(1));
         Self {
             app_data: app_data.to_path_buf(),
+            listener: None,
             inner: Mutex::new(queue),
             controls: Mutex::new(BTreeMap::new()),
             next_id: AtomicU64::new(next_id),
+        }
+    }
+
+    /// Installs the change listener. Called once, at startup.
+    #[must_use]
+    pub(crate) fn with_listener(mut self, listener: Listener) -> Self {
+        self.listener = Some(listener);
+        self
+    }
+
+    /// Notifies the listener, if there is one.
+    ///
+    /// Deliberately after the write to disk, so an event never describes a
+    /// state that a crash one instruction later would lose.
+    fn announce(&self, job: &TransferJob) {
+        if let Some(listener) = &self.listener {
+            listener(job);
         }
     }
 
@@ -315,6 +354,7 @@ impl TransferManager {
         queue.next_id = self.next_id.load(Ordering::Relaxed);
         prune(&mut queue);
         self.persist(&queue);
+        self.announce(&job);
         job
     }
 
@@ -356,7 +396,22 @@ impl TransferManager {
         }
         let job = job.clone();
         self.persist(&queue);
+        self.announce(&job);
         Some(job)
+    }
+
+    /// Marks a job failed with a reason the user can read.
+    ///
+    /// For the failures that happen *before* a worker exists — the destination
+    /// could not be opened at all — which the worker itself is therefore not
+    /// around to record.
+    pub(crate) async fn update_failed(&self, id: TransferId, reason: String, now_unix_ms: i64) {
+        self.update(id, |job| {
+            job.state = JobState::Failed;
+            job.message = Some(reason);
+            job.updated_unix_ms = now_unix_ms;
+        })
+        .await;
     }
 
     /// Removes finished jobs. Running ones are left alone.
@@ -397,6 +452,7 @@ impl TransferManager {
         edit(job);
         let job = job.clone();
         self.persist(&queue);
+        self.announce(&job);
         Some(job)
     }
 

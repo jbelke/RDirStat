@@ -83,14 +83,13 @@ pub(crate) enum CompareMode {
 }
 
 /// What to do about a file that exists on both sides but differs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum OnDiffer {
-    /// Leave it. The destination keeps whatever it has. The default.
-    Skip,
-    /// Overwrite it from the source. The only setting that destroys anything.
-    Replace,
-}
+///
+/// Defined in `rdirstat-remote` and re-exported here, so the local and the
+/// remote planner share one type rather than two identical ones. That is not
+/// tidiness: `specta` generates a TypeScript type per Rust type, and two called
+/// `OnDiffer` would collide in `bindings.ts`. The serde representation is
+/// unchanged — `"skip"` and `"replace"` on the wire, exactly as before.
+pub(crate) use rdirstat_remote::plan::OnDiffer;
 
 /// Why one file is in the plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]

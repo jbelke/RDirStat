@@ -27,10 +27,14 @@ use rdirstat_core::{
 use crate::engine::{self, ScanOutcome, ScanRequest};
 use crate::query::Ancestor;
 use crate::relocate::{RelocateError, RelocateMode, RelocatePlan, RelocateReport, SourceDisposal};
+use crate::remote::{self, RemoteConfigError};
 use crate::state::AppState;
-use crate::sync::{self, CompareMode, OnDiffer, SyncError, SyncPlan, SyncReport};
 use crate::storage::{self, StorageReport};
+use crate::sync::{self, CompareMode, OnDiffer, SyncError, SyncPlan, SyncReport};
+use crate::transfers::{self, JobState, TransferId, TransferJob, TransferManager};
 use crate::{actions, progress, query, relocate, volumes};
+use rdirstat_remote::RemotePlan;
+use rdirstat_remote::plan::RemoteCompare;
 
 /// The ceiling on `scan_errors`'s sample list.
 ///
@@ -144,9 +148,7 @@ fn complete_path_blocking(prefix: &str) -> Vec<String> {
             if name.starts_with('.') && !fragment.starts_with('.') {
                 return None;
             }
-            name.to_lowercase()
-                .starts_with(&wanted)
-                .then(|| format!("{dir}{name}"))
+            name.to_lowercase().starts_with(&wanted).then(|| format!("{dir}{name}"))
         })
         .collect();
 
@@ -1493,4 +1495,411 @@ mod tests {
         }];
         assert!(engine::validate(&options).is_err());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Remote destinations and the transfer queue
+//
+// Same shape as the local sync above — check, review, confirm — with one extra
+// step in front of it, because a remote destination has to be *configured*
+// before it can be planned against and there is nowhere to type a bucket name
+// into a folder picker.
+//
+// The division of labour: `rdirstat-remote` decides what to copy and how to
+// reach the far side, `crate::remote` owns the saved list and the Keychain,
+// `crate::transfers` owns the queue, and this file does none of those things.
+// ---------------------------------------------------------------------------
+
+/// What the caller wants uploaded, and how carefully.
+///
+/// One struct shared by [`remote_plan`] and [`transfer_enqueue`], so the two
+/// cannot disagree: the token minted against a plan is only valid for a
+/// transfer made from the *same* settings, and four loose arguments repeated at
+/// two call sites is how they drift.
+#[derive(Clone, Debug, serde::Deserialize, specta::Type)]
+pub(crate) struct TransferRequest {
+    /// The local folder to upload. Absolute.
+    pub source: String,
+    /// The saved destination's name.
+    pub target: String,
+    pub compare: RemoteCompare,
+    pub on_differ: OnDiffer,
+}
+
+/// A remote plan plus the token that authorizes acting on it.
+///
+/// Two structs rather than a `token` field on `RemotePlan` itself, because the
+/// plan is computed by a crate that knows nothing about this process's token
+/// keys — and should not, since minting one is the act of authorizing a write.
+#[derive(Clone, Debug, serde::Serialize, specta::Type)]
+pub(crate) struct RemotePlanView {
+    /// `None` when the transfer cannot proceed. The UI keys its button on this.
+    pub token: Option<ConfirmationToken>,
+    pub plan: RemotePlan,
+}
+
+/// The presets the destination editor offers.
+///
+/// A constant, so this needs no state and cannot fail.
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn remote_profiles() -> Vec<rdirstat_remote::Profile> {
+    rdirstat_remote::PROFILES.to_vec()
+}
+
+/// The saved destinations, with whether each has a stored secret — never the
+/// secret itself.
+///
+/// # Errors
+///
+/// [`RemoteConfigError::Internal`] if the app data directory is unavailable.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn remote_targets(app: tauri::AppHandle) -> Result<Vec<remote::TargetView>, RemoteConfigError> {
+    let app_data = app_data(&app)?;
+    // Reads a file and queries the Keychain once per target, so it is blocking
+    // work and does not belong on the command executor.
+    tauri::async_runtime::spawn_blocking(move || remote::list(&app_data))
+        .await
+        .map_err(|error| RemoteConfigError::Internal(error.to_string()))
+}
+
+/// Adds a destination, or updates the one named by `replacing`.
+///
+/// The secret fields follow the rule in [`remote::SecretInput`]: absent means
+/// *leave what is stored alone*, and an empty string means *remove it*. The UI
+/// cannot send back a secret it was never shown, so this is what lets a user
+/// edit a bucket's folder without re-entering a key.
+///
+/// # Errors
+///
+/// [`RemoteConfigError`] for a bad field, a duplicate name, a full list, or a
+/// keychain that refused.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn remote_save_target(
+    app: tauri::AppHandle,
+    target: rdirstat_remote::RemoteTarget,
+    secret: remote::SecretInput,
+    replacing: Option<String>,
+) -> Result<rdirstat_remote::RemoteTarget, RemoteConfigError> {
+    let app_data = app_data(&app)?;
+    tauri::async_runtime::spawn_blocking(move || remote::upsert(&app_data, &target, secret, replacing.as_deref()))
+        .await
+        .map_err(|error| RemoteConfigError::Internal(error.to_string()))?
+}
+
+/// Forgets a destination and its stored secret.
+///
+/// Does **not** touch anything at the destination. Removing a bucket from this
+/// list is removing a bookmark, and a delete button that quietly deleted 400 GB
+/// of backups would be the worst button in the app.
+///
+/// # Errors
+///
+/// [`RemoteConfigError::NotFound`], or a keychain failure.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn remote_delete_target(app: tauri::AppHandle, name: String) -> Result<(), RemoteConfigError> {
+    let app_data = app_data(&app)?;
+    tauri::async_runtime::spawn_blocking(move || remote::remove(&app_data, &name))
+        .await
+        .map_err(|error| RemoteConfigError::Internal(error.to_string()))?
+}
+
+/// Confirms a destination is reachable and its credentials work.
+///
+/// Cheap and non-destructive: it does not list, because a bucket the user can
+/// write but not list is an ordinary least-privilege setup and probing with a
+/// list would call a working destination broken.
+///
+/// # Errors
+///
+/// [`RemoteConfigError::Invalid`] carrying what the endpoint said.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn remote_probe(app: tauri::AppHandle, name: String) -> Result<(), RemoteConfigError> {
+    let remote = open(&app, &name).await?;
+    remote
+        .probe()
+        .await
+        .map_err(|error| RemoteConfigError::Invalid(error.to_string()))
+}
+
+/// Describes what uploading `source` to a destination would do.
+///
+/// **Long-running.** One recursive listing of the destination, then a local
+/// walk against it; under `Verify` it also reads every same-sized local file in
+/// full to hash it.
+///
+/// # Errors
+///
+/// [`RemoteConfigError`] when the destination cannot be opened or listed.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn remote_plan(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    request: TransferRequest,
+) -> Result<RemotePlanView, RemoteConfigError> {
+    let TransferRequest { source, target, compare, on_differ } = request;
+    let source = PathBuf::from(&source);
+    if !source.is_absolute() {
+        return Err(RemoteConfigError::Invalid(
+            "the folder to upload must be an absolute path".to_owned(),
+        ));
+    }
+    let remote = open(&app, &target).await?;
+    let (listing, listing_truncated) = remote
+        .list()
+        .await
+        .map_err(|error| RemoteConfigError::Invalid(error.to_string()))?;
+
+    let available_comparison = remote.comparison();
+    let destination = remote.display().to_owned();
+    let walked = source.clone();
+    let plan = tauri::async_runtime::spawn_blocking(move || {
+        rdirstat_remote::plan::plan(rdirstat_remote::plan::RemotePlanRequest {
+            source: &walked,
+            destination: &destination,
+            listing: &listing,
+            listing_truncated,
+            available_comparison,
+            compare,
+            on_differ,
+            // The display cap. The transfer itself re-plans uncapped.
+            max_entries: rdirstat_remote::plan::MAX_PLANNED_ENTRIES,
+        })
+    })
+    .await
+    .map_err(|error| RemoteConfigError::Internal(error.to_string()))?;
+
+    // Bound to the plan's SHAPE, exactly as the local sync's token is: what
+    // must not drift between the review and the confirm is the set of files and
+    // the counts the user actually looked at. There is no scanned tree behind a
+    // transfer, so the generation is fixed and the TTL is what expires a
+    // forgotten confirmation.
+    let token = (plan.total_to_copy > 0).then(|| {
+        crate::token::mint(
+            state.token_keys(),
+            TreeGeneration::FIRST,
+            now_unix_ms(),
+            &[plan_identity(&plan)],
+        )
+    });
+    Ok(RemotePlanView { token, plan })
+}
+
+/// The shape of a plan, as the confirmation token binds it.
+fn plan_identity(plan: &RemotePlan) -> crate::token::ItemIdentity {
+    crate::token::ItemIdentity {
+        node: NodeId::from_raw(0),
+        device: plan.total_to_copy,
+        inode: plan.bytes_to_copy,
+    }
+}
+
+/// Every transfer, newest first.
+///
+/// # Errors
+///
+/// [`RemoteConfigError::Internal`] if the app data directory is unavailable.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn transfers(
+    queue: tauri::State<'_, Arc<TransferManager>>,
+) -> Result<Vec<TransferJob>, RemoteConfigError> {
+    Ok(queue.list().await)
+}
+
+/// Queues an upload and starts it.
+///
+/// Re-plans before copying and checks the token against the fresh shape, so a
+/// source that changed between the review and the confirm fails closed — the
+/// same rule as [`sync_apply`].
+///
+/// # Errors
+///
+/// [`RemoteConfigError::Invalid`] when the confirmation no longer matches the
+/// plan, or the destination cannot be opened.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn transfer_enqueue(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    queue: tauri::State<'_, Arc<TransferManager>>,
+    request: TransferRequest,
+    confirmation: ConfirmationToken,
+) -> Result<TransferJob, RemoteConfigError> {
+    let TransferRequest { source, target, compare, on_differ } = request.clone();
+    let source_path = PathBuf::from(&source);
+    if !source_path.is_absolute() {
+        return Err(RemoteConfigError::Invalid(
+            "the folder to upload must be an absolute path".to_owned(),
+        ));
+    }
+    let saved = {
+        let app_data = app_data(&app)?;
+        let name = target.clone();
+        tauri::async_runtime::spawn_blocking(move || remote::find(&app_data, &name))
+            .await
+            .map_err(|error| RemoteConfigError::Internal(error.to_string()))??
+    };
+
+    // The token was minted against a plan the user reviewed. It is verified
+    // here rather than only at upload time so that a stale confirmation is
+    // refused before a job appears in the queue looking legitimate.
+    let plan = remote_plan(app.clone(), state.clone(), request).await?;
+    crate::token::verify(
+        state.token_keys(),
+        &confirmation,
+        TreeGeneration::FIRST,
+        now_unix_ms(),
+        &[plan_identity(&plan.plan)],
+    )
+    .map_err(|_| RemoteConfigError::Invalid("this plan is no longer valid; check the folder again".to_owned()))?;
+
+    let job = queue
+        .enqueue(
+            &source_path,
+            &target,
+            &saved.display(),
+            compare,
+            on_differ,
+            now_unix_ms(),
+        )
+        .await;
+    start_worker(app, Arc::clone(&queue), job.id);
+    Ok(job)
+}
+
+/// Asks a transfer to stop where it is. Resumable.
+///
+/// # Errors
+///
+/// [`RemoteConfigError::NotFound`] for an unknown transfer.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn transfer_pause(
+    queue: tauri::State<'_, Arc<TransferManager>>,
+    id: TransferId,
+) -> Result<TransferJob, RemoteConfigError> {
+    stop(&queue, id, false).await
+}
+
+/// Stops a transfer for good. What already arrived stays where it is.
+///
+/// # Errors
+///
+/// [`RemoteConfigError::NotFound`] for an unknown transfer.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn transfer_cancel(
+    queue: tauri::State<'_, Arc<TransferManager>>,
+    id: TransferId,
+) -> Result<TransferJob, RemoteConfigError> {
+    stop(&queue, id, true).await
+}
+
+/// Restarts a paused or failed transfer.
+///
+/// Re-plans from scratch, which is the whole resume mechanism: files that made
+/// it are found at the destination and skipped. See `transfers`' module docs.
+///
+/// # Errors
+///
+/// [`RemoteConfigError::NotFound`], or [`RemoteConfigError::Invalid`] when the
+/// transfer is not in a state that can be resumed.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn transfer_resume(
+    app: tauri::AppHandle,
+    queue: tauri::State<'_, Arc<TransferManager>>,
+    id: TransferId,
+) -> Result<TransferJob, RemoteConfigError> {
+    let job = queue
+        .get(id)
+        .await
+        .ok_or_else(|| RemoteConfigError::NotFound(format!("transfer {}", id.get())))?;
+    if !job.state.is_resumable() {
+        return Err(RemoteConfigError::Invalid(
+            "this transfer is not waiting to be resumed".to_owned(),
+        ));
+    }
+    let job = queue
+        .set_state(id, JobState::Queued, now_unix_ms())
+        .await
+        .ok_or_else(|| RemoteConfigError::NotFound(format!("transfer {}", id.get())))?;
+    start_worker(app, Arc::clone(&queue), id);
+    Ok(job)
+}
+
+/// Removes finished transfers from the list. Running ones are left alone.
+///
+/// # Errors
+///
+/// Infallible today; typed for symmetry with the rest of the queue commands.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn transfers_clear(queue: tauri::State<'_, Arc<TransferManager>>) -> Result<u32, RemoteConfigError> {
+    let removed = queue.clear_finished(now_unix_ms()).await;
+    Ok(u32::try_from(removed).unwrap_or(u32::MAX))
+}
+
+/// Stops a running transfer, or moves a waiting one straight to its end state.
+async fn stop(queue: &TransferManager, id: TransferId, cancel: bool) -> Result<TransferJob, RemoteConfigError> {
+    let missing = || RemoteConfigError::NotFound(format!("transfer {}", id.get()));
+    let job = queue.get(id).await.ok_or_else(missing)?;
+
+    // A running job is asked to stop and writes its own final state, so that
+    // the state on disk is always one a worker actually reached. A job that is
+    // merely queued has no worker to ask, and is moved directly.
+    if queue.request_stop(id, cancel).await {
+        return Ok(job);
+    }
+    let state = if cancel { JobState::Cancelled } else { JobState::Paused };
+    queue.set_state(id, state, now_unix_ms()).await.ok_or_else(missing)
+}
+
+/// Opens a saved destination.
+async fn open(app: &tauri::AppHandle, name: &str) -> Result<rdirstat_remote::Remote, RemoteConfigError> {
+    let app_data = app_data(app)?;
+    let name = name.to_owned();
+    // Reads a file and the Keychain, both blocking.
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = remote::find(&app_data, &name)?;
+        let credentials = remote::credentials(&target)?;
+        rdirstat_remote::connect(&target, &credentials).map_err(|error| RemoteConfigError::Invalid(error.to_string()))
+    })
+    .await
+    .map_err(|error| RemoteConfigError::Internal(error.to_string()))?
+}
+
+/// The application data directory, or a typed error.
+fn app_data(app: &tauri::AppHandle) -> Result<PathBuf, RemoteConfigError> {
+    crate::snapshot_store::app_data_dir(app).map_err(|error| RemoteConfigError::Internal(error.to_string()))
+}
+
+/// Spawns the task that runs one job.
+///
+/// Detached on purpose. The command that started it returns as soon as the job
+/// is in the queue, because the queue *is* the handle — the UI watches job
+/// state, and a command that awaited a four-hour upload would be a command that
+/// times out.
+fn start_worker(app: tauri::AppHandle, queue: Arc<TransferManager>, id: TransferId) {
+    tauri::async_runtime::spawn(async move {
+        let Some(job) = queue.get(id).await else {
+            return;
+        };
+        let remote = match open(&app, &job.target_name).await {
+            Ok(remote) => remote,
+            Err(error) => {
+                queue.update_failed(id, error.to_string(), now_unix_ms()).await;
+                return;
+            }
+        };
+        if let Err(error) = transfers::run_job(&queue, &remote, id, now_unix_ms).await {
+            tracing::warn!(id = id.get(), %error, "a transfer ended badly");
+        }
+    });
 }
