@@ -63,6 +63,7 @@ rdirstat-core     = { path = "crates/rdirstat-core" }
 rdirstat-scan     = { path = "crates/rdirstat-scan" }
 rdirstat-classify = { path = "crates/rdirstat-classify" }
 rdirstat-treemap  = { path = "crates/rdirstat-treemap" }
+rdirstat-remote   = { path = "crates/rdirstat-remote" }
 # Phase 6 only. Cargo refuses to load a path dependency whose manifest is
 # missing, so this stays commented until `crates/rdirstat-catalog/` exists. The
 # `crates/*` member glob picks the crate up automatically once it does.
@@ -91,6 +92,54 @@ serde        = { version = "1.0.229", features = ["derive"] }
 serde_json   = "1.0.145"
 specta       = { version = "=2.0.0-rc.25", features = ["derive"] }
 tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
+
+# --- remote storage ---
+# Apache OpenDAL is the single abstraction over every remote this app offers.
+# It was chosen over s3sync (nato-5gb): s3sync speaks only S3, so WebDAV and
+# SCP would have needed a second library anyway, it locks 359 crates against
+# OpenDAL's 222 for three protocols, and it declares rust-version 1.94.1 —
+# above the MSRV this workspace publishes.
+#
+# `default-features = false` is deliberate and the feature list is not a
+# default that happened to work:
+#
+#   http-transport-reqwest-native-tls  NOT the default rustls transport. On
+#       macOS native-tls is Security.framework, so a self-hosted MinIO or
+#       Nextcloud behind a private or enterprise CA works because the system
+#       trust store already trusts it — the rustls path carries its own root
+#       bundle and does not. It also drops `aws-lc-sys`, a cmake-gated C and
+#       assembly build, and 43 crates with it.
+#   services-sftp  drives the system `ssh` through `openssh`, so SCP inherits
+#       ~/.ssh/config, ssh-agent and existing keys and stores no secret.
+#   layers-retry / layers-timeout  a network backend without either turns a
+#       flaky link into a hung transfer. `layers-concurrent-limit` is what
+#       stops the transfer manager opening a connection per file.
+#
+# No `layers-logging`: it logs at every operation on a path that runs once per
+# file in a 100k-file transfer, and this workspace's subscriber would render
+# all of it.
+opendal = { version = "0.58.1", default-features = false, features = [
+  "auto-register-services",
+  "executors-tokio",
+  "http-transport-reqwest-native-tls",
+  "layers-concurrent-limit",
+  "layers-retry",
+  "layers-timeout",
+  "services-s3",
+  "services-sftp",
+  "services-webdav",
+] }
+# `Lister` is a `Stream`; this is the `StreamExt` that lets a walk stop at a cap.
+futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
+# The transfer manager's worker pool and its cancellation. src-tauri already
+# runs on tokio through tauri's async runtime; naming it here makes the
+# dependency visible rather than inherited by accident.
+tokio = { version = "1.49.0", default-features = false }
+# Verifying that a remote object matches a local file means computing the one
+# digest S3 already holds. Not a new dependency in practice: opendal-service-s3
+# links `md-5` for Content-MD5 on upload, so this names a crate the tree
+# already contains rather than adding one.
+md-5 = "0.10.6"
 
 # --- macOS actions ---
 trash = "5.2.6"

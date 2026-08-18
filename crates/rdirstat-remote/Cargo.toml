@@ -1,0 +1,44 @@
+#                  rdirstat-remote — S3, WebDAV and SFTP endpoints
+#
+# A member of the root workspace. Everything shared — edition, MSRV, version,
+# licence, lints — is inherited, never re-declared here.
+#
+# This crate does NOT depend on tauri (crates/AGENTS.md), and it does not read
+# or write the settings file: it is handed a target and a resolved credential
+# bundle and produces an `Operator`. Where those come from — settings.json for
+# the endpoint, the macOS Keychain for the secret — is `src-tauri`'s policy.
+
+[package]
+name        = "rdirstat-remote"
+description = "Remote storage targets — S3, WebDAV and SFTP — and the transfer primitives over them."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+authors.workspace      = true
+publish.workspace      = true
+
+[lints]
+workspace = true
+
+[dependencies]
+opendal   = { workspace = true }
+serde     = { workspace = true }
+specta    = { workspace = true }
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+# `Lister` is a `Stream`, and the whole point of listing lazily is to stop at a
+# cap rather than materialise a bucket. `StreamExt::next` is what lets the walk
+# stop early; `Operator::list` would have collected the entire prefix first.
+futures-util = { workspace = true }
+# `DisplayPath` — a path rendered for a human without being re-encoded as one.
+# A plan names local files, and the rest of the app already agreed on how a
+# path that is not valid UTF-8 is shown.
+rdirstat-core = { workspace = true }
+# The one digest S3 hands back for free.
+md-5 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = { workspace = true }

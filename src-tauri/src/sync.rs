@@ -1105,6 +1105,33 @@ mod tests {
         );
     }
 
+    /// `apply` validates the paths itself, rather than inheriting the check
+    /// from the plan that authorised it.
+    ///
+    /// The two used to share validation because `apply` called `plan`. It no
+    /// longer does — one walk, not two — so this asserts the property that
+    /// refactor could have quietly dropped. An `apply` that validated less than
+    /// its plan would be a way in, and the failure must be `BadPath`, decided
+    /// BEFORE the token is even considered.
+    #[test]
+    fn applying_refuses_a_bad_path_before_it_looks_at_the_token() {
+        let source = scratch();
+        let destination = scratch();
+        write(source.path(), "f.txt", b"x");
+
+        let keys = RandomState::new();
+        let honest = request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip);
+        let token = plan(&keys, GEN, NOW, honest).expect("plan").token.expect("token");
+
+        let relative = Path::new("relative/path");
+        let bad = request(relative, destination.path(), CompareMode::Quick, OnDiffer::Skip);
+        let error = apply(&keys, GEN, NOW, bad, &token).expect_err("a relative source must be refused");
+        assert!(
+            matches!(error, SyncError::BadPath { .. }),
+            "expected BadPath before any token check, got {error:?}"
+        );
+    }
+
     #[test]
     fn applying_copies_only_the_missing_files_and_leaves_the_rest() {
         let source = scratch();
