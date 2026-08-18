@@ -316,7 +316,12 @@ export function TreeTable({
 
 function NameCell({ entry, onToggle }: { entry: FlatRow; onToggle: (node: number) => void }) {
   const { row, depth, isExpanded } = entry;
-  const expandable = row.kind === "directory" && !row.isVirtualGroup && row.children > 0;
+  // The group IS expandable now. It used to be excluded here on the grounds
+  // that it had no children — which was true only because the backend refused
+  // to enumerate them, so the row holding most of a directory's bytes offered
+  // no way in. It reports its file count now, and `children` on it returns
+  // exactly those files.
+  const expandable = (row.kind === "directory" || row.isVirtualGroup) && row.children > 0;
   const incomplete = hasFlag(row.flags, INCOMPLETE_SUBTREE);
 
   return (

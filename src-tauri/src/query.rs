@@ -151,7 +151,15 @@ fn row(tree: &Tree, node: NodeId) -> ChildRow {
         } else {
             tree.node(node).map_or(flags::NONE, |entry| entry.flags)
         },
-        children: if is_virtual_group { 0 } else { tree.child_count(node) },
+        // A group reports the entries it holds, not zero. Reporting zero is
+        // what made it a dead end: the table draws no disclosure control for a
+        // row with no children, so the largest thing in a directory could be
+        // seen and never opened.
+        children: if is_virtual_group {
+            tree.dir_totals(node).map_or(0, |totals| totals.direct_files)
+        } else {
+            tree.child_count(node)
+        },
         is_virtual_group,
     }
 }
@@ -175,21 +183,44 @@ pub(crate) fn children<S: BuildHasher>(
 ) -> Result<ChildPage, QueryError> {
     let tree = &scan.tree;
     let generation = scan.generation;
-    if parent.is_virtual_group() {
-        return Err(QueryError::VirtualGroup { node: parent });
-    }
-    if !tree.contains(parent) {
+
+    // The `<Files>` group is a LEVEL of the tree, not a label beside it.
+    //
+    // It used to be both: a directory returned every child *and* the group, so
+    // a directory's own files were listed twice — once inside the group's
+    // total and once beside it. The percentages gave it away, summing well past
+    // 100%. Worse, asking for the group's children was a hard error, so the row
+    // holding 34 GB of a 36 GB directory could not be opened at all and the
+    // user had no way to find out what was in it.
+    //
+    // Now the two cases are complementary and each byte appears exactly once:
+    // a directory yields its subdirectories plus the group, and the group
+    // yields the directory's own non-directory entries. That is the shape
+    // docs/05-UI.md's mock has always drawn.
+    let owner = parent.group_owner();
+    let source = owner.unwrap_or(parent);
+    if !tree.contains(source) {
         return Err(QueryError::UnknownNode { node: parent });
     }
     let limit = clamp_page_limit(limit);
     let take = limit as usize;
 
-    let group = tree.virtual_group(parent);
-    let total_children = tree.child_count(parent).saturating_add(u32::from(group.is_some()));
+    // Every non-directory child belongs to the group: the scanner absorbs files,
+    // symlinks and special files alike into `direct_*`, so the group's totals
+    // already account for all of them and the split has to match.
+    let is_directory = |node: NodeId| {
+        tree.node(node)
+            .is_some_and(|entry| entry.kind().is_directory())
+    };
 
-    let mut candidates: Vec<NodeId> = Vec::with_capacity(total_children as usize);
-    candidates.extend(tree.children(parent));
+    let group = if owner.is_some() { None } else { tree.virtual_group(source) };
+    let mut candidates: Vec<NodeId> = if owner.is_some() {
+        tree.children(source).filter(|node| !is_directory(*node)).collect()
+    } else {
+        tree.children(source).filter(|node| is_directory(*node)).collect()
+    };
     candidates.extend(group);
+    let total_children = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
 
     if let Some(text) = cursor_text {
         let payload = cursor::decode(keys, text, generation, parent, sort)?;
@@ -509,8 +540,19 @@ mod tests {
                 None => break,
             }
         }
-        let total = scan.tree.child_count(scan.root) + u32::from(scan.tree.virtual_group(scan.root).is_some());
-        assert_eq!(seen.len(), total as usize, "every child, once");
+        // Directories plus the group — the direct files now live one level
+        // down, inside it, rather than beside it.
+        let directories = scan
+            .tree
+            .children(scan.root)
+            .filter(|node| {
+                scan.tree
+                    .node(*node)
+                    .is_some_and(|entry| entry.kind().is_directory())
+            })
+            .count();
+        let total = directories + usize::from(scan.tree.virtual_group(scan.root).is_some());
+        assert_eq!(seen.len(), total, "every child, once");
         let mut deduped = seen.clone();
         deduped.sort_unstable_by_key(|node| node.raw());
         deduped.dedup();
@@ -558,8 +600,11 @@ mod tests {
         }
     }
 
+    /// Replaces `the_direct_files_group_appears_and_cannot_be_expanded`, which
+    /// asserted the defect: the group reported zero children and refused to
+    /// open, so a row holding most of a directory's bytes was a dead end.
     #[test]
-    fn the_direct_files_group_appears_and_cannot_be_expanded() {
+    fn the_direct_files_group_opens_onto_the_files_it_counts() {
         let (_dir, scan) = fixture();
         let keys = RandomState::new();
         let page = children(&scan, &keys, scan.root, Sort::default(), None, 500).expect("page");
@@ -569,11 +614,35 @@ mod tests {
             .find(|row| row.is_virtual_group)
             .expect("a directory with direct files gets a group");
         assert_eq!(group.name, VIRTUAL_GROUP_NAME);
-        assert_eq!(group.children, 0);
         assert!(group.logical > 0);
-        assert_eq!(
-            children(&scan, &keys, group.node, Sort::default(), None, 10).expect_err("this call must be rejected"),
-            QueryError::VirtualGroup { node: group.node }
+        assert!(group.children > 0, "a group that reports no children draws no disclosure control");
+
+        let inside = children(&scan, &keys, group.node, Sort::default(), None, 500).expect("the group opens");
+        assert_eq!(inside.rows.len(), group.children as usize, "every counted file is reachable");
+        assert!(
+            inside.rows.iter().all(|row| !row.is_virtual_group),
+            "a group must not contain another group"
+        );
+        assert!(
+            inside.rows.iter().all(|row| row.kind != Kind::Directory),
+            "directories belong to the parent level, not inside the group"
+        );
+    }
+
+    /// The bug the old shape hid: a directory listed its own files AND a group
+    /// summarising those same files, so the bytes appeared twice and the
+    /// percentage column summed past 100.
+    #[test]
+    fn a_directory_and_its_group_do_not_count_the_same_bytes_twice() {
+        let (_dir, scan) = fixture();
+        let keys = RandomState::new();
+        let page = children(&scan, &keys, scan.root, Sort::default(), None, 500).expect("page");
+
+        let listed: u64 = page.rows.iter().map(|row| row.logical).sum();
+        let subtree = scan.tree.logical_of(scan.root);
+        assert!(
+            listed <= subtree,
+            "children sum to {listed} inside a subtree of {subtree} — bytes are counted more than once"
         );
     }
 

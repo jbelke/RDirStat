@@ -20,8 +20,12 @@
  *   here means we never send one.
  * - Changing the sort or the generation clears everything. A merged half-sorted
  *   directory is worse than a refetch.
- * - The synthetic `<Files>` group is never expandable: it has no children and
- *   `children` on it is an error by design.
+ * - The synthetic `<Files>` group IS expandable, and is a real level of the
+ *   hierarchy: a directory yields its subdirectories plus the group, and the
+ *   group yields that directory's own files. Each byte therefore appears at
+ *   exactly one level. It previously yielded both the files and a group
+ *   summarising them, which double-counted, and `children` on the group was an
+ *   error — so the largest row in a directory could not be opened.
  * - Depth is capped. `MAX_TREE_DEPTH` is 4096 in the arena; the UI stops
  *   indenting long before that, and a cycle (which `Tree::validate` should have
  *   rejected) cannot lock the browser here.
