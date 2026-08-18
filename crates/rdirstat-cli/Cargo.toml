@@ -24,7 +24,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-# Phase 6. Bundled DuckDB materially increases the build surface, so scanner
+# Phase 7. Bundled DuckDB materially increases the build surface, so scanner
 # iteration must never compile it by accident. Re-enable together with the
 # `rdirstat-catalog` line in the root [workspace.dependencies] table:
 #   catalog = ["dep:rdirstat-catalog"]
