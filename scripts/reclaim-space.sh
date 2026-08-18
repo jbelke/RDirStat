@@ -176,10 +176,17 @@ remove_via() {
   [[ $kb -eq 0 ]] && return 0
 
   if command -v "$1" >/dev/null 2>&1; then
+    if [[ $APPLY -eq 1 ]]; then
+      "$@" >/dev/null 2>&1 || true
+      local after; after=$(size_kb "$path")
+      kb=$(( kb - after ))
+      [[ $kb -lt 0 ]] && kb=0
+    fi
     TOTAL_KB=$((TOTAL_KB + kb))
-    PLAN_LINES+=("$(printf '%10s  %s %s(via %s)%s' "$(human "$kb")" "$label" "$DIM" "$*" "$RESET")")
-    say "  $(printf '%10s' "$(human "$kb")")  $label ${DIM}(via $*)${RESET}"
-    [[ $APPLY -eq 1 ]] && "$@" >/dev/null 2>&1 || true
+    local shown; shown="$(human "$kb")"
+    [[ $APPLY -eq 0 ]] && shown="<=$shown"
+    PLAN_LINES+=("$(printf '%10s  %s %s(via %s)%s' "$shown" "$label" "$DIM" "$*" "$RESET")")
+    say "  $(printf '%10s' "$shown")  $label ${DIM}(via $*)${RESET}"
   else
     remove "$label" "$path"
   fi
@@ -194,11 +201,17 @@ do_pkg() {
   remove "npm content-addressable cache" "$HOME/.npm/_cacache"
   remove "npx package cache"             "$HOME/.npm/_npx"
 
-  # pnpm's store is HARDLINKED into every node_modules on this machine. Deleting
-  # it outright silently corrupts existing installs, so only ever prune.
-  local pnpm_store="${PNPM_HOME:-$HOME/Library/pnpm}/store"
-  [[ -d "$pnpm_store" ]] && remove_via "pnpm store (pruned)" "$pnpm_store" pnpm store prune
-  remove "pnpm download cache" "$HOME/Library/Caches/pnpm"
+  # pnpm keeps one content-addressed store PER VOLUME, because node_modules
+  # entries are hardlinks into it and hardlinks cannot cross a filesystem.
+  # A store is never removed, only pruned -- and each one must be named
+  # explicitly, since a bare `pnpm store prune` only touches the store that the
+  # current working directory happens to resolve to.
+  local s
+  for s in "${PNPM_HOME:-$HOME/Library/pnpm}/store" /Volumes/*/.pnpm-store; do
+    [[ -d "$s" ]] || continue
+    remove_via "pnpm store (pruned)  ${DIM}$s${RESET}" "$s" pnpm store prune --store-dir "$s"
+  done
+  remove "pnpm cache-dir" "$HOME/Library/Caches/pnpm"
 
   remove "yarn cache"  "$HOME/Library/Caches/Yarn"
   remove_via "bun install cache" "$HOME/.bun/install/cache" bun pm cache rm
