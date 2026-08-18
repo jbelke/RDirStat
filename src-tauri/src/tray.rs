@@ -248,12 +248,14 @@ fn position_panel(window: &tauri::WebviewWindow, anchor: Option<tauri::Rect>) ->
     // push the panel off the screen it belongs to.
     let centred = icon_left + icon_width / 2.0 - PANEL_WIDTH / 2.0;
     let x = clamp_to_monitor(centred, left, width);
-    // Clamped vertically for the same reason as horizontally, which the first
-    // version simply forgot. A menu bar on a display arranged ABOVE the primary
-    // has a negative origin in the global space, so `icon_top` is negative and
-    // the panel lands above every attached screen — observed at y = -241, on a
-    // window macOS will not let the user move. Unlike a window that is merely
-    // awkwardly placed, that one cannot be recovered by hand.
+    // Clamped vertically for symmetry with the horizontal clamp, which is
+    // defensive rather than a fix for anything observed: a menu bar sits at the
+    // top of its own display, so `icon_top + icon_height` is normally well
+    // inside. It bites only on a display too short to hold the panel below the
+    // menu bar, where the panel would otherwise hang off the bottom.
+    //
+    // This was written believing it fixed a real off-screen panel. It did not —
+    // see `the_panel_never_opens_above_the_screen_it_belongs_to`.
     let y = clamp_vertical(icon_top + icon_height + PANEL_GAP, top, height);
 
     window.set_position(Position::Logical(LogicalPosition::new(x, y)))
@@ -365,18 +367,23 @@ mod tests {
         );
     }
 
-    /// The bug this pins: the panel opened at y = -241, above every attached
-    /// display, on a Mac with a screen arranged ABOVE the primary. A monitor in
-    /// that position has a negative origin in the global coordinate space, so
-    /// the tray icon's own top is negative and the panel inherited it.
+    /// NO SUCH BUG WAS EVER OBSERVED. This clamp and these tests were written
+    /// on a report that the panel opened at y = -241 "on none of three
+    /// displays". That report was a measurement error, retracted by its author
+    /// and independently disproved here: this machine's desktop spans
+    /// `0, -271, 8680, 1169`, so y = -241 is ordinary visible screen content on
+    /// a display arranged above the primary. The panel was exactly where
+    /// `position_panel` put it and both clamps were correct no-ops.
     ///
-    /// Horizontal was clamped from the start and vertical was not, which is why
-    /// this survived: the axes can fail identically and only one of them was
-    /// defended.
+    /// The code is kept because it is genuinely defensive — a display too short
+    /// to hold a 520-point panel below the menu bar would otherwise push it off
+    /// the bottom — but it fixes a hypothetical, not a defect, and the
+    /// distinction is worth preserving so nobody inherits a false war story.
     ///
-    /// It is worse than an awkward position. macOS does not let the user move
-    /// this window, and Accessibility reports it as present but unmovable — so
-    /// an off-screen panel is unreachable by any means the user has.
+    /// The load-bearing property, and the one a naive fix gets wrong: **a
+    /// negative Y is not itself an error.** On a display mounted above the
+    /// primary the entire legal band is negative, so "reject negative" would
+    /// break precisely the arrangement this machine has.
     #[allow(clippy::float_cmp)]
     #[test]
     fn the_panel_never_opens_above_the_screen_it_belongs_to() {
@@ -395,7 +402,7 @@ mod tests {
         );
 
         // The primary at the origin: a negative y can only be off-screen.
-        assert_eq!(clamp_vertical(-241.0, 0.0, 1080.0), PANEL_GAP, "the observed failure");
+        assert_eq!(clamp_vertical(-241.0, 0.0, 1080.0), PANEL_GAP, "above a primary at the origin");
         assert_eq!(clamp_vertical(30.0, 0.0, 1080.0), 30.0, "just under the menu bar is fine");
         assert_eq!(
             clamp_vertical(1000.0, 0.0, 1080.0),
