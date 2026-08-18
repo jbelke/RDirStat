@@ -75,6 +75,44 @@ pub(crate) struct Settings {
     /// to use the default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) snapshot_dir: Option<PathBuf>,
+    /// The window's colour scheme.
+    ///
+    /// Skipped when it is `System`, so a settings file for someone who has
+    /// never expressed a preference stays `{}` — the same property the
+    /// snapshot directory has, and for the same reason: an absent key and a
+    /// key set to the default should not be different states on disk.
+    #[serde(skip_serializing_if = "Theme::is_system")]
+    pub(crate) theme: Theme,
+}
+
+/// Which colour scheme the window uses.
+///
+/// `System` is a third state, not a synonym for whichever of the other two
+/// macOS currently reports. Someone who has never chosen should keep following
+/// the OS when it flips at sunset, and recording `Light` on their behalf would
+/// silently pin them to whatever the weather was the day they first launched.
+///
+/// The CSS already had all three: `.light` and `.dark` force, and the
+/// `prefers-color-scheme` block is written `:root:not(.light)` so the OS only
+/// wins when nothing is forcing. This setting supplies the class; it did not
+/// need any new styling.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Theme {
+    /// Follow macOS, including when it changes while the app is running.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    /// True for the default. Used by `skip_serializing_if`, which is why it
+    /// takes a reference rather than `self` despite `Theme` being `Copy`.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    fn is_system(&self) -> bool {
+        matches!(self, Self::System)
+    }
 }
 
 /// Which layer of the resolution order supplied the store root.
@@ -301,6 +339,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let settings = Settings {
             snapshot_dir: Some(PathBuf::from("/Volumes/big/snapshots")),
+            ..Settings::default()
         };
         save(dir.path(), &settings).expect("save");
         assert_eq!(load(dir.path()), settings);
@@ -331,6 +370,7 @@ mod tests {
             dir.path(),
             &Settings {
                 snapshot_dir: Some(chosen.clone()),
+                ..Settings::default()
             },
         )
         .expect("save");
@@ -397,5 +437,39 @@ mod tests {
                 ("OTHER".to_owned(), "x".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn a_theme_survives_a_round_trip() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let settings = Settings {
+            theme: Theme::Dark,
+            ..Settings::default()
+        };
+        save(dir.path(), &settings).expect("save");
+        assert_eq!(load(dir.path()).theme, Theme::Dark);
+    }
+
+    /// A file for someone who never chose must stay `{}`. An absent key and a
+    /// key set to the default are the same state and should look the same.
+    #[test]
+    fn the_default_theme_is_not_written_out() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        save(dir.path(), &Settings::default()).expect("save");
+        let text = fs::read_to_string(dir.path().join(FILE_NAME)).expect("read");
+        assert_eq!(text.trim(), "{}");
+        assert!(!text.contains("theme"));
+    }
+
+    /// Settings written before the theme existed must still load, and must
+    /// read as "follow the OS" rather than as a hard Light.
+    #[test]
+    fn a_file_written_before_themes_existed_still_loads() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path()).expect("mkdir");
+        fs::write(dir.path().join(FILE_NAME), br#"{"snapshot_dir":"/Volumes/big/s"}"#).expect("write");
+        let loaded = load(dir.path());
+        assert_eq!(loaded.theme, Theme::System);
+        assert_eq!(loaded.snapshot_dir, Some(PathBuf::from("/Volumes/big/s")));
     }
 }

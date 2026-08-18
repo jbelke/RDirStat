@@ -4201,6 +4201,7 @@ dependencies = [
  "rdirstat-remote",
  "rdirstat-scan",
  "rdirstat-treemap",
+ "reqwest",
  "security-framework",
  "serde",
  "serde_json",

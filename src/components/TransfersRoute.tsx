@@ -32,6 +32,7 @@ import {
   Loader2,
   Pause,
   Play,
+  Plus,
   SearchCheck,
   Trash2,
   X,
@@ -39,7 +40,6 @@ import {
 import { useState } from "react";
 
 import { PathField } from "@/components/PathField";
-import { RemoteTargets } from "@/components/RemoteTargets";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -106,7 +106,19 @@ const STATE_LABEL: Record<JobState, string> = {
   cancelled: "Cancelled",
 };
 
-export function TransfersRoute() {
+export interface TransfersRouteProps {
+  /**
+   * Opens the destination editor, which lives on the config page.
+   *
+   * Required rather than optional: with no destinations this page cannot do
+   * anything at all, and the picker below is the only thing that says so. A
+   * caller that forgot to pass this would ship a dead end, so the type refuses
+   * to let them.
+   */
+  onAddDestination: () => void;
+}
+
+export function TransfersRoute({ onAddDestination }: TransfersRouteProps) {
   const targets = useRemoteTargets();
   const jobs = useTransfers();
 
@@ -161,7 +173,6 @@ export function TransfersRoute() {
         </p>
       </header>
 
-      <RemoteTargets className="mb-4" />
 
       <section className="flex flex-col gap-2 border-t border-border/60 pt-4">
         <h3 className="text-sm font-medium">Upload a folder</h3>
@@ -183,13 +194,19 @@ export function TransfersRoute() {
             onChange={(event) => setTarget(event.target.value)}
             className="min-w-0 flex-1 rounded border border-border/60 bg-transparent px-2 py-1 text-xs disabled:opacity-60"
           >
-            {rows.length === 0 && <option value="">Add a destination above first</option>}
+            {rows.length === 0 && <option value="">No destinations yet</option>}
             {rows.map((row) => (
               <option key={row.name} value={row.name}>
                 {row.name}
               </option>
             ))}
           </select>
+          {rows.length === 0 && (
+            <Button variant="outline" size="sm" className="shrink-0" onClick={onAddDestination}>
+              <Plus aria-hidden />
+              Add one…
+            </Button>
+          )}
         </div>
       </section>
 

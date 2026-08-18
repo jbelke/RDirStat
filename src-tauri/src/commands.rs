@@ -28,10 +28,12 @@ use crate::engine::{self, ScanOutcome, ScanRequest};
 use crate::query::Ancestor;
 use crate::relocate::{RelocateError, RelocateMode, RelocatePlan, RelocateReport, SourceDisposal};
 use crate::remote::{self, RemoteConfigError};
+use crate::settings::Theme;
 use crate::state::AppState;
 use crate::storage::{self, StorageReport};
 use crate::sync::{self, CompareMode, OnDiffer, SyncDiff, SyncError, SyncPlan, SyncReport};
 use crate::transfers::{self, JobState, TransferId, TransferJob, TransferManager};
+use crate::updates::ReleaseCheck;
 use crate::{actions, digest, progress, query, relocate, volumes};
 use rdirstat_remote::RemotePlan;
 use rdirstat_remote::plan::RemoteCompare;
@@ -1349,6 +1351,78 @@ pub(crate) async fn sync_diff(
     })
     .await
     .map_err(|error| SyncError::Internal(error.to_string()))?
+}
+
+/// What the settings page shows: the stored preferences plus the running
+/// version, which it needs in the same breath and which is not a preference.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+pub(crate) struct Preferences {
+    pub theme: Theme,
+    pub version: String,
+}
+
+/// The in-app preferences.
+///
+/// # Errors
+///
+/// [`CommandError::Internal`] if the app data directory cannot be located.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn preferences(app: tauri::AppHandle) -> Result<Preferences, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_data =
+            crate::snapshot_store::app_data_dir(&app).map_err(|error| CommandError::Internal(error.to_string()))?;
+        let settings = crate::settings::load(&app_data);
+        Ok(Preferences {
+            theme: settings.theme,
+            version: crate::updates::current_version().to_owned(),
+        })
+    })
+    .await
+    .map_err(|error| CommandError::Internal(error.to_string()))?
+}
+
+/// Saves the colour scheme.
+///
+/// Returns the preferences as they now stand rather than nothing, so the
+/// caller renders what was actually stored instead of what it hoped was.
+///
+/// # Errors
+///
+/// [`CommandError::Internal`] if the settings file cannot be written.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn set_theme(app: tauri::AppHandle, theme: Theme) -> Result<Preferences, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_data =
+            crate::snapshot_store::app_data_dir(&app).map_err(|error| CommandError::Internal(error.to_string()))?;
+        let mut settings = crate::settings::load(&app_data);
+        settings.theme = theme;
+        crate::settings::save(&app_data, &settings)
+            .map_err(|error| CommandError::Internal(format!("could not save settings: {error}")))?;
+        Ok(Preferences {
+            theme,
+            version: crate::updates::current_version().to_owned(),
+        })
+    })
+    .await
+    .map_err(|error| CommandError::Internal(error.to_string()))?
+}
+
+/// Asks GitHub whether a newer release exists.
+///
+/// Reaches the network, and only ever when the user presses the button. It
+/// downloads nothing and changes nothing on disk — see [`crate::updates`] for
+/// why this is a question and not an updater.
+///
+/// # Errors
+///
+/// [`CommandError::Internal`] when the check could not be completed. "No
+/// releases published" is a successful answer, not an error.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn check_for_updates() -> Result<ReleaseCheck, CommandError> {
+    crate::updates::check().await.map_err(CommandError::Internal)
 }
 
 /// Mounted local volumes, for the launch screen.

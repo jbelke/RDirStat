@@ -370,6 +370,38 @@ export const commands = {
 	 */
 	revealInFinder: (generation: TreeGeneration, node: NodeId) => typedError<null, ActionError>(__TAURI_INVOKE("reveal_in_finder", { generation, node })),
 	/**
+	 *  The in-app preferences.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`CommandError::Internal`] if the app data directory cannot be located.
+	 */
+	preferences: () => typedError<Preferences, CommandError>(__TAURI_INVOKE("preferences")),
+	/**
+	 *  Saves the colour scheme.
+	 * 
+	 *  Returns the preferences as they now stand rather than nothing, so the
+	 *  caller renders what was actually stored instead of what it hoped was.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`CommandError::Internal`] if the settings file cannot be written.
+	 */
+	setTheme: (theme: Theme) => typedError<Preferences, CommandError>(__TAURI_INVOKE("set_theme", { theme })),
+	/**
+	 *  Asks GitHub whether a newer release exists.
+	 * 
+	 *  Reaches the network, and only ever when the user presses the button. It
+	 *  downloads nothing and changes nothing on disk — see [`crate::updates`] for
+	 *  why this is a question and not an updater.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`CommandError::Internal`] when the check could not be completed. "No
+	 *  releases published" is a successful answer, not an error.
+	 */
+	checkForUpdates: () => typedError<ReleaseCheck, CommandError>(__TAURI_INVOKE("check_for_updates")),
+	/**
 	 *  What two folders each hold, for the side-by-side view.
 	 * 
 	 *  Symmetric and read-only. It takes a left and a right rather than a source
@@ -1823,6 +1855,15 @@ export type Operation =
 "persist";
 
 /**
+ *  What the settings page shows: the stored preferences plus the running
+ *  version, which it needs in the same breath and which is not a preference.
+ */
+export type Preferences = {
+	theme: Theme,
+	version: string,
+};
+
+/**
  *  A named service preset.
  * 
  *  `Serialize` but deliberately not `Deserialize`: the profile list is a
@@ -1917,6 +1958,18 @@ export type QueryError =
 { kind: "no_catalog_scan" } | 
 /**  Anything unexpected, already logged with its full source chain. */
 { kind: "internal"; detail: string };
+
+/**  What a release check found. */
+export type ReleaseCheck = {
+	/**  The running version, from the crate manifest. */
+	current: string,
+	/**  The newest published tag, or `None` when nothing is published yet. */
+	latest: string | null,
+	/**  True only when `latest` is genuinely ahead of `current`. */
+	newer_available: boolean,
+	/**  Where a human should go to read about it. */
+	releases_url: string,
+};
 
 /**
  *  A relocation-specific failure.
@@ -3192,6 +3245,23 @@ export type TargetView = {
 	 */
 	uses_ambient_credentials: boolean,
 } & RemoteTarget;
+
+/**
+ *  Which colour scheme the window uses.
+ * 
+ *  `System` is a third state, not a synonym for whichever of the other two
+ *  macOS currently reports. Someone who has never chosen should keep following
+ *  the OS when it flips at sunset, and recording `Light` on their behalf would
+ *  silently pin them to whatever the weather was the day they first launched.
+ * 
+ *  The CSS already had all three: `.light` and `.dark` force, and the
+ *  `prefers-color-scheme` block is written `:root:not(.light)` so the OS only
+ *  wins when nothing is forcing. This setting supplies the class; it did not
+ *  need any new styling.
+ */
+export type Theme = 
+/**  Follow macOS, including when it changes while the app is running. */
+"system" | "light" | "dark";
 
 /**  One file that did not make it, and why. */
 export type TransferFailure = {

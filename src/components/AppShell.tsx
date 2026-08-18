@@ -36,7 +36,8 @@ import { DetailsPanel } from "@/components/DetailsPanel";
 import { DriveSwitcher } from "@/components/DriveSwitcher";
 import { RelocateDialog } from "@/components/RelocateDialog";
 import { SelectionActions } from "@/components/SelectionActions";
-import { AUTHOR_URL, StoragePanel } from "@/components/StoragePanel";
+import { ConfigRoute, type ConfigTab } from "@/components/ConfigRoute";
+import { AUTHOR_URL } from "@/components/StoragePanel";
 import { SyncRoute } from "@/components/SyncRoute";
 import { TransfersRoute } from "@/components/TransfersRoute";
 import { CategoryLegend } from "@/components/canvas/CategoryLegend";
@@ -75,6 +76,9 @@ import {
   type DiffMetricKind,
   type LayoutKind,
   type RelocateReportView,
+  preferences,
+  setTheme as setThemeIpc,
+  type ThemeChoice,
 } from "@/lib/ipc";
 import {
   dropStaleGenerations,
@@ -96,6 +100,7 @@ import {
   useSizeBands,
   useTransferProgress,
 } from "@/lib/queries";
+import { applyTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { GENERATION_NONE, isRealNode } from "@/lib/wire";
 import { useCurrentRoot, useSoleSelection, useUiStore, type Route } from "@/state/store";
@@ -202,6 +207,74 @@ export function AppShell() {
   const destinationPath = useUiStore((state) => state.destinationPath);
   const setDestinationPath = useUiStore((state) => state.setDestinationPath);
   const setRoute = useUiStore((state) => state.setRoute);
+
+  /*
+   * Which config tab is showing, and who decided.
+   *
+   * Held here rather than inside `ConfigRoute` because the page has three
+   * entry points that promise different things: the rail's "Settings", the
+   * titlebar gear and the menu-bar gear. A page that owned its own tab would
+   * open on whatever it defaulted to, so a control labelled Settings could
+   * land the user on a storage report — the same defect as a menu warning
+   * that stays after the behaviour it described has gone.
+   */
+  const [configTab, setConfigTab] = useState<ConfigTab>("settings");
+  const openConfig = useCallback(
+    (tab: ConfigTab) => {
+      setConfigTab(tab);
+      setRoute("storage");
+    },
+    [setRoute],
+  );
+
+  const [theme, setTheme] = useState<ThemeChoice>("system");
+  const [themeSaving, setThemeSaving] = useState(false);
+  const [themeError, setThemeError] = useState<string | null>(null);
+  const [version, setVersion] = useState("");
+
+  // Read once at launch. The class is applied as soon as the answer arrives;
+  // until then the document carries no class, which is "follow macOS" — so a
+  // slow read shows the system scheme rather than a flash of the wrong one.
+  useEffect(() => {
+    let live = true;
+    void preferences()
+      .then((stored) => {
+        if (!live) return;
+        setTheme(stored.theme);
+        setVersion(stored.version);
+        applyTheme(stored.theme);
+      })
+      .catch(() => {
+        // No backend (a browser dev server), or an unreadable settings file
+        // the backend already logged. Either way the default is the OS's
+        // choice, which is what the document is already showing.
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  /*
+   * Applied before it is saved, deliberately.
+   *
+   * The class change is instant and free; the write is an IPC round trip. A
+   * preference that visibly lags the click reads as broken, and if the write
+   * fails the panel says so while the user keeps the scheme they asked for —
+   * which is the more useful pair of outcomes than a correct-but-slow toggle.
+   */
+  const handleThemeChange = useCallback((next: ThemeChoice) => {
+    setTheme(next);
+    applyTheme(next);
+    setThemeSaving(true);
+    setThemeError(null);
+    setThemeIpc(next)
+      .catch((cause: unknown) => {
+        setThemeError(
+          `${cause instanceof Error ? cause.message : String(cause)} — the scheme is applied, but will not be remembered.`,
+        );
+      })
+      .finally(() => setThemeSaving(false));
+  }, []);
   const generation = useUiStore((state) => state.generation);
   const navStack = useUiStore((state) => state.navStack);
   const selection = useUiStore((state) => state.selection);
@@ -336,7 +409,7 @@ export function AppShell() {
     let stop: (() => void) | undefined;
     let live = true;
     void import("@tauri-apps/api/event")
-      .then(({ listen }) => listen(OPEN_SETTINGS_EVENT, () => setRoute("storage")))
+      .then(({ listen }) => listen(OPEN_SETTINGS_EVENT, () => openConfig("settings")))
       .then((unlisten) => {
         if (live) stop = unlisten;
         else unlisten();
@@ -710,7 +783,7 @@ export function AppShell() {
       <Titlebar
         crumbs={crumbs}
         onNavigate={handleCrumbNavigate}
-        onOpenSettings={() => setRoute("storage")}
+        onOpenSettings={() => openConfig("settings")}
         driveSelector={
           generation !== GENERATION_NONE && (
             <DriveSwitcher
@@ -765,7 +838,12 @@ export function AppShell() {
             <h2 className="px-2 pb-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
               App
             </h2>
-            <RailButton id="storage" label="Stored data" route={route} onSelect={setRoute} />
+            <RailButton
+              id="storage"
+              label="Settings"
+              route={route}
+              onSelect={() => openConfig("settings")}
+            />
           </div>
         </nav>
 
@@ -792,37 +870,49 @@ export function AppShell() {
           )}
 
           {route === "sync" && <SyncRoute />}
-          {route === "transfers" && <TransfersRoute />}
+          {route === "transfers" && <TransfersRoute onAddDestination={() => openConfig("remote")} />}
 
           {route === "storage" && (
-            <StoragePanel
-              report={storage.data ?? null}
-              loading={storage.isLoading}
-              onRevealDirectory={() => {
-                const directory = storage.data?.directory;
-                // Reveal rather than open: the store holds the app's own data
-                // and the user wants to SEE it, not have something try to
-                // interpret a 960 MB binary.
-                if (directory !== undefined) void revealItemInDir(directory);
+            <ConfigRoute
+              tab={configTab}
+              onTabChange={setConfigTab}
+              version={version}
+              // Opened here rather than as an `href` in the panel: following a
+              // link inside the webview would replace the whole app with a web
+              // page and leave no way back.
+              onOpenUrl={(url) => void openUrl(url)}
+              settings={{
+                theme,
+                onThemeChange: handleThemeChange,
+                saving: themeSaving,
+                error: themeError,
               }}
-              onChangeDirectory={async (directory) => {
+              storage={{
+                report: storage.data ?? null,
+                loading: storage.isLoading,
+                onRevealDirectory: () => {
+                  const directory = storage.data?.directory;
+                  // Reveal rather than open: the store holds the app's own data
+                  // and the user wants to SEE it, not have something try to
+                  // interpret a 960 MB binary.
+                  if (directory !== undefined) void revealItemInDir(directory);
+                },
                 // Deliberately not caught here: the panel renders the
                 // backend's reason inline, next to the field the user just
                 // edited, rather than in the shell-wide error strip where it
                 // would be detached from the thing that caused it.
-                await setSnapshotDir.mutateAsync(directory);
-              }}
-              // Opened here rather than as an `href` in the panel: following a
-              // link inside the webview would replace the whole app with a web
-              // page and leave no way back.
-              onOpenAuthor={() => void openUrl(AUTHOR_URL)}
-              onExport={(snapshot) => {
-                setActionError(null);
-                exportSnapshot(snapshot.path)
-                  .then((written) => setActionError(`Exported to ${written}`))
-                  .catch((cause: unknown) => {
-                    setActionError(cause instanceof Error ? cause.message : String(cause));
-                  });
+                onChangeDirectory: async (directory) => {
+                  await setSnapshotDir.mutateAsync(directory);
+                },
+                onOpenAuthor: () => void openUrl(AUTHOR_URL),
+                onExport: (snapshot) => {
+                  setActionError(null);
+                  exportSnapshot(snapshot.path)
+                    .then((written) => setActionError(`Exported to ${written}`))
+                    .catch((cause: unknown) => {
+                      setActionError(cause instanceof Error ? cause.message : String(cause));
+                    });
+                },
               }}
             />
           )}

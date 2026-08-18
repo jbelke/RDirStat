@@ -1436,6 +1436,50 @@ export async function storageReport(): Promise<StorageReportView> {
  * here rather than at the end of the next scan — and returns the fresh report,
  * so the panel never has to guess what took effect.
  */
+export type ThemeChoice = "system" | "light" | "dark";
+
+/** The stored preferences, plus the running version they are shown beside. */
+export interface PreferencesView {
+  readonly theme: ThemeChoice;
+  readonly version: string;
+}
+
+/**
+ * What a release check found.
+ *
+ * `latest === null` is a real answer — the project has published no releases —
+ * and is deliberately distinct from both "you are current" and from the thrown
+ * error a network failure produces. Not knowing is not the same as knowing
+ * there is nothing.
+ */
+export interface ReleaseCheckView {
+  readonly current: string;
+  readonly latest: string | null;
+  readonly newerAvailable: boolean;
+  readonly releasesUrl: string;
+}
+
+export async function preferences(): Promise<PreferencesView> {
+  const stored = await unwrap("preferences", commands.preferences());
+  return { theme: stored.theme, version: stored.version };
+}
+
+export async function setTheme(theme: ThemeChoice): Promise<PreferencesView> {
+  const stored = await unwrap("set_theme", commands.setTheme(theme));
+  return { theme: stored.theme, version: stored.version };
+}
+
+/** Reaches the network. Downloads nothing; see `updates.rs`. */
+export async function checkForUpdates(): Promise<ReleaseCheckView> {
+  const result = await unwrap("check_for_updates", commands.checkForUpdates());
+  return {
+    current: result.current,
+    latest: result.latest,
+    newerAvailable: result.newer_available,
+    releasesUrl: result.releases_url,
+  };
+}
+
 export async function setSnapshotDir(directory: string | null): Promise<StorageReportView> {
   return toStorageReport(await unwrap("set_snapshot_dir", commands.setSnapshotDir(directory)));
 }
