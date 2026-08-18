@@ -1369,7 +1369,7 @@ function useCrumbs(generation: number, current: number | null, rootPath: string 
   // frozen tree, so it is both cheaper and more correct than the alternative.
   const chain = useAncestors(generation, current);
 
-  const crumbs: Crumb[] = [{ node: null, label: "RDirStat" }];
+  const crumbs: Crumb[] = [{ node: null, label: "Stellar RDIRSTAT" }];
   if (chain.data === undefined) {
     // Before the chain arrives, show the root rather than nothing: the strip
     // must not change height or jump on every navigation.

@@ -1,0 +1,139 @@
+#                  Stellar RDIRSTAT — container profiles
+#
+# Nothing here builds the macOS application or the .dmg; see the header of
+# ./Dockerfile for why that is not an oversight. Use `./rush.sh dmg` on a Mac.
+#
+# Every service is behind a profile, so a bare `docker compose up` starts
+# nothing. Pick one:
+#
+#   ./rush.sh up dev                 Vite dev server         http://localhost:1420
+#   ./rush.sh up staging             built bundle, nginx     http://localhost:4174
+#   ./rush.sh up prod                built bundle, nginx     http://localhost:4175
+#   ./rush.sh run check              typecheck + tests + docs
+#   ./rush.sh run rust               fmt/clippy/test, portable crates
+#   ./rush.sh run assets             regenerate the brand icons
+#
+# or the same thing by hand:
+#
+#   docker compose --env-file .env.staging --profile staging up --build
+#
+# Ports and the project name come from the environment file, which is what
+# lets a development, staging and production stack coexist on one machine
+# instead of fighting over 4173.
+
+name: ${COMPOSE_PROJECT_NAME:-stellar-rdirstat}
+
+x-build-args: &build-args
+  NODE_VERSION: "24"
+  RUST_VERSION: "1.97.1"
+
+services:
+  # --- development: the UI, live ---------------------------------------------
+  dev:
+    profiles: ["dev", "development"]
+    build:
+      context: .
+      target: dev
+      args: *build-args
+    environment:
+      NODE_ENV: development
+      RDIRSTAT_ENV: ${RDIRSTAT_ENV:-development}
+    ports:
+      - "${DEV_PORT:-1420}:1420"
+    volumes:
+      # Source is bind-mounted so edits reload; node_modules is masked by an
+      # anonymous volume so the container keeps the Linux dependency tree it
+      # installed rather than a macOS one bound in over the top of it.
+      - ./src:/app/src:ro
+      - ./public:/app/public:ro
+      - ./index.html:/app/index.html:ro
+      - ./vite.config.ts:/app/vite.config.ts:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
+      - ./tsconfig.node.json:/app/tsconfig.node.json:ro
+      - ./components.json:/app/components.json:ro
+      - /app/node_modules
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:1420/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  # --- staging: the built bundle, on the release path -------------------------
+  staging:
+    profiles: ["staging"]
+    build:
+      context: .
+      target: web
+      args: *build-args
+    environment:
+      RDIRSTAT_ENV: ${RDIRSTAT_ENV:-staging}
+    ports:
+      - "${WEB_PORT:-4174}:80"
+    restart: unless-stopped
+
+  # --- production: identical image, separate port and project name ------------
+  #
+  # Deliberately the same build target as staging. If the production image were
+  # built differently from the one staging signed off on, staging would not be
+  # testing anything.
+  prod:
+    profiles: ["prod", "production"]
+    build:
+      context: .
+      target: web
+      args: *build-args
+    environment:
+      RDIRSTAT_ENV: ${RDIRSTAT_ENV:-production}
+    ports:
+      - "${WEB_PORT:-4175}:80"
+    restart: unless-stopped
+
+  # --- one-shot jobs ----------------------------------------------------------
+  check:
+    profiles: ["check", "ci"]
+    build:
+      context: .
+      target: test
+      args: *build-args
+    environment:
+      CI: "true"
+
+  rust:
+    profiles: ["rust", "ci"]
+    build:
+      context: .
+      target: rust
+      args: *build-args
+    working_dir: /app
+    environment:
+      CARGO_TERM_COLOR: always
+    volumes:
+      - ./Cargo.toml:/app/Cargo.toml:ro
+      - ./Cargo.lock:/app/Cargo.lock:ro
+      - ./clippy.toml:/app/clippy.toml:ro
+      - ./rustfmt.toml:/app/rustfmt.toml:ro
+      - ./crates:/app/crates:ro
+      # src-tauri is a workspace member, so Cargo refuses to load the manifest
+      # without it even though nothing here builds it. Mounted read-only for
+      # that reason alone.
+      - ./src-tauri:/app/src-tauri:ro
+      # A named volume, not a bind: a Linux target/ directory dropped into the
+      # macOS checkout would collide with the host's own build artefacts.
+      - cargo-target:/app/target
+      - cargo-registry:/usr/local/cargo/registry
+
+  assets:
+    profiles: ["assets"]
+    build:
+      context: .
+      target: assets
+      args: *build-args
+    volumes:
+      - ./src-tauri/icons:/app/src-tauri/icons
+      - ./public:/app/public
+      - ./scripts/generate-icons.mjs:/app/scripts/generate-icons.mjs:ro
+
+volumes:
+  cargo-target:
+  cargo-registry:

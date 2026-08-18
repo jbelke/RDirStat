@@ -1,0 +1,18 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Stellar RDIRSTAT Staging",
+  "identifier": "jbelke.rdirstat.staging",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Stellar RDIRSTAT — staging"
+      }
+    ]
+  },
+  "bundle": {
+    "targets": ["app", "dmg"],
+    "shortDescription": "Disk usage and file inventory for macOS (staging)",
+    "longDescription": "Pre-release build of Stellar RDIRSTAT. Installs alongside the release build under its own bundle identifier, so its settings, snapshot store and Keychain items are separate files."
+  }
+}

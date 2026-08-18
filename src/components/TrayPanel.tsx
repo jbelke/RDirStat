@@ -61,7 +61,7 @@ export function TrayPanel() {
         data-tauri-drag-region
         className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2"
       >
-        <span className="flex-1 text-xs font-medium">RDirStat</span>
+        <span className="flex-1 text-xs font-medium">Stellar RDIRSTAT</span>
         <button
           type="button"
           onClick={() => void refetch()}
@@ -159,7 +159,7 @@ export function TrayPanel() {
       <footer className="flex shrink-0 items-center gap-2 border-t border-border/60 px-3 py-2">
         <Button size="sm" variant="outline" className="flex-1" onClick={() => void openMainWindow()}>
           <PanelTopOpen aria-hidden />
-          Open RDirStat
+          Open Stellar RDIRSTAT
         </Button>
       </footer>
     </div>
