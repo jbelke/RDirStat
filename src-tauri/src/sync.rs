@@ -774,11 +774,17 @@ fn copy_planned(source: &Path, destination: &Path, entries: &[SyncEntry]) -> Res
         ));
     }
 
-    // `mkbom` reports a rejected entry on stderr and still exits 0, so counting
-    // is the only honest check that the bom describes what was asked for. An
-    // under-full bom makes `ditto` copy less than the plan while succeeding,
-    // and an empty one copies nothing at all while succeeding — the same
-    // silent-empty-success shape as nato-b6h.1.
+    // `mkbom` reports a rejected entry on stderr and still exits 0, so this
+    // counts the bom back rather than trusting that exit status.
+    //
+    // Being precise about what this does NOT do, because an earlier version of
+    // this comment overstated it: `mkbom -s -i` never stats the listed paths,
+    // and `bom_lines` already guarantees the one rejection rule (a parent
+    // preceding its children) by construction, so on today's inputs this cannot
+    // fire. It is kept as a regression guard on `bom_lines`, not as the check
+    // that the copy was complete. A bom naming a path that is not in the source
+    // passes here and is silently skipped by `ditto` — that case is caught
+    // after the copy, by reconciling against the filesystem in `apply`.
     let listed = Command::new("/usr/bin/lsbom")
         .arg("-s")
         .arg(&bom)
@@ -877,39 +883,71 @@ pub(crate) fn apply<S: BuildHasher>(
     let (batchable, individual): (Vec<SyncEntry>, Vec<SyncEntry>) =
         all.into_iter().partition(|entry| bom_can_carry(&entry.relative_path));
 
-    let batch = if batchable.is_empty() { Ok(()) } else { copy_planned(source, destination, &batchable) };
-
-    match batch {
-        Ok(()) => {
-            for entry in batchable {
-                report.copied = report.copied.saturating_add(1);
-                report.bytes_copied = report.bytes_copied.saturating_add(entry.bytes);
-            }
-        }
-        // The batch is fast but returns one verdict for the whole set, and a
-        // report that says "40,000 files failed" is not a report. So a failed
-        // batch is retried file by file purely to find out which files actually
-        // failed. `ditto` overwrites, so re-copying the ones that already
-        // arrived is wasted work on an error path and nothing worse.
-        Err(reason) => {
-            report.failures.push(SyncFailure {
-                relative_path: String::new(),
-                reason: format!("copying in one pass failed, falling back to one file at a time: {reason}"),
-            });
-            copy_individually(source, destination, batchable, &mut report);
-        }
+    if !batchable.is_empty()
+        && let Err(reason) = copy_planned(source, destination, &batchable)
+    {
+        report.failures.push(SyncFailure {
+            relative_path: String::new(),
+            reason: format!("copying in one pass failed, falling back to one file at a time: {reason}"),
+        });
     }
 
+    // Reconcile against the FILESYSTEM, never against the batch's exit code.
+    //
+    // `ditto --bom` exits 0 for a bom naming a path that is not in the source —
+    // it simply skips it. That is reachable two ways: the tree can change
+    // between the walk and the copy, which is the whole reason `apply` re-walks;
+    // and `relative_path` comes from `Path::display()`, which replaces invalid
+    // UTF-8 with U+FFFD, so a name that is not valid UTF-8 becomes a path that
+    // does not exist. Crediting the batch on its exit status would report those
+    // files as copied when the destination never received them — a report that
+    // lies, which is worse than a failure.
+    //
+    // So every planned entry is checked for having actually landed. The ones
+    // that did cost a `stat` and are counted; the ones that did not are copied
+    // one at a time, which either succeeds or produces a per-file failure with
+    // a real reason. This is also what keeps a partially-succeeded batch from
+    // re-sending the bytes it already delivered.
+    copy_individually(source, destination, batchable, &mut report);
     copy_individually(source, destination, individual, &mut report);
 
     Ok(report)
+}
+
+/// True when a file the fallback is about to copy is already at the destination.
+///
+/// The fallback exists to find out WHICH files failed after a batch copy failed
+/// as a whole. But `ditto` is not all-or-nothing: it can exit non-zero having
+/// already written most of a tree, which is what a full disk, a mid-walk
+/// permission denial or an unmounted volume actually look like. Without this
+/// check the fallback would re-copy every byte the batch had already landed —
+/// a 500 GB transfer that failed at 400 GB would serially re-copy all 500 GB,
+/// one process per file, on the exact path where the user most wants out.
+///
+/// Size is the right test here and content is not, with one exception. An entry
+/// is in the plan because the destination lacked it or had it at a different
+/// size, so a destination file at the source's size is one this run put there.
+/// The exception is [`SyncReason::ContentDiffers`], which by definition means
+/// the sizes already matched and only the bytes differed — for those, a size
+/// match proves nothing and the copy must be redone.
+fn already_landed(entry: &SyncEntry, target: &Path) -> bool {
+    if entry.reason == SyncReason::ContentDiffers {
+        return false;
+    }
+    fs::symlink_metadata(target).is_ok_and(|meta| !meta.is_dir() && meta.len() == entry.bytes)
 }
 
 /// Copies entries one process at a time, recording a verdict for each.
 fn copy_individually(source: &Path, destination: &Path, entries: Vec<SyncEntry>, report: &mut SyncReport) {
     for entry in entries {
         let relative = Path::new(&entry.relative_path);
-        match copy_one(&source.join(relative), &destination.join(relative)) {
+        let target = destination.join(relative);
+        if already_landed(&entry, &target) {
+            report.copied = report.copied.saturating_add(1);
+            report.bytes_copied = report.bytes_copied.saturating_add(entry.bytes);
+            continue;
+        }
+        match copy_one(&source.join(relative), &target) {
             Ok(()) => {
                 report.copied = report.copied.saturating_add(1);
                 report.bytes_copied = report.bytes_copied.saturating_add(entry.bytes);
@@ -1102,6 +1140,81 @@ mod tests {
         assert!(
             plan(&keys, GEN, NOW, request(Path::new("relative"), dir.path(), CompareMode::Quick, OnDiffer::Skip))
             .is_err()
+        );
+    }
+
+    /// The report may never claim a file was copied that is not there.
+    ///
+    /// `ditto --bom` exits 0 for a bom naming a path that is not in the source:
+    /// it silently skips it. So a batch can "succeed" having copied less than
+    /// the plan, and crediting entries on that exit status produced a report
+    /// that lied — the shape of nato-b6h.1, which is what this whole epic was
+    /// convened over.
+    ///
+    /// Reproduces it directly: two planned entries, only one of which exists in
+    /// the source. The batch succeeds. The one that landed must be counted; the
+    /// one that never existed must be reported as a failure, not as a copy.
+    #[test]
+    fn a_batch_that_silently_skipped_a_file_is_not_reported_as_copied() {
+        let source = scratch();
+        let destination = scratch();
+        write(source.path(), "real.txt", b"here");
+
+        let entries = vec![
+            SyncEntry { relative_path: "real.txt".to_owned(), bytes: 4, reason: SyncReason::Missing },
+            SyncEntry { relative_path: "ghost.txt".to_owned(), bytes: 9, reason: SyncReason::Missing },
+        ];
+
+        // The batch reports success even though `ghost.txt` is not there.
+        copy_planned(source.path(), destination.path(), &entries).expect("ditto skips the absent path and exits 0");
+        assert!(destination.path().join("real.txt").exists(), "the real file should have landed");
+        assert!(!destination.path().join("ghost.txt").exists(), "the absent one obviously did not");
+
+        let mut report = SyncReport {
+            generation: GEN,
+            source: display(source.path()),
+            destination: display(destination.path()),
+            copied: 0,
+            bytes_copied: 0,
+            failures: Vec::new(),
+        };
+        copy_individually(source.path(), destination.path(), entries, &mut report);
+
+        assert_eq!(report.copied, 1, "only the file that actually landed may be counted");
+        assert_eq!(report.bytes_copied, 4);
+        assert_eq!(report.failures.len(), 1, "the skipped file must be reported, got {:?}", report.failures);
+        assert_eq!(report.failures[0].relative_path, "ghost.txt");
+    }
+
+    /// The fallback must not re-send bytes the batch already delivered.
+    ///
+    /// `ditto` is not all-or-nothing: it can exit non-zero having written most
+    /// of a tree, which is what a full disk or a mid-walk permission denial
+    /// look like. Re-copying everything would make the error path the slowest
+    /// path in the system — a 500 GB transfer failing at 400 GB would serially
+    /// re-copy all 500 GB, one process per file.
+    #[test]
+    fn the_fallback_skips_what_already_landed() {
+        let source = scratch();
+        let destination = scratch();
+        write(source.path(), "done.txt", b"already");
+        write(destination.path(), "done.txt", b"already");
+        write(source.path(), "todo.txt", b"missing");
+
+        let done = SyncEntry { relative_path: "done.txt".to_owned(), bytes: 7, reason: SyncReason::Missing };
+        let landed = already_landed(&done, &destination.path().join("done.txt"));
+        assert!(landed, "a file already at the destination at the right size must be skipped");
+
+        // ...but a file whose bytes differ at the same size must NOT be skipped,
+        // because that is exactly what ContentDiffers means.
+        let same_size_different_bytes = SyncEntry {
+            relative_path: "done.txt".to_owned(),
+            bytes: 7,
+            reason: SyncReason::ContentDiffers,
+        };
+        assert!(
+            !already_landed(&same_size_different_bytes, &destination.path().join("done.txt")),
+            "a size match proves nothing when only the contents differed"
         );
     }
 
