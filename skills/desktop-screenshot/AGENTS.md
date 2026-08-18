@@ -31,10 +31,10 @@ This folder owns no code and no captured images.
 **This skill does not apply to this project yet, and cannot.** It targets the
 CoCO desktop client through that repository's Playwright mock bridge. This
 project has no frontend, no Playwright, no mock bridge, and no GitHub remote —
-`docs/01-ARCHITECTURE.md` places React + Vite and a `<canvas>` treemap in the
+`.settings/docs/01-ARCHITECTURE.md` places React + Vite and a `<canvas>` treemap in the
 *planned* tree, not an existing one.
 
-It becomes relevant at the phase that builds the UI (`docs/05-UI.md`). Porting
+It becomes relevant at the phase that builds the UI (`.settings/docs/05-UI.md`). Porting
 it then means replacing the CoCO bridge with this project's harness and
 re-deciding the hosting rule against whatever remote exists by that point; the
 hosting rule itself — immutable URLs, never a third-party host — is the part

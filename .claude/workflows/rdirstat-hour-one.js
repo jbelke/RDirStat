@@ -1,7 +1,7 @@
 export const meta = {
   name: 'rdirstat-hour-one',
   description: 'Build a running RDirStat vertical slice in ~1 hour: contract-first, then disjoint-ownership parallel agents, then a single integration owner.',
-  whenToUse: 'Run once, from a clean STELLAR-RDIRSTAT checkout, to turn docs/00-08 into a launchable Tauri app. Not for incremental feature work afterwards.',
+  whenToUse: 'Run once, from a clean STELLAR-RDIRSTAT checkout, to turn .settings/docs/00-08 into a launchable Tauri app. Not for incremental feature work afterwards.',
   phases: [
     { title: 'Contract',  detail: 'git init + Tauri scaffold + frozen core types and command signatures' },
     { title: 'Build',     detail: '7 agents, disjoint file ownership, each with its own CARGO_TARGET_DIR' },
@@ -46,13 +46,13 @@ const UNITS = [
     key: 'scan',
     label: 'crate:rdirstat-scan',
     owns: 'crates/rdirstat-scan/**',
-    doc: 'docs/02-SCANNER.md',
-    task: `Implement rdirstat-scan: the DirReader trait and RawEntry exactly as docs/02
+    doc: '.settings/docs/02-SCANNER.md',
+    task: `Implement rdirstat-scan: the DirReader trait and RawEntry exactly as .settings/docs/02
       specifies, StdReader, BOTH schedulers, the single builder that owns the arena and
       is the only assigner of NodeIds, and the ITERATIVE post-order rollup (do not
       recurse; depth is untrusted).
 
-      Ship both readers in the order docs/02 fixes, and keep their relationship:
+      Ship both readers in the order .settings/docs/02 fixes, and keep their relationship:
       - StdReader is the CORRECTNESS ORACLE (std::fs::read_dir + DirEntry::metadata,
         which is symlink_metadata on Unix, so it does not follow symlinks). Write it
         first. It is expected to be the slow baseline, and no faster path may disagree
@@ -70,7 +70,7 @@ const UNITS = [
       (dev,ino) with later entries contributing zero and carrying a flag; keep size
       and alloc separate; virtual direct-files group (no arena node); special files
       are zero-contribution leaves. Exclusions compiled once, first-match-wins, with
-      the macOS defaults from docs/02 including /System/Volumes/Data.
+      the macOS defaults from .settings/docs/02 including /System/Volumes/Data.
       EACCES/EPERM mark a node unreadable and the scan CONTINUES - never propagate a
       per-directory error out of the scan. Relaxed AtomicU64 counters, one AtomicBool
       cancel checked at directory boundaries.`,
@@ -79,15 +79,15 @@ const UNITS = [
     key: 'classify',
     label: 'crate:rdirstat-classify',
     owns: 'crates/rdirstat-classify/**',
-    doc: 'docs/04-CLASSIFICATION.md',
+    doc: '.settings/docs/04-CLASSIFICATION.md',
     task: `Implement rdirstat-classify. The algorithm is longest-suffix-first: split the
       name on dots and try the longest multi-part suffix first ("tar.gz" before "gz"),
       case-sensitive map before the ASCII-lowercased map, glob patterns only as a
       fallback, then the executable-bit rule, then Uncategorized. Symlink wins over
       everything and is checked first.
       Author the default taxonomy FROM SCRATCH from public format knowledge - the
-      QDirStat checkout is GPL-2.0 and docs/README fixes the rule that we reproduce
-      behaviour, never transcribe its tables. Include the macOS categories docs/04
+      QDirStat checkout is GPL-2.0 and .settings/docs/README fixes the rule that we reproduce
+      behaviour, never transcribe its tables. Include the macOS categories .settings/docs/04
       names: Disk Images, macOS Bundles, Photo & Media Libraries, Xcode & Build Junk,
       Caches (node_modules, DerivedData), Virtual Machines, Container Images, Apple
       Junk (.DS_Store, ._*), RAW Photos.
@@ -99,7 +99,7 @@ const UNITS = [
     key: 'treemap',
     label: 'crate:rdirstat-treemap',
     owns: 'crates/rdirstat-treemap/**',
-    doc: 'docs/05-UI.md',
+    doc: '.settings/docs/05-UI.md',
     task: `Implement rdirstat-treemap: three layouts over ONE traversal of the frozen
       tree, emitting an Arrow RecordBatch with columns node, depth, x, y, w, h,
       category.
@@ -118,7 +118,7 @@ const UNITS = [
     key: 'cli',
     label: 'crate:rdirstat-cli',
     owns: 'crates/rdirstat-cli/**',
-    doc: 'docs/02-SCANNER.md',
+    doc: '.settings/docs/02-SCANNER.md',
     task: `Implement rdirstat-cli - the measurement surface, not a throwaway. This is how
       the scanner gets profiled without a webview, so it must exist before anyone
       trusts a number.
@@ -137,7 +137,7 @@ const UNITS = [
     key: 'tauri',
     label: 'src-tauri commands',
     owns: 'src-tauri/src/**',
-    doc: 'docs/01-ARCHITECTURE.md',
+    doc: '.settings/docs/01-ARCHITECTURE.md',
     task: `Implement the Tauri command layer - thin. It adapts library APIs and owns no
       scanner logic.
       AppState holds RwLock<Option<Arc<CompletedScan>>>; a command takes a read lock
@@ -145,7 +145,7 @@ const UNITS = [
       Idle -> Scanning -> Cancelling|Finalizing -> Ready|Failed, one active scan,
       monotonic ScanId and TreeGeneration, and commands REJECT a stale generation
       rather than applying an old selection to a new tree.
-      Commands per docs/01: scan_start, scan_cancel, children (cursor-paged, limit
+      Commands per .settings/docs/01: scan_start, scan_cancel, children (cursor-paged, limit
       CLAMPED to 500), layout (kind = treemap|icicle|sunburst, returns Arrow IPC via
       tauri::ipc::Response), node_details (lstat on demand), path_of, list_volumes
       (statfs), reveal_in_finder, move_to_trash.
@@ -162,7 +162,7 @@ const UNITS = [
     key: 'shell',
     label: 'frontend shell',
     owns: 'src/** except src/components/canvas/**',
-    doc: 'docs/05-UI.md',
+    doc: '.settings/docs/05-UI.md',
     task: `Build the frontend shell. Tailwind CSS v4 via @tailwindcss/vite with a CSS-first
       @theme block - no tailwind.config.js. Dark surface first, light derived.
       Category colors are CSS vars (--cat-*); Rust sends indices, CSS resolves color.
@@ -184,7 +184,7 @@ const UNITS = [
     key: 'canvas',
     label: 'frontend canvas',
     owns: 'src/components/canvas/**',
-    doc: 'docs/05-UI.md',
+    doc: '.settings/docs/05-UI.md',
     task: `Build the hierarchy canvas - the one performance-critical frontend component.
       A single <canvas>. Read the Arrow IPC ArrayBuffer from the 'layout' command with
       tableFromIPC (apache-arrow), pull typed arrays for x/y/w/h/node/category, and
@@ -218,7 +218,7 @@ HARD RULES - violating either is what makes this workflow fail rather than finis
 
 Other standing rules:
 - Read {DOC} in full first. It is the contract, not background reading.
-- Follow the /rust-skills guidelines and docs/08-RUST-PRACTICES.md: workspace lints
+- Follow the /rust-skills guidelines and .settings/docs/08-RUST-PRACTICES.md: workspace lints
   with unsafe_code forbidden and unwrap_used denied, thiserror in libraries, newtypes
   over primitives, #[non_exhaustive] on public enums, no allocation in hot loops,
   OsStr/Path over String (macOS names are NFD bytes and may not be UTF-8).
@@ -248,7 +248,7 @@ const CONTRACT_SCHEMA = {
 
 const [scaffold, contract] = await parallel([
   () => agent(`You are preparing the STELLAR-RDIRSTAT repository at /Volumes/tuf8tb/STELLAR-RDIRSTAT.
-    Read docs/07-BUILD-PHASES.md phase 0 first.
+    Read .settings/docs/07-BUILD-PHASES.md phase 0 first.
 
     YOU OWN: the repository root files, src-tauri/** EXCEPT src-tauri/src/**, src/**
     ONLY as far as the Vite/Tailwind/TS scaffold config goes (index.html,
@@ -257,12 +257,12 @@ const [scaffold, contract] = await parallel([
 
     1. 'git init' on main. Per this project's policy: never create a branch. Write a
        .gitignore covering target/, node_modules/, dist/, .agents/, and the five
-       nested reference checkouts in reference-code/ (they contain their own .git -
-       they must NOT be added as embedded repos). Keep reference-code/AGENTS.md
-       tracked. Commit the existing docs/ and skills/ as the first commit.
+       nested reference checkouts in .settings/reference-code/ (they contain their own .git -
+       they must NOT be added as embedded repos). Keep .settings/reference-code/AGENTS.md
+       tracked. Commit the existing .settings/docs/ and skills/ as the first commit.
     2. Scaffold Tauri v2 + React + TypeScript + pnpm into a TEMP directory, inspect
-       what it generated, then move its files to the repo root. docs/, skills/,
-       reference-code/, and .claude/ are never generator targets and must survive.
+       what it generated, then move its files to the repo root. .settings/docs/, skills/,
+       .settings/reference-code/, and .claude/ are never generator targets and must survive.
        'cargo tauri' 2.11.0 is already installed; 'create-tauri-app' is not, so
        'cargo install create-tauri-app --locked' first.
     3. Tailwind CSS v4 via @tailwindcss/vite, CSS-first @theme in src/index.css. No
@@ -282,15 +282,15 @@ const [scaffold, contract] = await parallel([
     parallel without being able to ask you questions, so this must be complete and
     internally consistent on the first try.
 
-    Read docs/01-ARCHITECTURE.md IN FULL, then docs/02-SCANNER.md's reader contract.
-    Follow /rust-skills and docs/08-RUST-PRACTICES.md.
+    Read .settings/docs/01-ARCHITECTURE.md IN FULL, then .settings/docs/02-SCANNER.md's reader contract.
+    Follow /rust-skills and .settings/docs/08-RUST-PRACTICES.md.
 
     YOU OWN: the root Cargo.toml, rust-toolchain.toml, every crates/*/Cargo.toml,
     and crates/rdirstat-core/src/**. Nothing else. You do NOT own the other crates'
     src/, src-tauri/, or src/.
 
     1. Root Cargo.toml: [workspace] with members crates/* and src-tauri, the
-       [workspace.lints] table from docs/08 (rust.unsafe_code = "forbid",
+       [workspace.lints] table from .settings/docs/08 (rust.unsafe_code = "forbid",
        clippy.unwrap_used = "deny", clippy.panic = "deny",
        clippy.cast_possible_truncation = "deny", pedantic warn), the release profile
        (lto thin, codegen-units 1), and [workspace.dependencies] pinning EVERY shared
@@ -303,7 +303,7 @@ const [scaffold, contract] = await parallel([
        - #[repr(transparent)] NodeId(u32) with NONE sentinel and bit 31 reserved for
          tagged virtual direct-files groups; NameRef(u64) as 48-bit offset + 16-bit
          length behind a CHECKED accessor (no unchecked blob slicing anywhere).
-       - #[repr(C)] Node laid out exactly as docs/01 specifies, plus
+       - #[repr(C)] Node laid out exactly as .settings/docs/01 specifies, plus
          'const _: () = assert!(size_of::<Node>() <= 48);' and an align assertion.
        - The name blob, the sorted Vec<NodeId> directory index + parallel
          Vec<DirTotals>, Kind, the flags bit constants, Tree, CompletedScan
@@ -313,7 +313,7 @@ const [scaffold, contract] = await parallel([
        - Byte-size formatting in DECIMAL SI, because macOS Finder does and a
          disagreeing number reads as a bug. Logical and allocated stay separate.
     4. In a doc comment at the top of core's lib.rs, write the FULL list of
-       #[tauri::command] signatures from docs/01 verbatim, so every sibling sees the
+       #[tauri::command] signatures from .settings/docs/01 verbatim, so every sibling sees the
        same wire contract.
     5. 'cargo check -p rdirstat-core' must pass. Use CARGO_TARGET_DIR=target/contract.
 
@@ -421,7 +421,7 @@ while (!green && attempt < 3 && (!budget.total || budget.remaining() > 60_000)) 
        Version conflicts go to [workspace.dependencies].
     2. 'cargo clippy --workspace' - fix real defects. Downgrade a pedantic lint in
        the workspace table if it is noise; never silence unwrap_used or
-       unsafe_code, which exist for reasons docs/08 states.
+       unsafe_code, which exist for reasons .settings/docs/08 states.
     3. 'cargo test --workspace'. A failing test is a finding, not something to
        delete. If a test encodes a wrong expectation, fix the test AND say so.
     4. 'pnpm install && pnpm tsc --noEmit && pnpm build'. Fix type and import
@@ -494,7 +494,7 @@ const checks = await parallel([
     { label: 'verify:runs', phase: 'Verify', schema: VERDICT_SCHEMA }),
 
   () => agent(`Review the Rust in STELLAR-RDIRSTAT at /Volumes/tuf8tb/STELLAR-RDIRSTAT
-    against the /rust-skills guidelines and docs/08-RUST-PRACTICES.md. Read the
+    against the /rust-skills guidelines and .settings/docs/08-RUST-PRACTICES.md. Read the
     skill's rules under .agents/skills/rust-skills/rules/ and cite rule IDs.
     Prioritise, in this order: any unwrap/expect/panic on a filesystem path;
     allocation inside the scan hot loop (anti-format-hot-path,

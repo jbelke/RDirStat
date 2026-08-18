@@ -16,7 +16,7 @@ workspace = true
 # NOT "rdirstat": `src-tauri`'s package is also named `rdirstat` and produces a
 # bin of that name, so two targets collided on `target/debug/rdirstat` and
 # raced each other's output (cargo warns, and says it will become a hard error).
-# docs/01 merges the two into ONE `rdirstat` executable later, at which point
+# .settings/docs/01 merges the two into ONE `rdirstat` executable later, at which point
 # this crate becomes a library and this section goes away entirely. Until then
 # the measurement harness keeps a distinct, webview-free bin name.
 name = "rdirstat-cli"

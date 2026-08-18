@@ -27,7 +27,7 @@ authors      = ["Joshua Belke <joshbelke@gmail.com>"]
 publish      = false
 
 # ---------------------------------------------------------------------------
-# Lints: configured once, here (docs/08-RUST-PRACTICES.md).
+# Lints: configured once, here (.settings/docs/08-RUST-PRACTICES.md).
 #
 # `unsafe_code` is "deny", not "forbid", because `rdirstat-scan::sys::bulk`
 # lowers it locally for the audited `getattrlistbulk(2)` parser and `forbid`

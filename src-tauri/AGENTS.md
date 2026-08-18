@@ -26,14 +26,15 @@ adapts library APIs; it does not own scan algorithms or arena structures.
 - Tauri scopes and macOS consent are distinct. Do not claim Full Disk Access or
   bookmark authority from a capability entry.
 - Product logic belongs in `crates/`; keep this crate a thin adapter.
-- Do not enable private macOS APIs or App Sandbox without updating `03-MACOS.md`
-  and its distribution decision.
+- Do not enable private macOS APIs or App Sandbox without updating
+  `.settings/docs/03-MACOS.md` and its distribution decision.
 
 ## Work Guidance
 
-The relevant contracts are `docs/01-ARCHITECTURE.md` (state/IPC),
-`03-MACOS.md` (permissions and actions), `05-UI.md` (consumer contract), and
-`08-RUST-PRACTICES.md` (typed errors and blocking work).
+The relevant contracts are `.settings/docs/01-ARCHITECTURE.md` (state/IPC),
+`.settings/docs/03-MACOS.md` (permissions and actions),
+`.settings/docs/05-UI.md` (consumer contract), and
+`.settings/docs/08-RUST-PRACTICES.md` (typed errors and blocking work).
 
 ## Verification
 

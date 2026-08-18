@@ -1,4 +1,4 @@
-# Pinned toolchain for STELLAR-RDIRSTAT (docs/07-BUILD-PHASES.md, phase 0).
+# Pinned toolchain for STELLAR-RDIRSTAT (.settings/docs/07-BUILD-PHASES.md, phase 0).
 #
 # The MSRV declared in Cargo.toml's [workspace.package] is 1.90; this channel is
 # the exact toolchain every developer, CI job, and benchmark run uses, so a

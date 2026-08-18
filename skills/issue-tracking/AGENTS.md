@@ -44,7 +44,7 @@ this repository. Unlike the other three project-carried skills it has no
 ## Work Guidance
 
 Follow `SKILL.md` — the gate is open, and the backlog is where the build phases
-in [`../../docs/07-BUILD-PHASES.md`](../../docs/07-BUILD-PHASES.md) now live as
+in `.settings/docs/07-BUILD-PHASES.md` now live as
 epics. Claim before editing, and land a session the way the skill's landing
 sequence says.
 

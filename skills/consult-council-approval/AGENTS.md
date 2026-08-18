@@ -43,7 +43,7 @@ Until they are ported, read the "Decision touches" column literally — it maps
 cleanly onto this project's real decisions — and ignore the "Pairs with" column.
 The Architecture & Scale council is the one this project will actually use:
 stores, systems of record, scaling moves, and capacity claims is a precise
-description of `docs/01-ARCHITECTURE.md` and `docs/06-DATA.md`. Record the
+description of `.settings/docs/01-ARCHITECTURE.md` and `.settings/docs/06-DATA.md`. Record the
 call in the doc the decision lives in, since there is no Bead to put it in.
 
 ## Verification

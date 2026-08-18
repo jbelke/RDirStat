@@ -3,87 +3,86 @@
 ## Purpose
 
 Plan and build a native macOS disk-usage and file-inventory app — a Tauri v2 +
-Rust rewrite of [QDirStat](reference-code/qdirstat) — that answers "where did my
-disk go, and what kind of files is it?" over volumes with tens of millions of
-files.
+Rust rewrite of QDirStat — that answers "where did my disk go, and what kind of
+files is it?" over volumes with tens of millions of files.
 
-**There is no application code in this repository yet.** The root holds the
-design docs, six third-party reference checkouts, project skills, and the
-installer-managed aliases/lock for one external skill. Anyone expecting a Rust
-workspace will not find one; `docs/01-ARCHITECTURE.md` describes a decided future
-layout, not directories that already exist.
+Phase 0 created the Rust workspace, Tauri shell, React frontend, task runner,
+and CI. A manifest, contract type, or template screen is not evidence that the
+scanner or product behaviour exists. Cite the exact file for landed code and
+label unimplemented behaviour as planned.
+
+The binding design contract lives locally at `.settings/docs/` and is
+gitignored. It is not part of the public repository.
 
 ## Ownership
 
 | Path | Owns |
 | --- | --- |
-| `docs/` | The design contract — the numbered `00`–`08` series and its index. The only place where a decision is binding. |
-| `reference-code/` | Six third-party checkouts, read for reference and never adopted: `qdirstat`, `duckdb`, `dirstat-rs`, `parallel-disk-usage`, `squirreldisk`, `rust-skills`. Chain stops here. |
+| `.settings/docs/` | The design contract — numbered `00`–`10`. Binding, local, gitignored. |
+| `.settings/reference-code/` | Upstream clones, read for reference and never adopted. Gitignored. Chain stops here. |
+| `.settings/` | Local developer material. Never committed. |
 | `skills/` | Five project-carried/installed agent skills, indexed by `skills/AGENTS.md`. |
 | `skills-lock.json` | Source and integrity lock for installed skills; currently pins `rust-skills` |
 | `.agents/` | Installer-managed canonical payload for `rust-skills`; external skill content, not project source |
 | `.claude/` | Installer-managed compatibility link to the canonical `rust-skills` payload |
-| `.beads/` | Beads (`bd`) issue database, config, and git hooks. The backlog — phases 0–7 filed as epics — is tracked here, not in a markdown checklist. |
+| `.beads/` | Beads (`bd`) issue database, config, and git hooks. The backlog is tracked here, not in a markdown checklist. |
+| `Cargo.toml`, `rust-toolchain.toml` | Workspace members, shared dependency/lint/profile policy, and pinned compiler |
+| `crates/` | Rust libraries and CLI, indexed by `crates/AGENTS.md` |
+| `src-tauri/` | Tauri v2 application shell and native command boundary |
+| `src/` | React + TypeScript presentation |
+| `package.json`, `pnpm-lock.yaml` | Frontend commands and exact dependency graph |
+| `Justfile`, `scripts/` | Local quality/build commands and repository validators |
+| `.github/` | macOS CI workflows |
 
-The project is a git repository on `main`, with a root `.gitignore`. The six
-checkouts under `reference-code/` carry their own `.git` directories and are
-excluded by directory, so they are never added as files or as embedded
-gitlinks; `reference-code/AGENTS.md` is re-included explicitly and is the only
-tracked path under it. `.agents/` is excluded as an installed payload, which
-leaves `skills/rust-skills` and `.claude/skills/rust-skills` as tracked symlinks
-that dangle in a fresh clone until the skills are installed.
+The project is a git repository on `main`, with a root `.gitignore`. Upstream
+checkouts under `.settings/reference-code/` carry their own `.git` directories
+and must never be added as files or as embedded gitlinks. `.agents/` is
+excluded as an installed payload, which leaves `skills/rust-skills` and
+`.claude/skills/rust-skills` as tracked symlinks that dangle in a fresh clone
+until the skills are installed.
 
 ## Local Contracts
 
-- **The docs describe a future tree; do not cite it as present.** `crates/`,
-  `src-tauri/`, and `src/` appear in `docs/01-ARCHITECTURE.md` as the planned
-  layout. A claim that a file under them exists is false today and will be
-  caught by any `grep`. Write "planned" until the path is real.
-- **`reference-code/` is indexed, never adopted.** Its code is read, quoted, and
-  ported deliberately; it is not built, not vendored, and not edited. See
-  `reference-code/AGENTS.md` for the one sanctioned exception.
+- **Present is not implemented.** `crates/`, `src-tauri/`, and `src/` exist, but
+  a scaffold is not the scanner. Cite the exact file for landed code.
+- **`.settings/reference-code/` is indexed, never adopted.** Its code is read,
+  quoted, and ported deliberately; it is not built, not vendored, and not
+  edited. The local index is `.settings/reference-code/AGENTS.md`.
 - **69 million inodes on one volume is the design driver.** Every structural
-  decision in `docs/01-ARCHITECTURE.md` — the 48-byte arena node, the interned
-  name blob, the single-writer builder, the "node count never appears in an IPC
-  payload" rule — exists to survive that number. A proposal that is comfortable
-  at 2M files and unbounded at 69M has not cleared the bar.
-- **Licence asymmetry is load-bearing.** The six checkouts carry four different
-  licences and they are not interchangeable. `squirreldisk/` is **AGPL-3.0** and
-  is a direct Tauri + React peer — its code would drop straight in, and doing so
-  attempts to relicense this project; take design decisions from it and
-  implement them from scratch. `qdirstat/` is GPL-2.0: port *behaviour* you
-  re-implement from reading, never source text. `parallel-disk-usage/` is
-  Apache-2.0; `duckdb/`, `dirstat-rs/`, and `rust-skills/` are MIT. The table is in
-  `reference-code/AGENTS.md`; check it before you copy anything.
+  decision in `.settings/docs/01-ARCHITECTURE.md` — the 48-byte arena node, the
+  interned name blob, the single-writer builder, the "node count never appears
+  in an IPC payload" rule — exists to survive that number.
+- **Licence asymmetry is load-bearing.** The checkouts carry different licences
+  and they are not interchangeable. `squirreldisk/` is **AGPL-3.0** — copy
+  nothing; take design decisions and implement from scratch. `qdirstat/` is
+  GPL-2.0: port *behaviour* you re-implement from reading, never source text.
 - **Installed skill payloads are a chain boundary.** `skills/rust-skills` and
-  `.claude/skills/rust-skills` point at `.agents/skills/rust-skills`. Its bundled
-  `AGENTS.md` is upstream skill content, not a child STELLAR contract. Do not edit
-  generated payloads by hand; update through the installer and its lock.
+  `.claude/skills/rust-skills` point at `.agents/skills/rust-skills`. Do not
+  edit generated payloads by hand.
 
 ## Work Guidance
 
-Read `docs/README.md` first — it is the ordered index, and the order is real.
-`00-OVERVIEW.md` fixes scope, `01-ARCHITECTURE.md` fixes structure, and the rest
-depend on both. A session that intends to start the build goes to
-`docs/07-BUILD-PHASES.md`, which carries phases 0–7 with acceptance gates and an
-ordering rule that is binding on the other docs.
+On a developer machine, read `.settings/docs/README.md` first — it is the
+ordered index. A session that changes implementation starts with
+`.settings/docs/07-BUILD-PHASES.md` and the matching Beads issue.
 
 When a change alters structure, contracts, ownership, or workflow, close it out
 with `$steward-stellar-docs` rather than free-writing an `AGENTS.md` from memory.
 
 ## Verification
 
-None — no build system, test suite, linter, or gate exists in this repository
-yet. When a `Cargo.toml` and a task runner land, this section names the command
-that runs them, and not before.
+Run `just check` for the deterministic local gate and `just audit` for dependency
+license/advisory reporting. `just ci` runs both. `just check-docs` validates
+tracked Markdown links, skill manifests, and rejects known stale claims.
 
 ## Child STELLAR Index
 
 | Child | Covers |
 | --- | --- |
-| [docs/AGENTS.md](docs/AGENTS.md) | The design and build-plan series |
-| [reference-code/AGENTS.md](reference-code/AGENTS.md) | The reference-checkout index, and the chain boundary |
 | [skills/AGENTS.md](skills/AGENTS.md) | The agent skills carried into this project |
+| [crates/AGENTS.md](crates/AGENTS.md) | Rust workspace crates and dependency boundaries |
+| [src-tauri/AGENTS.md](src-tauri/AGENTS.md) | Tauri shell and native command boundary |
+| [src/AGENTS.md](src/AGENTS.md) | React presentation and frontend boundaries |
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
 ## Beads Issue Tracker

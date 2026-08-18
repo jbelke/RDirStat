@@ -1,22 +1,4 @@
 # ---------------------------------------------------------------------------
-# Reference checkouts.
-#
-# Every directory under reference-code/ is an upstream clone carrying its own
-# .git (~870 MB total). They must never be added to this repository -- as
-# files, and above all not as embedded repositories / gitlinks. The tracked
-# checkout index reference-code/AGENTS.md is re-included explicitly below and
-# is the only thing in this directory that is ever committed; it carries the
-# pinned revisions, licences, and clone commands that restore the rest.
-#
-# reference-code/AGENTS.md documents ten checkouts (docs/07 says five; the
-# rust-skills provenance clone, and later cyberduck, rgigasync, rustfs and
-# AionUi, were all added after that sentence was written).
-# The rule below is by-directory, not by-name, so it stays correct either way.
-# ---------------------------------------------------------------------------
-/reference-code/*
-!/reference-code/AGENTS.md
-
-# ---------------------------------------------------------------------------
 # Rust / Cargo build output
 # ---------------------------------------------------------------------------
 target/
@@ -83,6 +65,8 @@ pnpm-debug.log*
 # ---------------------------------------------------------------------------
 .agents/
 .claude/settings.local.json
+# Local developer material: design contract (.settings/docs/) and
+# upstream reference checkouts (.settings/reference-code/). Never public.
 .settings/
 
 # ---------------------------------------------------------------------------

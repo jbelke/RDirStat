@@ -16,7 +16,7 @@ in place of improvising.
 | `consult-council-approval/` | The advisory-council gate: route a decision with real trade-offs to one of seven chartered councils, collect falsifiable seat positions, close with the chair's call and its reversal evidence | Partly — the method transfers, the CoCO wiring does not |
 | `desktop-screenshot/` | Capturing desktop screenshots through a Playwright mock bridge and publishing them as immutable git-backed PR URLs | Not yet — see below |
 | `issue-tracking/` | Beads workflow, gated on a root `.beads/` existing | Yes — phase 0 ran `bd init`, so the gate is open and the build phases are filed as epics |
-| `rust-skills/` | Installed general Rust guidance (source/integrity pinned by root `skills-lock.json`) | Later — only while writing/reviewing Rust, subordinate to `docs/08-RUST-PRACTICES.md` |
+| `rust-skills/` | Installed general Rust guidance (source/integrity pinned by root `skills-lock.json`) | Later — only while writing/reviewing Rust, subordinate to `.settings/docs/08-RUST-PRACTICES.md` |
 
 Every skill folder has `SKILL.md`. `steward-stellar-docs/`,
 `consult-council-approval/`, and `desktop-screenshot/` also have
@@ -49,8 +49,8 @@ Installed/external skill shapes are not rewritten to match.
   and `bd init` ran as part of repository initialization, not on a skill's
   initiative. Work is now tracked in beads rather than in prose.
 - **Project Rust law wins.** `rust-skills` is broad external guidance;
-  `docs/08-RUST-PRACTICES.md` is the narrower binding contract for this project.
-  A conflict is resolved in favour of `08` and recorded there if recurring.
+  `.settings/docs/08-RUST-PRACTICES.md` is the narrower binding contract for this
+  project. A conflict is resolved in favour of `08` and recorded there if recurring.
 
 ## Work Guidance
 

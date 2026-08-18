@@ -36,7 +36,7 @@ tempfile  = { workspace = true }
 insta     = { workspace = true }
 criterion = { workspace = true }
 
-# Add when `benches/scan.rs` lands (docs/02-SCANNER.md#benchmarks):
+# Add when `benches/scan.rs` lands (.settings/docs/02-SCANNER.md#benchmarks):
 #   [[bench]]
 #   name    = "scan"
 #   harness = false

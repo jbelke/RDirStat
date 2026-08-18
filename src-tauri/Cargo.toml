@@ -35,13 +35,13 @@ tauri-build = { version = "2.6.3", features = [] }
 # No "macos-private-api": `titleBarStyle: "Overlay"` is a public NSWindow
 # style and needs no private API. Enabling it would also disable App Store
 # eligibility for no gain.
-# `tray-icon` is the menu-bar presence (docs/05-UI.md, "Menu bar"); `image-png`
+# `tray-icon` is the menu-bar presence (.settings/docs/05-UI.md, "Menu bar"); `image-png`
 # is what lets `tauri::image::Image::from_bytes` decode the template PNG the
 # tray uses. Neither pulls in a private API.
 tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2.5.4"
 # The native folder chooser. Not merely a convenience over typing a path:
-# docs/03-MACOS.md#privacy-controls-and-full-disk-access names `NSOpenPanel` as
+# .settings/docs/03-MACOS.md#privacy-controls-and-full-disk-access names `NSOpenPanel` as
 # the *explicit consent* path for files and folders, so a directory the user
 # picked is one macOS has authorised this process to read and a directory they
 # typed is not. It also updates Tauri's own filesystem scope. Pulls
@@ -52,7 +52,7 @@ tauri-plugin-dialog = "2.7.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 # The workspace reserves anyhow for rdirstat-cli and src-tauri
-# (docs/08-RUST-PRACTICES.md): the shell converts to a typed IPC error at the
+# (.settings/docs/08-RUST-PRACTICES.md): the shell converts to a typed IPC error at the
 # boundary, libraries use thiserror.
 anyhow = { workspace = true }
 

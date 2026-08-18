@@ -1,8 +1,8 @@
-# STELLAR-RDIRSTAT
+# RDirStat
 
-A native macOS disk-usage and file-inventory app — a Tauri v2 + Rust rewrite of
-[QDirStat](https://github.com/shundhammer/qdirstat) built to answer two questions
-over volumes with tens of millions of entries:
+**STELLAR-RDIRSTAT** — a native macOS disk-usage and file-inventory app. A
+Tauri v2 + Rust rewrite of [QDirStat](https://github.com/shundhammer/qdirstat)
+built to answer two questions over volumes with tens of millions of entries:
 
 1. Where is the selected tree's logical and allocated space concentrated?
 2. What kinds of files account for it, and what changed between saved scans?
@@ -12,45 +12,33 @@ scan of it should be a coffee break, not an overnight job, and the app must stay
 honest when macOS denies access or when APFS makes "bytes attributed to files"
 differ from "bytes physically reclaimable."
 
+[![CI](https://github.com/jbelke/RDirStat/actions/workflows/ci.yml/badge.svg)](https://github.com/jbelke/RDirStat/actions/workflows/ci.yml)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](LICENSE)
+
 ## Status
 
-**Design complete; phase 0 scaffold in place, no application logic yet.**
+In development. The Cargo workspace, Tauri v2 desktop shell, and React 19 +
+Vite + Tailwind v4 frontend are in place. The detailed design contract and
+upstream reference checkouts are **local developer material** under `.settings/`
+and are not part of this repository.
 
-Alongside the design contract (`docs/`), the agent skills carried into the
-project (`skills/`), and an index of six third-party reference checkouts
-(`reference-code/`), the repository now has the phase-0 skeleton: the Cargo
-workspace (`Cargo.toml`, `rust-toolchain.toml`, `crates/`), the Tauri v2 desktop
-shell (`src-tauri/`), and the React 19 + Vite + Tailwind v4 frontend (`src/`).
-Nothing scans a disk yet — the crates are contract stubs and the window renders
-the generator's placeholder view. Phase 0 in
-[docs/07-BUILD-PHASES.md](docs/07-BUILD-PHASES.md) is the entry point.
+## Requirements
+
+- macOS 14+
+- Rust 1.90 (MSRV); the pinned toolchain is in `rust-toolchain.toml` (1.97.1)
+- Node.js ≥ 22.12
+- pnpm 10.30.1 (`packageManager` in `package.json`)
+
+## Quick start
 
 ```bash
-pnpm install        # frontend dependencies (pnpm 10.30.1)
-pnpm build          # typecheck + production frontend bundle
-cargo tauri dev     # run the desktop shell
+just bootstrap     # pnpm install --frozen-lockfile
+just check         # formatting, lints, tests, frontend build
+just dev           # Tauri development app
 ```
 
-## Start here
-
-Read [docs/README.md](docs/README.md) — it is the ordered index, and the order is
-binding. Later documents may refine an earlier contract but may not silently
-contradict it.
-
-| Doc | Binding question |
-| --- | --- |
-| [00-OVERVIEW.md](docs/00-OVERVIEW.md) | What ships, what does not, and how success is measured |
-| [01-ARCHITECTURE.md](docs/01-ARCHITECTURE.md) | Where data lives and how the 69M-entry ceiling is enforced |
-| [02-SCANNER.md](docs/02-SCANNER.md) | How a scan stays correct, bounded, cancellable, and comparable |
-| [03-MACOS.md](docs/03-MACOS.md) | Which macOS permissions and APFS semantics affect correctness |
-| [04-CLASSIFICATION.md](docs/04-CLASSIFICATION.md) | How names and path context become categories |
-| [05-UI.md](docs/05-UI.md) | How bounded backend queries become an accessible tree, hierarchy canvas, and report set |
-| [06-DATA.md](docs/06-DATA.md) | How completed scans become durable, queryable history |
-| [07-BUILD-PHASES.md](docs/07-BUILD-PHASES.md) | In what order the contracts become runnable software |
-| [08-RUST-PRACTICES.md](docs/08-RUST-PRACTICES.md) | Lints, error policy, `unsafe` quarantine, allocation and concurrency rules |
-
-Agents should read [AGENTS.md](AGENTS.md) first instead — it carries the
-ownership table and the local contracts that constrain edits.
+`just ci` adds dependency license/advisory reports (`cargo-deny`, `pnpm audit`).
+GitHub Actions runs it on macOS for pushes to `main` and pull requests.
 
 ## Stack
 
@@ -77,49 +65,32 @@ ownership table and the local contracts that constrain edits.
 | Treemap navigation | p95 input-to-paint < 50 ms |
 | Cancel | UI acknowledges < 100 ms; workers stop p95 < 200 ms |
 
-These are gates, not estimates — see
-[00-OVERVIEW.md](docs/00-OVERVIEW.md#success-criteria) for the full table and the
-hardware-profile rules that make a result comparable.
-
+These are gates, not estimates.
 
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
-| `docs/` | The design contract — the numbered `00`–`08` series and its index. The only place a decision is binding. |
-| `reference-code/` | Index of the six third-party checkouts (clones themselves untracked). |
-| `skills/` | Project-carried agent skills, indexed by `skills/AGENTS.md`. |
-| `.claude/` | Agent workflow definitions. |
-| `skills-lock.json` | Source and integrity lock for installed skills; currently pins `rust-skills`. |
-| `crates/` | Rust libraries and the supported diagnostic CLI. |
-| `src-tauri/` | Tauri v2 desktop shell and native command boundary. |
-| `src/` | React + TypeScript frontend. |
-| `Justfile`, `scripts/` | Local task surface and repository validators. |
-| `.github/` | macOS CI. |
-| `LICENSE`, `NOTICE`, `LICENSING.md` | AGPL-3.0-only text, the attribution notice that must survive redistribution, and the dual-licensing policy. |
+| `crates/` | Rust libraries and the supported diagnostic CLI |
+| `src-tauri/` | Tauri v2 desktop shell and native command boundary |
+| `src/` | React + TypeScript frontend |
+| `skills/` | Project-carried agent skills |
+| `Justfile`, `scripts/` | Local task surface and repository validators |
+| `.github/` | macOS CI |
+| `LICENSE`, `NOTICE`, `LICENSING.md` | AGPL-3.0-only text, attribution, dual-licensing policy |
 
 `.agents/` holds the installer-managed `rust-skills` payload. It is downloaded
 rather than authored here, so it is untracked; `skills/rust-skills` and
 `.claude/skills/rust-skills` are tracked symlinks into it and dangle in a fresh
 clone until the skills are installed. Nothing in the build reads them.
 
-## Building
-
-Install the locked frontend dependencies once, then use the task surface:
-
-```bash
-just bootstrap     # pnpm install --frozen-lockfile
-just check         # docs, formatting, lints, tests, frontend build
-just audit         # Rust/JavaScript dependency reports; needs cargo-deny
-just dev           # Tauri development app
-```
-
-`just ci` combines the deterministic gate and dependency reports. GitHub Actions
-runs it on macOS for pushes to `main` and pull requests.
+`.settings/` is gitignored local developer material: the numbered design
+contract (`.settings/docs/`) and upstream reference checkouts
+(`.settings/reference-code/`). They are never cloned with this repository.
 
 ## License
 
-STELLAR-RDIRSTAT is dual-licensed.
+RDirStat (STELLAR-RDIRSTAT) is dual-licensed.
 
 - **Open source:** [GNU AGPL-3.0-only](LICENSE). Free to use, modify, and
   redistribute, provided derivatives stay AGPL-3.0-only, the attribution in

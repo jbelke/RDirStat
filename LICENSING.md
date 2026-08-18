@@ -1,6 +1,6 @@
 # Licensing
 
-STELLAR-RDIRSTAT is dual-licensed. Pick the track that matches what you are doing.
+RDirStat (STELLAR-RDIRSTAT) is dual-licensed. Pick the track that matches what you are doing.
 
 | | Open source track | Commercial track |
 | --- | --- | --- |
@@ -62,9 +62,9 @@ license the whole work. Two rules follow, and they are not negotiable:
    more here than in an ordinary AGPL project: pasted AGPL or GPL code belongs
    to its author, so it cannot be included in a commercial license — a single
    copied function would poison the commercial track for the whole file, and
-   possibly the binary. `reference-code/` is read-only for exactly this reason;
-   see [reference-code/AGENTS.md](reference-code/AGENTS.md). Re-implement
-   behaviour from documentation and tests; never lift source text.
+   possibly the binary. Local upstream checkouts under
+   `.settings/reference-code/` are read-only for exactly this reason.
+   Re-implement behaviour from documentation and tests; never lift source text.
 
 ## SPDX
 

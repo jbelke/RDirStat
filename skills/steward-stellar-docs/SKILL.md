@@ -120,7 +120,7 @@ grep without any of it becoming binding. Three rules:
   non-binding. It is gitignored like the rest of the clone — the tracked record
   stays the index row, whose `Own docs` line picks it up on the next
   `stellar-snapshot`. `compass-ts` is the worked example.
-- **Never edit *upstream* files under `reference-code/`.** Those edits are
+- **Never edit *upstream* files under `.settings/reference-code/`.** Those edits are
   invisible to git, unreviewable, and lost on the next clone. Quote what
   matters into a tracked doc instead. The one exception is the `AGENTS.md` map
   above, which is ours, additive, and cheap to re-author if a re-clone drops it.
@@ -145,7 +145,7 @@ index row. The scan fails an orphan for exactly this reason.
 - Do not rewrite a doc whose subtree did not move. Absence of change is a result.
 - Do not refresh the snapshot to clear a failing check without deciding the loss.
 - Do not add a Verification block naming a command that does not exist.
-- Do not pull `reference-code/` docs into the chain, or edit upstream files
+- Do not pull `.settings/reference-code/` docs into the chain, or edit upstream files
   under it. Authoring a missing checkout `AGENTS.md` map (above) is the one
   sanctioned write.
 - Do not fix code found during a pass. File it; route it to a primary skill.

@@ -36,7 +36,7 @@
     "targets": "all",
     "category": "Utility",
     "publisher": "Joshua Belke",
-    "homepage": "https://github.com/jbelke",
+    "homepage": "https://github.com/jbelke/RDirStat",
     "copyright": "Copyright (C) 2026 Joshua Belke. Licensed under AGPL-3.0-only; commercial licensing at LICENSING.md.",
     "license": "AGPL-3.0-only",
     "licenseFile": "../LICENSE",

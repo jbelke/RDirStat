@@ -32,10 +32,10 @@ still phase-owned implementation surfaces. Nothing here may depend on Tauri.
 
 ## Work Guidance
 
-Follow `docs/07-BUILD-PHASES.md` in order and the crate-specific contracts in
-`docs/01-ARCHITECTURE.md`, `02-SCANNER.md`, `04-CLASSIFICATION.md`, and
-`08-RUST-PRACTICES.md`. General `rust-skills` guidance is subordinate to those
-project documents.
+Follow `.settings/docs/07-BUILD-PHASES.md` in order and the crate-specific
+contracts in `.settings/docs/01-ARCHITECTURE.md`, `02-SCANNER.md`,
+`04-CLASSIFICATION.md`, and `08-RUST-PRACTICES.md`. General `rust-skills`
+guidance is subordinate to those project documents.
 
 ## Verification
 

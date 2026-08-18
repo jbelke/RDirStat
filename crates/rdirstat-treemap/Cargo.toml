@@ -28,7 +28,7 @@ tempfile   = { workspace = true }
 # `SizeMetric` is the toolbar's logical/allocated toggle; the wire form is tested.
 serde_json = { workspace = true }
 
-# Landed (docs/05-UI.md#the-hierarchy-views): layout cost at a recorded tile
+# Landed (.settings/docs/05-UI.md#the-hierarchy-views): layout cost at a recorded tile
 # count, for all three kinds. Layout only — paint belongs to the renderer.
 [[bench]]
 name    = "layout"

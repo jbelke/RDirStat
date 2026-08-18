@@ -4,7 +4,7 @@
 
 The React + TypeScript presentation for bounded backend queries. The current
 screen is phase-0 scaffold; tree navigation, hierarchy views, and reports land
-in later phases under `docs/05-UI.md`.
+in later phases under `.settings/docs/05-UI.md`.
 
 ## Ownership
 
@@ -31,9 +31,9 @@ in later phases under `docs/05-UI.md`.
 
 ## Work Guidance
 
-Use `docs/05-UI.md` as the interaction contract and `docs/01-ARCHITECTURE.md` as
-the IPC/state contract. Keep generated bindings checked rather than hand-copying
-Rust interfaces.
+Use `.settings/docs/05-UI.md` as the interaction contract and
+`.settings/docs/01-ARCHITECTURE.md` as the IPC/state contract. Keep generated
+bindings checked rather than hand-copying Rust interfaces.
 
 ## Verification
 

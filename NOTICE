@@ -18,6 +18,6 @@ keep the credit above intact.
 Third-party components
 ----------------------
 Dependency licenses are reported by `just audit` (cargo-deny for Rust,
-pnpm for JavaScript). Nothing under `reference-code/` is vendored, built,
-or distributed with this software; those checkouts are read-only
-references and carry their own licenses. See reference-code/AGENTS.md.
+pnpm for JavaScript). Upstream reference checkouts are local-only under
+`.settings/reference-code/`; they are not vendored, built, or distributed
+with this software and carry their own licenses.
