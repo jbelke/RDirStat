@@ -389,6 +389,15 @@ export function AppShell() {
    */
   const [relocateDestination, setRelocateDestination] = useState<string | null>(null);
 
+  /*
+   * A drive offered to the scan bar by the switcher, for a drive with nothing
+   * stored to restore. Cleared once a scan actually lands, so the field goes
+   * back to following whatever is on screen rather than pinning an offer the
+   * user has since acted on — or abandoned.
+   */
+  const [scanBarOffer, setScanBarOffer] = useState<string | null>(null);
+  useEffect(() => setScanBarOffer(null), [generation]);
+
   const handleCancel = useCallback(async () => {
     if (activeScan === null) return;
     setCancelling(true);
@@ -711,6 +720,7 @@ export function AppShell() {
               busy={scanning || starting}
               onScan={handleSwitchDrive}
               onRestore={handleRestoreDrive}
+              onOfferToScanBar={setScanBarOffer}
             />
           )
         }
@@ -718,7 +728,7 @@ export function AppShell() {
         <ScanBar
           onScan={(root) => void handleScan(root)}
           busy={scanning || starting}
-          scanRoot={summary?.rootPath ?? null}
+          scanRoot={scanBarOffer ?? summary?.rootPath ?? null}
         />
       </Titlebar>
 
