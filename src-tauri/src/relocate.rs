@@ -64,6 +64,7 @@
 //! updates every reference at once, including ones in binaries and databases
 //! that no rewriter could find.
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs::{self, Metadata};
 use std::hash::BuildHasher;
@@ -956,7 +957,7 @@ const SELF_MANAGED_XATTR: &str = ": com.apple.provenance";
 /// carry them — is the failure this has actually seen (nato-b6h.7, nato-b6h.8).
 /// A truncated attribute value would not be caught; that is stated here rather
 /// than implied by silence.
-fn extended_attributes(root: &Path) -> Result<Vec<String>, RelocateError> {
+fn extended_attributes(root: &Path) -> Result<BTreeSet<String>, RelocateError> {
     let output = Command::new("/usr/bin/xattr")
         // `-s` acts on a symlink itself instead of following it. Two reasons,
         // and the first is a hard requirement:
@@ -988,16 +989,16 @@ fn extended_attributes(root: &Path) -> Result<Vec<String>, RelocateError> {
         ));
     }
 
-    let mut lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
+    // A set, not a list: `xattr` walks in directory order, which is not the same
+    // on the source and on a freshly written copy, and comparing order would
+    // report a loss that did not happen. A set also makes the subset test in
+    // `verify_extended_attributes` linear rather than quadratic, which matters
+    // at the hundreds of thousands of entries this is pointed at.
+    Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter(|line| !line.is_empty() && !line.ends_with(SELF_MANAGED_XATTR))
         .map(str::to_owned)
-        .collect();
-    // `xattr -r` walks in directory order, which is not the same on the source
-    // and on a freshly written copy. Without this the two lists could differ
-    // only in order and be reported as a loss.
-    lines.sort_unstable();
-    Ok(lines)
+        .collect())
 }
 
 /// Proves the copy carried the extended attributes, not just the bytes.
@@ -1014,19 +1015,27 @@ fn extended_attributes(root: &Path) -> Result<Vec<String>, RelocateError> {
 fn verify_extended_attributes(source: &Path, destination: &Path) -> Result<(), RelocateError> {
     let expected = extended_attributes(source)?;
     let actual = extended_attributes(destination)?;
-    if expected == actual {
+
+    // A SUBSET test, not equality: only LOSS is a failure.
+    //
+    // The destination legitimately gains attributes that the source never had.
+    // `com.apple.macl` is the one that would have bitten every real user:
+    // macOS mints it via TCC when a sandboxed app writes through a path the
+    // user chose in a file picker, which is exactly what this app's Browse
+    // button produces. On this machine 374 Desktop files carry one. Under an
+    // equality test that gain would fail the relocation AFTER the copy, leaving
+    // a duplicate on disk and an incomprehensible error — and no temporary
+    // directory fixture would ever have shown it.
+    let missing: Vec<&String> = expected.difference(&actual).take(3).collect();
+    if missing.is_empty() {
         return Ok(());
     }
-
-    let missing: Vec<&String> = expected.iter().filter(|line| !actual.contains(line)).take(3).collect();
-    let unexpected: Vec<&String> = actual.iter().filter(|line| !expected.contains(line)).take(3).collect();
     Err(mismatch(
         destination,
         format!(
-            "extended attributes differ ({} on the source, {} on the copy; \
-             missing {missing:?}, unexpected {unexpected:?})",
+            "the copy is missing {} of the source's {} extended attributes, including {missing:?}",
+            expected.difference(&actual).count(),
             expected.len(),
-            actual.len(),
         ),
     ))
 }
@@ -1337,6 +1346,35 @@ mod tests {
         fs::write(root.join("sub/other.txt/..namedfork/rsrc"), b"resource-fork").expect("resource fork");
     }
 
+    /// An attribute the destination GAINED must not fail the relocation.
+    ///
+    /// Only loss is a failure. macOS mints `com.apple.macl` through TCC when a
+    /// sandboxed app writes via a path the user chose in a file picker — which
+    /// is exactly what this app's Browse button produces — so a real
+    /// destination routinely carries attributes the source never had. Under an
+    /// equality test that gain failed the relocation AFTER the copy, leaving a
+    /// duplicate on disk. 374 files on this machine's Desktop carry one, and no
+    /// temporary-directory fixture would ever have shown it.
+    #[test]
+    fn an_attribute_the_destination_gained_is_not_a_failure() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let source = scratch.path().join("source");
+        let destination = scratch.path().join("destination");
+        tree_with_metadata(&source);
+        ditto(&source, &destination).expect("ditto");
+
+        // Stand in for what TCC does to a user-chosen destination.
+        let added = Command::new("/usr/bin/xattr")
+            .args(["-w", "com.apple.rdirstat.granted", "by-the-file-picker"])
+            .arg(destination.join("doc.txt"))
+            .status()
+            .expect("xattr");
+        assert!(added.success(), "the fixture must actually gain the attribute");
+
+        verify_extended_attributes(&source, &destination)
+            .expect("a gained attribute is not the loss this check exists to catch");
+    }
+
     /// A tree containing a broken symlink must still verify.
     ///
     /// `xattr -r` exits 1 on a dangling symlink ("No such file"), which would
@@ -1354,8 +1392,7 @@ mod tests {
         std::os::unix::fs::symlink("/nonexistent/target", source.join("dangling.link")).expect("symlink");
 
         ditto(&source, &destination).expect("ditto copies a dangling symlink as a symlink");
-        verify_extended_attributes(&source, &destination)
-            .expect("a broken symlink must not fail the attribute check");
+        verify_extended_attributes(&source, &destination).expect("a broken symlink must not fail the attribute check");
     }
 
     /// A faithful copy passes. Without this the refusal test below could pass
@@ -1401,8 +1438,8 @@ mod tests {
             panic!("expected a verification failure, got {refused:?}");
         };
         assert!(
-            reason.contains("extended attributes differ"),
-            "the reason should name what differed; got {reason}"
+            reason.contains("is missing"),
+            "the reason should say what was lost; got {reason}"
         );
         assert!(
             reason.contains("user.rdirstat.probe") || reason.contains("ResourceFork"),
