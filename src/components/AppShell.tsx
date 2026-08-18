@@ -37,6 +37,7 @@ import { RelocateDialog } from "@/components/RelocateDialog";
 import { SelectionActions } from "@/components/SelectionActions";
 import { AUTHOR_URL, StoragePanel } from "@/components/StoragePanel";
 import { SyncRoute } from "@/components/SyncRoute";
+import { TransfersRoute } from "@/components/TransfersRoute";
 import { CategoryLegend } from "@/components/canvas/CategoryLegend";
 import {
   HierarchyCanvas,
@@ -91,6 +92,7 @@ import {
   useStorageReport,
   useVolumes,
   useSizeBands,
+  useTransferProgress,
 } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { GENERATION_NONE, isRealNode } from "@/lib/wire";
@@ -157,7 +159,13 @@ const RAIL_GROUPS: readonly RailGroup[] = [
   {
     id: "transfer",
     label: "Transfer",
-    items: [{ id: "sync", label: "Sync folders", needsScan: false }],
+    items: [
+      { id: "sync", label: "Sync folders", needsScan: false },
+      // Remote is a sibling of the local sync rather than a mode inside it:
+      // the two share a promise but not a destination picker, a credential
+      // model, or a lifetime — a local copy returns, a remote one is queued.
+      { id: "transfers", label: "Remote transfers", needsScan: false },
+    ],
   },
 ];
 
@@ -176,6 +184,11 @@ export function AppShell() {
   const client = useQueryClient();
   const status = useScanStatus();
   const progress = useScanProgress();
+  // Subscribed here rather than in TransfersRoute, so a running upload keeps
+  // updating the queue while the user is looking at the treemap — and so a
+  // transfer that finishes while this panel is closed is already correct when
+  // they open it.
+  useTransferProgress();
 
   const route = useUiStore((state) => state.route);
   const detailsOpen = useUiStore((state) => state.detailsOpen);
@@ -752,6 +765,7 @@ export function AppShell() {
           )}
 
           {route === "sync" && <SyncRoute />}
+          {route === "transfers" && <TransfersRoute />}
 
           {route === "storage" && (
             <StoragePanel

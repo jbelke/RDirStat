@@ -37,6 +37,7 @@ export type Route =
   | "diff"
   | "dupes"
   | "sync"
+  | "transfers"
   | "storage";
 
 /**

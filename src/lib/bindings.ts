@@ -3017,8 +3017,30 @@ export type TransferId = number;
  */
 export type TransferJob = {
 	id: TransferId,
-	/**  The local folder being uploaded. */
+	/**
+	 *  The local folder being uploaded, escaped for display.
+	 * 
+	 *  **Display only. Never used to open anything** — see [`source_bytes`].
+	 * 
+	 *  [`source_bytes`]: TransferJob::source_bytes
+	 */
 	source: string,
+	/**
+	 *  The same folder as filesystem bytes, which is what a path actually is.
+	 * 
+	 *  `source` above is an escaped projection, and reconstructing a path from
+	 *  it would name a *different* directory whenever the original was not
+	 *  valid UTF-8 — worse, two distinct directories can escape to one string,
+	 *  so a job could quietly upload the wrong one. The bytes are authority;
+	 *  the string is for the user.
+	 * 
+	 *  Today's entry point cannot yet produce such a path: a source arrives
+	 *  from the webview as a JavaScript string, so it is UTF-8 by
+	 *  construction. This closes the hole before the obvious next feature —
+	 *  "upload this folder" from a scanned tree, whose paths *are* bytes —
+	 *  opens it.
+	 */
+	source_bytes?: number[],
 	/**
 	 *  The saved target's name — not its resolved address. A target the user
 	 *  re-pointed at a different bucket should send the *next* run of this job

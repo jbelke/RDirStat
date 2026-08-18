@@ -17,6 +17,8 @@
  *   per expanded directory and a deep session can accumulate a lot of them.
  */
 
+import { useEffect } from "react";
+
 import {
   QueryClient,
   useInfiniteQuery,
@@ -64,8 +66,28 @@ import {
   type Sort,
   type StorageReportView,
   type VolumeRow,
+  remoteDeleteTarget,
+  remotePlan,
+  remoteProbe,
+  remoteProfiles,
+  remoteSaveTarget,
+  remoteTargets,
+  toTransferJobView,
+  transferCancel,
+  transferEnqueue,
+  transferPause,
+  transferResume,
+  transfers,
+  transfersClear,
+  type RemotePlanView,
+  type RemoteProfileView,
+  type RemoteTargetRow,
+  type RemoteTargetView,
+  type SecretInputView,
+  type TransferJobView,
+  type TransferRequestInput,
 } from "@/lib/ipc";
-import { MAX_REPORT_ENTRIES as BINDINGS_MAX_REPORT_ENTRIES } from "@/lib/bindings";
+import { events, MAX_REPORT_ENTRIES as BINDINGS_MAX_REPORT_ENTRIES } from "@/lib/bindings";
 import { GENERATION_NONE, isRealNode, isVirtualGroup, MAX_CHILD_PAGE } from "@/lib/wire";
 
 export function createQueryClient(): QueryClient {
@@ -111,6 +133,11 @@ export const queryKeys = {
     ["ageBucketEntries", generation, node, now, bucket] as const,
   dupes: (generation: number, node: number) => ["dupes", generation, node] as const,
   scanDiff: (generation: number, metric: DiffMetricKind) => ["scanDiff", generation, metric] as const,
+  // Not generation-keyed. A destination list and a transfer queue outlive any
+  // one scan — they are the app's own state, not a projection of a frozen tree.
+  remoteProfiles: () => ["remoteProfiles"] as const,
+  remoteTargets: () => ["remoteTargets"] as const,
+  transfers: () => ["transfers"] as const,
 } as const;
 
 /**
@@ -502,5 +529,176 @@ export function useAncestors(
     queryFn: () => ancestors(generation, target),
     enabled: generation !== GENERATION_NONE && node !== null && isRealNode(target),
     staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Remote destinations and transfers
+//
+// None of these are generation-keyed, and that is the point: a destination
+// list and a transfer queue are the app's own durable state, not a projection
+// of a frozen arena. `dropStaleGenerations` must never evict them, and a
+// rescan must never invalidate them.
+// ---------------------------------------------------------------------------
+
+/** The connection presets. A compile-time constant in Rust; cached forever. */
+export function useRemoteProfiles(): UseQueryResult<readonly RemoteProfileView[], Error> {
+  return useQuery({
+    queryKey: queryKeys.remoteProfiles(),
+    queryFn: remoteProfiles,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/** The saved destinations. */
+export function useRemoteTargets(): UseQueryResult<readonly RemoteTargetRow[], Error> {
+  return useQuery({
+    queryKey: queryKeys.remoteTargets(),
+    queryFn: remoteTargets,
+    // Reads the Keychain once per target, so not free — but it changes only
+    // when this app changes it, and every mutation below invalidates it.
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/**
+ * The transfer queue.
+ *
+ * `transfer:progress` pushes every change, so this does not poll. The
+ * subscription lives in {@link useTransferProgress}, which writes straight into
+ * this cache entry — the query itself is only the initial read and the
+ * after-a-mutation refetch.
+ */
+export function useTransfers(): UseQueryResult<readonly TransferJobView[], Error> {
+  return useQuery({
+    queryKey: queryKeys.transfers(),
+    queryFn: transfers,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/**
+ * Keeps the transfer cache current from the backend's events.
+ *
+ * Each event carries a whole job, so this is an upsert rather than a merge and
+ * a dropped event costs nothing: the next one is still a complete answer. Call
+ * once, high in the tree.
+ */
+export function useTransferProgress(): void {
+  const client = useQueryClient();
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    void events.transferProgress
+      .listen((event) => {
+        const job = toTransferJobView(event.payload);
+        client.setQueryData<readonly TransferJobView[]>(queryKeys.transfers(), (previous) => {
+          const rows = previous ?? [];
+          const index = rows.findIndex((row) => row.id === job.id);
+          if (index === -1) return [job, ...rows];
+          const next = rows.slice();
+          next[index] = job;
+          return next;
+        });
+      })
+      .then((stop) => {
+        // The effect can be torn down before `listen` resolves; without this
+        // the listener outlives the component and writes into a dead cache.
+        if (cancelled) stop();
+        else unlisten = stop;
+      });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [client]);
+}
+
+/** Adds or updates a destination. */
+export function useSaveRemoteTarget(): UseMutationResult<
+  RemoteTargetView,
+  Error,
+  { target: RemoteTargetView; secret: SecretInputView; replacing: string | null }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ target, secret, replacing }) => remoteSaveTarget(target, secret, replacing),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.remoteTargets() });
+    },
+  });
+}
+
+/** Forgets a destination. Does not touch anything at the destination. */
+export function useDeleteRemoteTarget(): UseMutationResult<void, Error, string> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: remoteDeleteTarget,
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.remoteTargets() });
+    },
+  });
+}
+
+/**
+ * Checks a destination is reachable.
+ *
+ * A mutation rather than a query even though it changes nothing: it must run
+ * when the user asks and never on a refetch, and firing network calls at
+ * somebody's NAS on window focus is exactly what a query would do.
+ */
+export function useProbeRemoteTarget(): UseMutationResult<void, Error, string> {
+  return useMutation({ mutationFn: remoteProbe });
+}
+
+/** What an upload would do. Reads both sides; uploads nothing. */
+export function usePlanRemote(): UseMutationResult<RemotePlanView, Error, TransferRequestInput> {
+  return useMutation({ mutationFn: remotePlan });
+}
+
+/** Queues an upload and starts it. Returns as soon as the job exists. */
+export function useEnqueueTransfer(): UseMutationResult<
+  TransferJobView,
+  Error,
+  { request: TransferRequestInput; token: string }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ request, token }) => transferEnqueue(request, token),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.transfers() });
+    },
+  });
+}
+
+/** Pause, resume or cancel one transfer. */
+export function useTransferControl(): UseMutationResult<
+  TransferJobView,
+  Error,
+  { id: number; action: "pause" | "resume" | "cancel" }
+> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, action }) => {
+      if (action === "pause") return transferPause(id);
+      if (action === "resume") return transferResume(id);
+      return transferCancel(id);
+    },
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.transfers() });
+    },
+  });
+}
+
+/** Removes finished transfers from the list. */
+export function useClearTransfers(): UseMutationResult<number, Error, void> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: transfersClear,
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: queryKeys.transfers() });
+    },
   });
 }

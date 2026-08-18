@@ -159,8 +159,27 @@ pub struct TransferFailure {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct TransferJob {
     pub id: TransferId,
-    /// The local folder being uploaded.
+    /// The local folder being uploaded, escaped for display.
+    ///
+    /// **Display only. Never used to open anything** — see [`source_bytes`].
+    ///
+    /// [`source_bytes`]: TransferJob::source_bytes
     pub source: String,
+    /// The same folder as filesystem bytes, which is what a path actually is.
+    ///
+    /// `source` above is an escaped projection, and reconstructing a path from
+    /// it would name a *different* directory whenever the original was not
+    /// valid UTF-8 — worse, two distinct directories can escape to one string,
+    /// so a job could quietly upload the wrong one. The bytes are authority;
+    /// the string is for the user.
+    ///
+    /// Today's entry point cannot yet produce such a path: a source arrives
+    /// from the webview as a JavaScript string, so it is UTF-8 by
+    /// construction. This closes the hole before the obvious next feature —
+    /// "upload this folder" from a scanned tree, whose paths *are* bytes —
+    /// opens it.
+    #[serde(default)]
+    pub source_bytes: Vec<u8>,
     /// The saved target's name — not its resolved address. A target the user
     /// re-pointed at a different bucket should send the *next* run of this job
     /// to the new one, and a job holding a stale endpoint would not.
@@ -189,6 +208,21 @@ pub struct TransferJob {
 const MAX_FAILURES: usize = 200;
 
 impl TransferJob {
+    /// The folder to read from. The one authority for that.
+    ///
+    /// Falls back to the display string only for a queue file written before
+    /// `source_bytes` existed, where it is the best available answer rather
+    /// than a correct one.
+    #[must_use]
+    pub(crate) fn source_path(&self) -> PathBuf {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        if self.source_bytes.is_empty() {
+            return PathBuf::from(&self.source);
+        }
+        PathBuf::from(std::ffi::OsStr::from_bytes(&self.source_bytes))
+    }
+
     fn record_failure(&mut self, relative_path: String, reason: String) {
         if self.failures.len() >= MAX_FAILURES {
             self.failures_truncated = true;
@@ -333,7 +367,10 @@ impl TransferManager {
         let id = TransferId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let job = TransferJob {
             id,
-            source: source.to_string_lossy().into_owned(),
+            source: rdirstat_core::DisplayPath::from_bytes(source.as_os_str().as_encoded_bytes())
+                .as_str()
+                .to_owned(),
+            source_bytes: source.as_os_str().as_encoded_bytes().to_vec(),
             target_name: target_name.to_owned(),
             destination: destination.to_owned(),
             compare,
@@ -544,7 +581,7 @@ async fn drive(
     let Some(job) = manager.get(id).await else {
         return Ok(());
     };
-    let source = PathBuf::from(&job.source);
+    let source = job.source_path();
 
     manager
         .update(id, |job| {
@@ -1004,6 +1041,68 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         std::fs::write(dir.path().join(FILE_NAME), b"{ not json").expect("the fixture should write");
         assert!(manager(dir.path()).list().await.is_empty());
+    }
+
+    // The path a job reads from is BYTES. `source` is an escaped projection
+    // for the user and reconstructing a path from it would name a different
+    // directory — the defect class a peer session flagged in sync.rs's own
+    // `Path::display()` round-trip.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_folder_a_job_reads_from_survives_a_name_that_is_not_utf8() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let manager = manager(dir.path());
+        let awkward = Path::new(OsStr::from_bytes(b"/Volumes/stick/photo\xff\xfes"));
+
+        let job = manager
+            .enqueue(
+                awkward,
+                "backup",
+                "s3://bucket/prefix/",
+                RemoteCompare::Quick,
+                OnDiffer::Skip,
+                1_000,
+            )
+            .await;
+
+        assert_eq!(job.source_path(), awkward, "the bytes must round-trip exactly");
+        assert!(
+            !job.source.contains('\u{fffd}'),
+            "the display string escapes rather than replacing: {}",
+            job.source
+        );
+
+        // And across a restart, which is where it actually matters.
+        drop(manager);
+        let restored = self::manager(dir.path()).list().await;
+        assert_eq!(restored[0].source_path(), awkward);
+    }
+
+    // Two directories whose names differ only outside UTF-8 must not collapse
+    // to one string and become indistinguishable jobs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn two_awkward_folders_stay_two_folders() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let manager = manager(dir.path());
+        let one = Path::new(OsStr::from_bytes(b"/a/\xff"));
+        let two = Path::new(OsStr::from_bytes(b"/a/\xfe"));
+
+        let first = manager
+            .enqueue(one, "t", "s3://b/", RemoteCompare::Quick, OnDiffer::Skip, 1_000)
+            .await;
+        let second = manager
+            .enqueue(two, "t", "s3://b/", RemoteCompare::Quick, OnDiffer::Skip, 1_001)
+            .await;
+
+        assert_ne!(first.source_path(), second.source_path());
+        assert_ne!(first.source, second.source, "the display strings must differ too");
     }
 
     #[test]

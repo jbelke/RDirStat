@@ -3,10 +3,14 @@
 //!
 //! The idea is Cyberduck's — a *connection profile* naming a vendor, its
 //! endpoint template and which fields the user still has to fill in — and the
-//! idea is all that is borrowed. Cyberduck is GPL-3.0 and this workspace is MIT
-//! with a `deny.toml` that does not allow GPL, so nothing here is derived from
-//! its code or from a `.cyberduckprofile`: the shape below is smaller, carries
-//! no icons, and is written against the fields OpenDAL actually takes.
+//! idea is all that is borrowed. Nothing here is derived from Cyberduck's code
+//! or from a `.cyberduckprofile`; the table below was written from scratch
+//! against the fields OpenDAL actually takes, which is why it is smaller, has
+//! no icons, and carries a `required` list Cyberduck has no equivalent of.
+//!
+//! Worth stating explicitly because `reference-code/cyberduck` is checked out
+//! in this repo and is GPL-3.0. An idea is not copyrightable and a vendor's own
+//! endpoint hostname is a fact, but a copied plist would be neither.
 //!
 //! The list is short on purpose. A profile earns its place by removing a
 //! *specific* thing the user would otherwise have to look up — B2's endpoint

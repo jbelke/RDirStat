@@ -44,6 +44,7 @@ import {
   type Sort,
   type SortDirection,
   type SortKey,
+  type TransferJob,
 } from "@/lib/bindings";
 import { IpcError, MAX_CHILD_PAGE, num, SCAN_PROGRESS_EVENT, unwrap, type NumLike } from "@/lib/wire";
 
@@ -1575,5 +1576,310 @@ export function subscribeScanProgress(onProgress: (progress: ScanProgressView) =
     disposed = true;
     for (const unlisten of unlisteners) unlisten();
     unlisteners.length = 0;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Remote destinations and the transfer queue
+//
+// Two things the local sync does not have to model, and they are why this is
+// not just `syncPlan` with a different string:
+//
+// - **There is no free-space figure for a bucket.** `destinationAvailable` is
+//   `null`, not 0, and the UI must render "unknown" rather than "full".
+// - **A transfer outlives the panel.** Jobs are fetched as a list and pushed
+//   as events; nothing here awaits a completion.
+// ---------------------------------------------------------------------------
+
+export type RemoteKind = "s3" | "web_dav" | "sftp";
+export type RemoteCompare = "quick" | "verify";
+export type RemoteReason = "missing" | "size_differs" | "content_differs";
+export type Comparison = "size" | "size_and_digest";
+export type JobState = "queued" | "planning" | "running" | "paused" | "done" | "failed" | "cancelled";
+export type ProfileField = "bucket" | "root" | "endpoint" | "region" | "user" | "secret";
+
+/** A saved destination, as the editor round-trips it. Never carries a secret. */
+export interface RemoteTargetView {
+  readonly name: string;
+  readonly kind: RemoteKind;
+  readonly endpoint: string;
+  readonly bucket: string;
+  readonly region: string;
+  readonly root: string;
+  readonly user: string;
+}
+
+/** A saved destination plus what the UI needs that is not part of the target. */
+export interface RemoteTargetRow extends RemoteTargetView {
+  /** True when the Keychain holds something. Never what it holds. */
+  readonly hasSecret: boolean;
+  /** True for SFTP: authenticates through ssh-agent, so no password field. */
+  readonly usesAmbientCredentials: boolean;
+}
+
+export interface RemoteProfileView {
+  readonly id: string;
+  readonly label: string;
+  readonly kind: RemoteKind;
+  readonly summary: string;
+  readonly endpointTemplate: string;
+  readonly region: string;
+  readonly required: readonly ProfileField[];
+}
+
+export interface RemotePlanView {
+  /** `null` means there is nothing to upload. */
+  readonly token: string | null;
+  readonly source: string;
+  readonly destination: string;
+  readonly compare: RemoteCompare;
+  readonly onDiffer: OnDiffer;
+  /** What the endpoint could actually prove, whatever was asked for. */
+  readonly availableComparison: Comparison;
+  readonly entries: readonly { readonly relativePath: string; readonly bytes: number; readonly reason: RemoteReason }[];
+  readonly entriesTruncated: boolean;
+  readonly totalToCopy: number;
+  readonly bytesToCopy: number;
+  readonly alreadyPresent: number;
+  readonly differingSkipped: number;
+  readonly specialSkipped: number;
+  /** Files whose names are not valid text and cannot become a remote key. */
+  readonly unnameableSkipped: number;
+  readonly unreadable: number;
+  /**
+   * **Always `null`.** A bucket publishes no free-space figure. Render
+   * "unknown", never 0 — the local plan's equivalent field is a real number and
+   * a shared component must not confuse the two.
+   */
+  readonly destinationAvailable: null;
+  readonly listingTruncated: boolean;
+  readonly warnings: readonly { readonly code: string; readonly message: string }[];
+}
+
+export interface TransferJobView {
+  readonly id: number;
+  readonly source: string;
+  readonly targetName: string;
+  readonly destination: string;
+  readonly compare: RemoteCompare;
+  readonly onDiffer: OnDiffer;
+  readonly state: JobState;
+  readonly filesTotal: number;
+  readonly bytesTotal: number;
+  readonly filesDone: number;
+  readonly bytesDone: number;
+  readonly failures: readonly { readonly relativePath: string; readonly reason: string }[];
+  readonly failuresTruncated: boolean;
+  /** Why the job as a whole stopped, when it was not per-file. */
+  readonly message: string | null;
+  readonly createdUnixMs: number;
+  readonly updatedUnixMs: number;
+}
+
+/** What the user wants uploaded. Shared by the plan and the enqueue, as in Rust. */
+export interface TransferRequestInput {
+  readonly source: string;
+  readonly target: string;
+  readonly compare: RemoteCompare;
+  readonly onDiffer: OnDiffer;
+}
+
+/**
+ * The secret half of a destination edit.
+ *
+ * `undefined` means *leave what is stored alone*; `""` means *remove it*. That
+ * distinction is what lets a user change a bucket's folder without re-typing a
+ * key the UI was never shown in the first place.
+ */
+export interface SecretInputView {
+  readonly accessKey?: string;
+  readonly secretKey?: string;
+  readonly sessionToken?: string;
+  readonly password?: string;
+  readonly keyPath?: string;
+}
+
+/** True when a job is doing something right now. Mirrors `JobState::is_active`. */
+export function isActiveJob(state: JobState): boolean {
+  return state === "queued" || state === "planning" || state === "running";
+}
+
+/** True when the user can still start it. Mirrors `JobState::is_resumable`. */
+export function isResumableJob(state: JobState): boolean {
+  return state === "paused" || state === "failed";
+}
+
+/** The presets the destination editor offers. A constant; cannot fail. */
+export async function remoteProfiles(): Promise<readonly RemoteProfileView[]> {
+  const profiles = await commands.remoteProfiles();
+  return profiles.map((profile) => ({
+    id: profile.id,
+    label: profile.label,
+    kind: profile.kind,
+    summary: profile.summary,
+    endpointTemplate: profile.endpoint_template,
+    region: profile.region,
+    required: profile.required,
+  }));
+}
+
+/** The saved destinations. */
+export async function remoteTargets(): Promise<readonly RemoteTargetRow[]> {
+  const rows = await unwrap("remote_targets", commands.remoteTargets());
+  return rows.map((row) => ({
+    name: row.name,
+    kind: row.kind,
+    endpoint: row.endpoint,
+    bucket: row.bucket,
+    region: row.region,
+    root: row.root,
+    user: row.user,
+    hasSecret: row.has_secret,
+    usesAmbientCredentials: row.uses_ambient_credentials,
+  }));
+}
+
+/** Adds a destination, or updates the one named by `replacing`. */
+export async function remoteSaveTarget(
+  target: RemoteTargetView,
+  secret: SecretInputView,
+  replacing: string | null,
+): Promise<RemoteTargetView> {
+  const saved = await unwrap(
+    "remote_save_target",
+    commands.remoteSaveTarget(
+      { ...target },
+      {
+        access_key: secret.accessKey ?? null,
+        secret_key: secret.secretKey ?? null,
+        session_token: secret.sessionToken ?? null,
+        password: secret.password ?? null,
+        key_path: secret.keyPath ?? null,
+      },
+      replacing,
+    ),
+  );
+  return { ...saved };
+}
+
+/** Forgets a destination and its secret. Touches nothing at the destination. */
+export async function remoteDeleteTarget(name: string): Promise<void> {
+  await unwrap("remote_delete_target", commands.remoteDeleteTarget(name));
+}
+
+/** Confirms a destination is reachable and its credentials work. */
+export async function remoteProbe(name: string): Promise<void> {
+  await unwrap("remote_probe", commands.remoteProbe(name));
+}
+
+/** What uploading to a destination would do. Uploads nothing. Long-running. */
+export async function remotePlan(request: TransferRequestInput): Promise<RemotePlanView> {
+  const view = await unwrap("remote_plan", commands.remotePlan(toWireRequest(request)));
+  const plan = view.plan;
+  return {
+    token: view.token,
+    source: plan.source,
+    destination: plan.destination,
+    compare: plan.compare,
+    onDiffer: plan.on_differ,
+    availableComparison: plan.available_comparison,
+    entries: plan.entries.map((entry) => ({
+      relativePath: entry.relative_path,
+      bytes: num(entry.bytes),
+      reason: entry.reason,
+    })),
+    entriesTruncated: plan.entries_truncated,
+    totalToCopy: num(plan.total_to_copy),
+    bytesToCopy: num(plan.bytes_to_copy),
+    alreadyPresent: num(plan.already_present),
+    differingSkipped: num(plan.differing_skipped),
+    specialSkipped: num(plan.special_skipped),
+    unnameableSkipped: num(plan.unnameable_skipped),
+    unreadable: num(plan.unreadable),
+    // Not `num(...)`: that would turn the backend's honest "unknown" into 0.
+    destinationAvailable: null,
+    listingTruncated: plan.listing_truncated,
+    warnings: plan.warnings.map((warning) => ({ code: warning.code, message: warning.message })),
+  };
+}
+
+/** Every transfer, newest first. */
+export async function transfers(): Promise<readonly TransferJobView[]> {
+  const jobs = await unwrap("transfers", commands.transfers());
+  return jobs.map(toTransferJobView);
+}
+
+/**
+ * Queues an upload and starts it.
+ *
+ * Returns as soon as the job exists — it does not await the upload. Watch the
+ * job's state, or the `transfer:progress` event.
+ */
+export async function transferEnqueue(
+  request: TransferRequestInput,
+  token: string,
+): Promise<TransferJobView> {
+  return toTransferJobView(
+    await unwrap("transfer_enqueue", commands.transferEnqueue(toWireRequest(request), token)),
+  );
+}
+
+/** Stops a transfer where it is. Resumable. */
+export async function transferPause(id: number): Promise<TransferJobView> {
+  return toTransferJobView(await unwrap("transfer_pause", commands.transferPause(id)));
+}
+
+/** Restarts a paused or failed transfer. Re-plans, so it skips what arrived. */
+export async function transferResume(id: number): Promise<TransferJobView> {
+  return toTransferJobView(await unwrap("transfer_resume", commands.transferResume(id)));
+}
+
+/** Stops a transfer for good. What already arrived stays where it is. */
+export async function transferCancel(id: number): Promise<TransferJobView> {
+  return toTransferJobView(await unwrap("transfer_cancel", commands.transferCancel(id)));
+}
+
+/** Removes finished transfers from the list. Running ones are left alone. */
+export async function transfersClear(): Promise<number> {
+  return num(await unwrap("transfers_clear", commands.transfersClear()));
+}
+
+function toWireRequest(request: TransferRequestInput) {
+  return {
+    source: request.source,
+    target: request.target,
+    compare: request.compare,
+    on_differ: request.onDiffer,
+  };
+}
+
+/**
+ * The wire job as the UI sees it.
+ *
+ * Exported because the `transfer:progress` event delivers the same wire type
+ * outside any command, and the event handler must not grow a second, drifting
+ * copy of this mapping.
+ */
+export function toTransferJobView(job: TransferJob): TransferJobView {
+  return {
+    id: num(job.id),
+    source: job.source,
+    targetName: job.target_name,
+    destination: job.destination,
+    compare: job.compare,
+    onDiffer: job.on_differ,
+    state: job.state,
+    filesTotal: num(job.files_total),
+    bytesTotal: num(job.bytes_total),
+    filesDone: num(job.files_done),
+    bytesDone: num(job.bytes_done),
+    failures: job.failures.map((failure) => ({
+      relativePath: failure.relative_path,
+      reason: failure.reason,
+    })),
+    failuresTruncated: job.failures_truncated,
+    message: job.message,
+    createdUnixMs: num(job.created_unix_ms),
+    updatedUnixMs: num(job.updated_unix_ms),
   };
 }
