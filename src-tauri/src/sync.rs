@@ -37,6 +37,12 @@
 //! metadata loss there is permanent, whereas a sync leaves the original in
 //! place and the user can copy it again somewhere better.
 
+// Reached through the Tauri commands that expose it. `commands.rs` is held by
+// another session right now, so for the moment these are used only by the tests
+// below — which is what `dead_code` is reporting. Comes out when the commands
+// land; it is a scaffold, not a policy.
+#![allow(dead_code)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::hash::BuildHasher;
@@ -118,7 +124,10 @@ pub(crate) struct SyncWarning {
 
 impl SyncWarning {
     fn new(code: &str, message: impl Into<String>) -> Self {
-        Self { code: code.to_owned(), message: message.into() }
+        Self {
+            code: code.to_owned(),
+            message: message.into(),
+        }
     }
 }
 
@@ -181,11 +190,20 @@ pub(crate) struct SyncFailure {
 #[non_exhaustive]
 pub(crate) enum SyncError {
     /// A path was relative, contained `..`, or was not a directory.
-    BadPath { path: DisplayPath, reason: String },
+    BadPath {
+        path: DisplayPath,
+        reason: String,
+    },
     /// Source and destination are the same tree, or one contains the other.
-    Overlapping { source: DisplayPath, destination: DisplayPath },
+    Overlapping {
+        source: DisplayPath,
+        destination: DisplayPath,
+    },
     /// The destination does not have room for what would be copied.
-    NotEnoughSpace { needed: u64, available: u64 },
+    NotEnoughSpace {
+        needed: u64,
+        available: u64,
+    },
     /// The confirmation token does not authorize this plan.
     InvalidConfirmation,
     Internal(String),
@@ -212,6 +230,20 @@ impl std::error::Error for SyncError {}
 // ---------------------------------------------------------------------------
 // Planning
 // ---------------------------------------------------------------------------
+
+/// What the caller wants synced.
+///
+/// Bundled so `plan` and `apply` take the same four things and cannot be
+/// called with source and destination the wrong way round — which, for an
+/// operation that writes into one of them, is the argument-order mistake worth
+/// designing out.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SyncRequest<'a> {
+    pub source: &'a Path,
+    pub destination: &'a Path,
+    pub compare_mode: CompareMode,
+    pub on_differ: OnDiffer,
+}
 
 /// Running totals while walking the source.
 #[derive(Debug, Default)]
@@ -241,7 +273,10 @@ fn acceptable(path: &Path) -> bool {
 /// [`crate::relocate`] hit and the reason that one canonicalizes too.
 fn check_disjoint(source: &Path, destination: &Path) -> Result<(), SyncError> {
     let overlapping = |a: &Path, b: &Path| a == b || b.starts_with(a) || a.starts_with(b);
-    let fail = || SyncError::Overlapping { source: display(source), destination: display(destination) };
+    let fail = || SyncError::Overlapping {
+        source: display(source),
+        destination: display(destination),
+    };
 
     if overlapping(source, destination) {
         return Err(fail());
@@ -328,15 +363,14 @@ fn read_full(file: &mut fs::File, buffer: &mut [u8]) -> io::Result<usize> {
 /// because this operation never touches them. It also keeps memory flat: there
 /// is no map of the destination tree, just one `stat` per source file.
 fn walk(
-    source_root: &Path,
-    destination_root: &Path,
+    request: SyncRequest<'_>,
     relative: &Path,
-    mode: CompareMode,
-    on_differ: OnDiffer,
     cap: usize,
     entries: &mut Vec<SyncEntry>,
     tally: &mut Tally,
 ) {
+    let (source_root, destination_root) = (request.source, request.destination);
+    let (mode, on_differ) = (request.compare_mode, request.on_differ);
     let here = source_root.join(relative);
     let Ok(read) = fs::read_dir(&here) else {
         tally.unreadable = tally.unreadable.saturating_add(1);
@@ -361,7 +395,7 @@ fn walk(
         };
 
         if kind.is_dir() {
-            walk(source_root, destination_root, &child_relative, mode, on_differ, cap, entries, tally);
+            walk(request, &child_relative, cap, entries, tally);
             continue;
         }
 
@@ -422,6 +456,91 @@ fn walk(
     }
 }
 
+/// Everything worth saying about a plan before the user confirms it.
+///
+/// Lifted out of [`plan`] for length, and because it is a flat list of
+/// observations rather than part of the decision — the decisions above it were
+/// getting hard to see behind five `if` blocks of prose.
+fn advisories(
+    tally: &Tally,
+    filesystem: &str,
+    available: u64,
+    on_differ: OnDiffer,
+    short: bool,
+) -> Vec<SyncWarning> {
+    let mut warnings = Vec::new();
+    let plural = |count: u64| if count == 1 { "" } else { "s" };
+
+    if tally.total_to_copy == 0 {
+        warnings.push(SyncWarning::new(
+            "nothing-to-do",
+            "The destination already has everything in the source. Nothing would be copied.",
+        ));
+    }
+
+    // A WARNING, not a refusal — unlike relocate, which deletes the source and
+    // so makes metadata loss permanent. A sync leaves the original in place, so
+    // the user can always copy it somewhere better afterwards.
+    if !carries_macos_metadata(filesystem) {
+        warnings.push(SyncWarning::new(
+            "metadata-loss",
+            format!(
+                "The destination is {filesystem}, which cannot store extended attributes or ACLs. \
+                 Finder tags, colour labels and \"Where from\" provenance will not survive the \
+                 copy. The originals keep theirs."
+            ),
+        ));
+    }
+
+    if tally.special_skipped > 0 {
+        warnings.push(SyncWarning::new(
+            "special-files",
+            format!(
+                "{} socket{} or pipe{} will be skipped. Nothing can copy those.",
+                tally.special_skipped,
+                plural(tally.special_skipped),
+                plural(tally.special_skipped),
+            ),
+        ));
+    }
+
+    if tally.unreadable > 0 {
+        warnings.push(SyncWarning::new(
+            "unreadable",
+            format!(
+                "{} item{} could not be read, so their contents are not in this plan. The counts \
+                 below are a floor.",
+                tally.unreadable,
+                plural(tally.unreadable),
+            ),
+        ));
+    }
+
+    if tally.differing_skipped > 0 && on_differ == OnDiffer::Skip {
+        warnings.push(SyncWarning::new(
+            "differing-skipped",
+            format!(
+                "{} file{} exist on both sides but differ. They are being left alone — switch to \
+                 \"replace\" if the source should win.",
+                tally.differing_skipped,
+                plural(tally.differing_skipped),
+            ),
+        ));
+    }
+
+    if short {
+        warnings.push(SyncWarning::new(
+            "no-room",
+            format!(
+                "The destination has {available} bytes free and this needs {}.",
+                tally.bytes_to_copy
+            ),
+        ));
+    }
+
+    warnings
+}
+
 /// Describes what a sync would do, and mints the token that authorizes it.
 ///
 /// Returns a plan even when the sync cannot proceed, for the same reason
@@ -437,11 +556,9 @@ pub(crate) fn plan<S: BuildHasher>(
     keys: &S,
     generation: TreeGeneration,
     now_unix_ms: i64,
-    source: &Path,
-    destination: &Path,
-    compare_mode: CompareMode,
-    on_differ: OnDiffer,
+    request: SyncRequest<'_>,
 ) -> Result<SyncPlan, SyncError> {
+    let SyncRequest { source, destination, compare_mode, on_differ } = request;
     for path in [source, destination] {
         if !acceptable(path) {
             return Err(SyncError::BadPath {
@@ -460,74 +577,12 @@ pub(crate) fn plan<S: BuildHasher>(
 
     let mut entries = Vec::new();
     let mut tally = Tally::default();
-    walk(source, destination, Path::new(""), compare_mode, on_differ, MAX_PLANNED_ENTRIES, &mut entries, &mut tally);
+    walk(request, Path::new(""), MAX_PLANNED_ENTRIES, &mut entries, &mut tally);
 
     let (destination_available, destination_filesystem) = filesystem_facts(destination);
 
-    let mut warnings = Vec::new();
-    if tally.total_to_copy == 0 {
-        warnings.push(SyncWarning::new(
-            "nothing-to-do",
-            "The destination already has everything in the source. Nothing would be copied.",
-        ));
-    }
-    if !carries_macos_metadata(&destination_filesystem) {
-        // A WARNING here, not a refusal — unlike relocate, which deletes the
-        // source and so makes metadata loss permanent. A sync leaves the
-        // original in place, so the user can always copy it somewhere better.
-        warnings.push(SyncWarning::new(
-            "metadata-loss",
-            format!(
-                "The destination is {destination_filesystem}, which cannot store extended \
-                 attributes or ACLs. Finder tags, colour labels and \"Where from\" provenance will \
-                 not survive the copy. The originals keep theirs."
-            ),
-        ));
-    }
-    if tally.special_skipped > 0 {
-        warnings.push(SyncWarning::new(
-            "special-files",
-            format!(
-                "{} socket{} or pipe{} will be skipped. Nothing can copy those.",
-                tally.special_skipped,
-                if tally.special_skipped == 1 { "" } else { "s" },
-                if tally.special_skipped == 1 { "" } else { "s" },
-            ),
-        ));
-    }
-    if tally.unreadable > 0 {
-        warnings.push(SyncWarning::new(
-            "unreadable",
-            format!(
-                "{} item{} could not be read, so their contents are not in this plan. The counts \
-                 below are a floor.",
-                tally.unreadable,
-                if tally.unreadable == 1 { "" } else { "s" },
-            ),
-        ));
-    }
-    if tally.differing_skipped > 0 && on_differ == OnDiffer::Skip {
-        warnings.push(SyncWarning::new(
-            "differing-skipped",
-            format!(
-                "{} file{} exist on both sides but differ. They are being left alone — switch to \
-                 \"replace\" if the source should win.",
-                tally.differing_skipped,
-                if tally.differing_skipped == 1 { "" } else { "s" },
-            ),
-        ));
-    }
-
     let short = tally.bytes_to_copy > destination_available;
-    if short {
-        warnings.push(SyncWarning::new(
-            "no-room",
-            format!(
-                "The destination has {destination_available} bytes free and this needs {}.",
-                tally.bytes_to_copy
-            ),
-        ));
-    }
+    let warnings = advisories(&tally, &destination_filesystem, destination_available, on_differ, short);
 
     // The token binds the generation and the plan's shape. It is deliberately
     // NOT bound to a node's (dev, ino) the way relocate's is: a sync has no
@@ -614,13 +669,11 @@ pub(crate) fn apply<S: BuildHasher>(
     keys: &S,
     generation: TreeGeneration,
     now_unix_ms: i64,
-    source: &Path,
-    destination: &Path,
-    compare_mode: CompareMode,
-    on_differ: OnDiffer,
+    request: SyncRequest<'_>,
     confirmation: &ConfirmationToken,
 ) -> Result<SyncReport, SyncError> {
-    let fresh = plan(keys, generation, now_unix_ms, source, destination, compare_mode, on_differ)?;
+    let SyncRequest { source, destination, .. } = request;
+    let fresh = plan(keys, generation, now_unix_ms, request)?;
 
     let identity = ItemIdentity {
         node: rdirstat_core::NodeId::from_raw(0),
@@ -644,7 +697,7 @@ pub(crate) fn apply<S: BuildHasher>(
     // still copy all 40,000.
     let mut all = Vec::new();
     let mut tally = Tally::default();
-    walk(source, destination, Path::new(""), compare_mode, on_differ, usize::MAX, &mut all, &mut tally);
+    walk(request, Path::new(""), usize::MAX, &mut all, &mut tally);
 
     for entry in all {
         let relative = Path::new(&entry.relative_path);
@@ -678,7 +731,10 @@ mod tests {
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/sync-scratch");
         fs::create_dir_all(&base).expect("scratch root");
         let base = base.canonicalize().expect("canonicalize");
-        tempfile::Builder::new().prefix("case-").tempdir_in(&base).expect("tempdir")
+        tempfile::Builder::new()
+            .prefix("case-")
+            .tempdir_in(&base)
+            .expect("tempdir")
     }
 
     fn write(root: &Path, relative: &str, contents: &[u8]) {
@@ -687,9 +743,18 @@ mod tests {
         fs::write(path, contents).expect("write");
     }
 
+    fn request<'a>(
+        source: &'a Path,
+        destination: &'a Path,
+        compare_mode: CompareMode,
+        on_differ: OnDiffer,
+    ) -> SyncRequest<'a> {
+        SyncRequest { source, destination, compare_mode, on_differ }
+    }
+
     fn plan_of(source: &Path, destination: &Path, mode: CompareMode, on_differ: OnDiffer) -> SyncPlan {
         let keys = RandomState::new();
-        plan(&keys, GEN, NOW, source, destination, mode, on_differ).expect("plan")
+        plan(&keys, GEN, NOW, request(source, destination, mode, on_differ)).expect("plan")
     }
 
     #[test]
@@ -721,7 +786,10 @@ mod tests {
         let plan = plan_of(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip);
         assert_eq!(plan.total_to_copy, 0);
         assert!(
-            !plan.entries.iter().any(|entry| entry.relative_path.contains("only-here")),
+            !plan
+                .entries
+                .iter()
+                .any(|entry| entry.relative_path.contains("only-here")),
             "a destination-only file must never appear in a sync plan"
         );
     }
@@ -757,7 +825,12 @@ mod tests {
         assert_eq!(quick.total_to_copy, 0);
         assert_eq!(quick.already_present, 1);
 
-        let verify = plan_of(source.path(), destination.path(), CompareMode::Verify, OnDiffer::Replace);
+        let verify = plan_of(
+            source.path(),
+            destination.path(),
+            CompareMode::Verify,
+            OnDiffer::Replace,
+        );
         assert_eq!(verify.total_to_copy, 1);
         assert_eq!(verify.entries[0].reason, SyncReason::ContentDiffers);
     }
@@ -775,7 +848,12 @@ mod tests {
         write(source.path(), "big.bin", &payload);
         write(destination.path(), "big.bin", &payload);
 
-        let plan = plan_of(source.path(), destination.path(), CompareMode::Verify, OnDiffer::Replace);
+        let plan = plan_of(
+            source.path(),
+            destination.path(),
+            CompareMode::Verify,
+            OnDiffer::Replace,
+        );
         assert_eq!(plan.total_to_copy, 0, "identical multi-chunk files must compare equal");
     }
 
@@ -788,8 +866,8 @@ mod tests {
         fs::create_dir_all(&destination).expect("mkdir");
         let keys = RandomState::new();
 
-        let error = plan(&keys, GEN, NOW, &source, &destination, CompareMode::Quick, OnDiffer::Skip)
-            .expect_err("nesting must be refused");
+        let error = plan(&keys, GEN, NOW, request(&source, &destination, CompareMode::Quick, OnDiffer::Skip))
+        .expect_err("nesting must be refused");
         assert!(matches!(error, SyncError::Overlapping { .. }), "got {error:?}");
     }
 
@@ -807,8 +885,7 @@ mod tests {
             !link.starts_with(&real) && !real.starts_with(&link),
             "the two must look disjoint lexically or this proves nothing"
         );
-        let error = plan(&keys, GEN, NOW, &real, &link, CompareMode::Quick, OnDiffer::Skip)
-            .expect_err("must refuse");
+        let error = plan(&keys, GEN, NOW, request(&real, &link, CompareMode::Quick, OnDiffer::Skip)).expect_err("must refuse");
         assert!(matches!(error, SyncError::Overlapping { .. }), "got {error:?}");
     }
 
@@ -817,8 +894,8 @@ mod tests {
         let dir = scratch();
         let keys = RandomState::new();
         assert!(
-            plan(&keys, GEN, NOW, Path::new("relative"), dir.path(), CompareMode::Quick, OnDiffer::Skip)
-                .is_err()
+            plan(&keys, GEN, NOW, request(Path::new("relative"), dir.path(), CompareMode::Quick, OnDiffer::Skip))
+            .is_err()
         );
     }
 
@@ -832,29 +909,26 @@ mod tests {
         write(destination.path(), "theirs.txt", b"do not touch");
 
         let keys = RandomState::new();
-        let plan = plan(&keys, GEN, NOW, source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip)
-            .expect("plan");
+        let plan = plan(&keys, GEN, NOW, request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip))
+        .expect("plan");
         let token = plan.token.clone().expect("a copyable plan must get a token");
 
-        let report = apply(
-            &keys,
-            GEN,
-            NOW,
-            source.path(),
-            destination.path(),
-            CompareMode::Quick,
-            OnDiffer::Skip,
-            &token,
-        )
+        let report = apply(&keys, GEN, NOW, request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip), &token)
         .expect("apply");
 
         assert_eq!(report.copied, 1);
         assert!(report.failures.is_empty(), "got {:?}", report.failures);
         // The missing file arrived, directories and all.
-        assert_eq!(fs::read(destination.path().join("deep/new.txt")).expect("read"), b"brand new");
+        assert_eq!(
+            fs::read(destination.path().join("deep/new.txt")).expect("read"),
+            b"brand new"
+        );
         // And nothing else moved.
         assert_eq!(fs::read(destination.path().join("keep.txt")).expect("read"), b"same");
-        assert_eq!(fs::read(destination.path().join("theirs.txt")).expect("read"), b"do not touch");
+        assert_eq!(
+            fs::read(destination.path().join("theirs.txt")).expect("read"),
+            b"do not touch"
+        );
     }
 
     #[test]
@@ -879,22 +953,13 @@ mod tests {
         write(source.path(), "a.txt", b"one");
 
         let keys = RandomState::new();
-        let plan = plan(&keys, GEN, NOW, source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip)
-            .expect("plan");
+        let plan = plan(&keys, GEN, NOW, request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip))
+        .expect("plan");
         let token = plan.token.clone().expect("token");
 
         write(source.path(), "surprise.txt", b"appeared after review");
 
-        let error = apply(
-            &keys,
-            GEN,
-            NOW,
-            source.path(),
-            destination.path(),
-            CompareMode::Quick,
-            OnDiffer::Skip,
-            &token,
-        )
+        let error = apply(&keys, GEN, NOW, request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip), &token)
         .expect_err("a changed source must invalidate the plan");
         assert!(matches!(error, SyncError::InvalidConfirmation), "got {error:?}");
     }
