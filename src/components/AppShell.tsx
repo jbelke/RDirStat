@@ -355,6 +355,22 @@ export function AppShell() {
    * `CategoryLegend` expands a family to its members before it gets here.
    */
   const [categoryFilter, setCategoryFilter] = useState<readonly number[] | null>(null);
+  /*
+   * What the canvas last painted, for the legend to list.
+   *
+   * Only ever set from an UNFILTERED layout. A filtered layout contains only
+   * the categories already selected, so latching it would delete every other
+   * row from the legend — including the ones needed to add a second category
+   * to the filter, which `legendEntries` multi-select depends on. `null`
+   * lists the whole taxonomy, which is the safe fallback.
+   */
+  const [drawn, setDrawn] = useState<ReadonlySet<number> | null>(null);
+  const handleCategoriesDrawn = useCallback(
+    (categories: ReadonlySet<number>) => {
+      if (categoryFilter === null) setDrawn(categories);
+    },
+    [categoryFilter],
+  );
 
   // Switching between family and category rebuilds what a row *means*, so a
   // filter carried across the switch would be a selection the user cannot see
@@ -1146,18 +1162,19 @@ export function AppShell() {
                 formatBytes={formatSI}
                 colorBy={colorBy}
                 categoryFilter={categoryFilter}
+              onCategoriesDrawn={handleCategoriesDrawn}
                 metric={sizeMetric}
               />
 
               {/* The key to the colours. Without it the encoding is decoration:
                 * you can see two tiles differ but not what the difference
                 * means, which throws away the entire point of classifying by
-                * content type. `present={null}` lists the whole taxonomy;
-                * once the canvas reports which categories it actually drew,
-                * pass that set instead so the legend shrinks on drill-down. */}
+                * content type. `present` is what the canvas last painted, so
+                * the legend shrinks on drill-down instead of listing all 25
+                * rows; `null` until the first layout arrives. */}
               <CategoryLegend
                 colorBy={colorBy}
-                present={null}
+                present={drawn}
                 onColorByChange={setColorBy}
                 selected={categoryFilter}
                 onFilterChange={setCategoryFilter}

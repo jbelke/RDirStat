@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { CATEGORIES } from "../../lib/categories.ts";
-import { legendEntries, resolvePalette } from "./palette.ts";
+import { drawnCategories, legendEntries, resolvePalette } from "./palette.ts";
 
 test("with no filter every category paints its own colour", () => {
   const palette = resolvePalette(null, "category", null);
@@ -74,4 +74,27 @@ test("a legend row carries the category ids it stands for", () => {
     CATEGORIES.map((category) => category.id),
     "the families between them must cover every category exactly once",
   );
+});
+
+test("drawnCategories reports only what the layout coloured", () => {
+  const category = new Uint8Array([3, 7, 3, 0, 7]);
+  const drawn = drawnCategories(category, 5);
+  assert.deepEqual([...drawn].sort((a, b) => a - b), [0, 3, 7]);
+});
+
+test("drawnCategories honours count, not the array's length", () => {
+  // The typed array is sized to a capacity; `count` is the authoritative
+  // number of rows. Reading past it would report categories from stale slots.
+  const category = new Uint8Array([1, 2, 9, 9, 9]);
+  assert.deepEqual([...drawnCategories(category, 2)].sort((a, b) => a - b), [1, 2]);
+});
+
+test("drawnCategories tolerates a count beyond the array", () => {
+  assert.deepEqual([...drawnCategories(new Uint8Array([4]), 99)], [4]);
+});
+
+test("an empty layout draws no categories, which is not the same as all of them", () => {
+  // legendEntries treats `null` as "list everything"; an empty set must stay
+  // an empty set so a legend over nothing does not expand to the taxonomy.
+  assert.equal(drawnCategories(new Uint8Array(), 0).size, 0);
 });

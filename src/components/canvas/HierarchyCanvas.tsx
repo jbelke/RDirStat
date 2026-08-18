@@ -29,7 +29,7 @@ import { NO_HIT, computeSunburstFrame, hitTest, layoutKindLabel, rankLargestTile
 import { normalizeGeneration } from "./generation.ts";
 import { useDevicePixelRatio, useElementSize, usePalette, usePrefersReducedMotion } from "./hooks.ts";
 import { invokeLayout } from "./layoutSource.ts";
-import { categoryLabel, type ColorBy } from "./palette.ts";
+import { categoryLabel, drawnCategories, type ColorBy } from "./palette.ts";
 import { drawLayout, prepareContext, type DrawStats } from "./render.ts";
 import type {
   CanvasContextAction,
@@ -80,6 +80,16 @@ export interface HierarchyCanvasProps {
   readonly selectedNodes?: readonly number[];
   /** Canvas -> tree half. Fires for every selection change the canvas makes. */
   readonly onSelectionChange?: (change: SelectionChange) => void;
+
+  /**
+   * The distinct categories this layout actually drew, reported whenever the
+   * batch changes. The legend lists what is on screen, and only the canvas
+   * knows what that is.
+   *
+   * The shell must not latch this while a category filter is active: a
+   * filtered layout contains only the selected categories.
+   */
+  readonly onCategoriesDrawn?: (categories: ReadonlySet<number>) => void;
 
   readonly onContextAction?: (request: ContextActionRequest) => void;
   /**
@@ -147,6 +157,7 @@ export function HierarchyCanvas({
   describeNode,
   selectedNodes,
   onSelectionChange,
+  onCategoriesDrawn,
   onContextAction,
   trashEnabled = false,
   colorBy = "category",
@@ -220,6 +231,14 @@ export function HierarchyCanvas({
     fetchLayout,
     enabled: size.width > 0 && size.height > 0,
   });
+
+  // Report what was painted, so the legend can list those categories instead
+  // of the whole taxonomy. Derived from `batch.category` because that is the
+  // array the renderer coloured from.
+  useEffect(() => {
+    if (batch === null || onCategoriesDrawn === undefined) return;
+    onCategoriesDrawn(drawnCategories(batch.category, batch.count));
+  }, [batch, onCategoriesDrawn]);
 
   const descriptions = useNodeDescriptions(describeNode, normalizedGeneration);
 

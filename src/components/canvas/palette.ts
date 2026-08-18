@@ -140,6 +140,31 @@ export interface LegendEntry {
 }
 
 /**
+ * The distinct `CategoryId`s a layout actually drew.
+ *
+ * This is what [`legendEntries`] should be given as `present`: the legend
+ * lists what is on screen rather than the whole taxonomy, and `batch.category`
+ * is the only honest source for that — it is the array the renderer coloured
+ * from, so the legend cannot claim a category the canvas did not paint.
+ *
+ * Takes the column and a count rather than the batch, because `count` is
+ * authoritative and the typed array may be longer than the rows in use.
+ *
+ * A caller must not pass a *filtered* layout: it contains only the categories
+ * already selected, so latching it would drop every other row from the legend
+ * — including the ones needed to add a second category to the filter.
+ */
+export function drawnCategories(category: Uint8Array, count: number): ReadonlySet<number> {
+  const drawn = new Set<number>();
+  const limit = Math.min(count, category.length);
+  for (let index = 0; index < limit; index += 1) {
+    const id = category[index];
+    if (id !== undefined) drawn.add(id);
+  }
+  return drawn;
+}
+
+/**
  * The rows a legend should show for a palette.
  *
  * Only categories actually present in the current view are worth listing — a
