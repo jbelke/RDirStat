@@ -43,11 +43,11 @@
 // land; it is a scaffold, not a policy.
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::hash::BuildHasher;
 use std::io::{self, Read as _};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use rdirstat_core::{ConfirmationToken, DisplayPath, TreeGeneration};
@@ -623,10 +623,10 @@ pub(crate) fn plan<S: BuildHasher>(
 
 /// Copies one file, creating the directories above it.
 ///
-/// `ditto` per file rather than once for the tree: a whole-tree `ditto` would
-/// copy everything, including the files the destination already has, which is
-/// the opposite of what was asked for. Per-file is more process spawns and
-/// exactly the semantics the user described.
+/// The slow path. [`copy_planned`] copies the whole planned set in one `ditto`
+/// and is what runs normally; this remains for the two cases a bom cannot
+/// serve — a relative path containing a newline, and reporting per-file
+/// failures after a batch copy has failed as a whole.
 fn copy_one(source: &Path, destination: &Path) -> Result<(), String> {
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -646,6 +646,164 @@ fn copy_one(source: &Path, destination: &Path) -> Result<(), String> {
         "ditto exited {}: {}",
         output.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+/// A private scratch directory that removes itself.
+///
+/// `create_dir`, not `create_dir_all`: it fails when the path already exists,
+/// so a directory somebody else pre-created is an error rather than something
+/// this writes through.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> io::Result<Self> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos());
+        let path = std::env::temp_dir().join(format!("rdirstat-sync-{}-{nanos}", std::process::id()));
+        fs::create_dir(&path)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        drop(fs::remove_dir_all(&self.0));
+    }
+}
+
+/// True when a relative path can go into a bom at all.
+///
+/// `mkbom -i` reads its file list one path per line and offers no NUL-delimited
+/// form, so a name containing a newline would be split into two bogus entries.
+/// That is precisely the defect filed against `rgigasync` as nato-b6h.3, and it
+/// is not worth reintroducing for the handful of files it affects: those take
+/// the per-file path instead.
+fn bom_can_carry(relative_path: &str) -> bool {
+    !relative_path.contains('\n')
+}
+
+/// The `mkbom` input for a planned set: every path, every directory above it,
+/// and the root.
+///
+/// A `BTreeSet` because `mkbom` walks the list in order and rejects an entry
+/// whose parent it has not already seen — and lexicographic order puts `.`
+/// ahead of everything and `./a` ahead of `./a/b`. The sort is not cosmetic; it
+/// is what makes the bom build at all.
+fn bom_lines(entries: &[SyncEntry]) -> BTreeSet<String> {
+    let mut lines = BTreeSet::new();
+    lines.insert(".".to_owned());
+    for entry in entries {
+        // Every ancestor, because a bom naming `./a/b/c.txt` without `./a` and
+        // `./a/b` has those entries rejected one by one and yields a bom that
+        // copies less than it was asked to, while exiting 0.
+        let mut prefix = PathBuf::new();
+        for part in Path::new(&entry.relative_path).components() {
+            prefix.push(part);
+            lines.insert(format!("./{}", prefix.display()));
+        }
+    }
+    lines
+}
+
+/// Copies exactly the planned set in one `ditto`.
+///
+/// ## Why a bom
+///
+/// The two obvious options are both bad. One `ditto` over the tree copies
+/// everything, including the files the destination already has, which is the
+/// opposite of what was asked for. One `ditto` per file is correct but spends
+/// most of itself in `fork`/`exec`: measured on this project's bench, 20,000
+/// files cross-volume cost 109.87 s per-file serially and 44.09 s at sixteen-way
+/// parallelism, against 11.01 s for a single bom-driven copy — and a bare
+/// `/usr/bin/true` costs 2.56 ms to spawn, so no amount of parallelism removes
+/// that floor.
+///
+/// `ditto --bom` takes a manifest and copies *only* the objects named in it, at
+/// full fidelity. It is selectivity without the per-file spawn, and it keeps
+/// `ditto` as the copier, so extended attributes, ACLs and resource forks
+/// survive — the property [`crate::relocate`] is built on. It needs no `rsync`,
+/// so it needs no capability probe: the system `rsync` on macOS 15 is openrsync
+/// and rejects `--xattrs` and `--acls` outright.
+///
+/// Verified semantics: a file already at the destination and named in the bom
+/// is overwritten; one that is *not* named is left completely alone.
+///
+/// # Errors
+///
+/// Returns the reason when the scratch directory, `mkbom` or `ditto` fails. The
+/// caller falls back to per-file copies so the report can still say which files
+/// did not make it.
+fn copy_planned(source: &Path, destination: &Path, entries: &[SyncEntry]) -> Result<(), String> {
+    let lines = bom_lines(entries);
+    let scratch = Scratch::new().map_err(|error| format!("could not create a scratch directory: {error}"))?;
+    let list = scratch.0.join("list");
+    let bom = scratch.0.join("sync.bom");
+
+    let mut text = String::new();
+    for line in &lines {
+        text.push_str(line);
+        text.push('\n');
+    }
+    fs::write(&list, text).map_err(|error| format!("could not write the copy list: {error}"))?;
+
+    let built = Command::new("/usr/bin/mkbom")
+        .arg("-s")
+        .arg("-i")
+        .arg(&list)
+        .arg(&bom)
+        // `mkbom` resolves the listed paths against the working directory, so
+        // it has to run inside the source.
+        .current_dir(source)
+        .output()
+        .map_err(|error| format!("could not run mkbom: {error}"))?;
+    if !built.status.success() {
+        return Err(format!(
+            "mkbom exited {}: {}",
+            built.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&built.stderr).trim()
+        ));
+    }
+
+    // `mkbom` reports a rejected entry on stderr and still exits 0, so counting
+    // is the only honest check that the bom describes what was asked for. An
+    // under-full bom makes `ditto` copy less than the plan while succeeding,
+    // and an empty one copies nothing at all while succeeding — the same
+    // silent-empty-success shape as nato-b6h.1.
+    let listed = Command::new("/usr/bin/lsbom")
+        .arg("-s")
+        .arg(&bom)
+        .output()
+        .map_err(|error| format!("could not run lsbom: {error}"))?;
+    if !listed.status.success() {
+        return Err("the copy list could not be read back".to_owned());
+    }
+    let built_count = String::from_utf8_lossy(&listed.stdout).lines().filter(|line| !line.is_empty()).count();
+    if built_count != lines.len() {
+        return Err(format!(
+            "the copy list describes {built_count} of {} paths; refusing to copy a partial list",
+            lines.len()
+        ));
+    }
+
+    let copied = Command::new("/usr/bin/ditto")
+        .arg("--bom")
+        .arg(&bom)
+        .arg("--rsrc")
+        .arg("--extattr")
+        .arg("--acl")
+        .arg(source)
+        .arg(destination)
+        .output()
+        .map_err(|error| format!("could not run ditto: {error}"))?;
+    if copied.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "ditto exited {}: {}",
+        copied.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&copied.stderr).trim()
     ))
 }
 
@@ -699,7 +857,42 @@ pub(crate) fn apply<S: BuildHasher>(
     let mut tally = Tally::default();
     walk(request, Path::new(""), usize::MAX, &mut all, &mut tally);
 
-    for entry in all {
+    // The planned set goes into ONE `ditto --bom`; see `copy_planned`. Only the
+    // paths a bom cannot describe fall back to a process each.
+    let (batchable, individual): (Vec<SyncEntry>, Vec<SyncEntry>) =
+        all.into_iter().partition(|entry| bom_can_carry(&entry.relative_path));
+
+    let batch = if batchable.is_empty() { Ok(()) } else { copy_planned(source, destination, &batchable) };
+
+    match batch {
+        Ok(()) => {
+            for entry in batchable {
+                report.copied = report.copied.saturating_add(1);
+                report.bytes_copied = report.bytes_copied.saturating_add(entry.bytes);
+            }
+        }
+        // The batch is fast but returns one verdict for the whole set, and a
+        // report that says "40,000 files failed" is not a report. So a failed
+        // batch is retried file by file purely to find out which files actually
+        // failed. `ditto` overwrites, so re-copying the ones that already
+        // arrived is wasted work on an error path and nothing worse.
+        Err(reason) => {
+            report.failures.push(SyncFailure {
+                relative_path: String::new(),
+                reason: format!("copying in one pass failed, falling back to one file at a time: {reason}"),
+            });
+            copy_individually(source, destination, batchable, &mut report);
+        }
+    }
+
+    copy_individually(source, destination, individual, &mut report);
+
+    Ok(report)
+}
+
+/// Copies entries one process at a time, recording a verdict for each.
+fn copy_individually(source: &Path, destination: &Path, entries: Vec<SyncEntry>, report: &mut SyncReport) {
+    for entry in entries {
         let relative = Path::new(&entry.relative_path);
         match copy_one(&source.join(relative), &destination.join(relative)) {
             Ok(()) => {
@@ -712,8 +905,6 @@ pub(crate) fn apply<S: BuildHasher>(
             }),
         }
     }
-
-    Ok(report)
 }
 
 #[cfg(test)]
@@ -929,6 +1120,113 @@ mod tests {
             fs::read(destination.path().join("theirs.txt")).expect("read"),
             b"do not touch"
         );
+    }
+
+    /// The whole point of copying with `ditto` rather than `rsync`: the
+    /// destination is a faithful twin, not just the same bytes.
+    ///
+    /// This is the property `copy_planned` exists to keep while still copying a
+    /// SUBSET, and it is the one a `--files-from` rsync silently gives up. The
+    /// system `rsync` on macOS 15 is openrsync, which rejects `--xattrs` and
+    /// `--acls` outright.
+    #[test]
+    fn a_planned_copy_carries_extended_attributes() {
+        let source = scratch();
+        let destination = scratch();
+        write(source.path(), "deep/doc.txt", b"payload");
+
+        let marked = source.path().join("deep/doc.txt");
+        let set = Command::new("/usr/bin/xattr")
+            .args(["-w", "user.rdirstat.probe", "sentinel"])
+            .arg(&marked)
+            .status()
+            .expect("xattr");
+        assert!(set.success(), "the fixture itself must carry the attribute");
+
+        let keys = RandomState::new();
+        let ask = request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip);
+        let plan = plan(&keys, GEN, NOW, ask).expect("plan");
+        let token = plan.token.clone().expect("token");
+        let report = apply(&keys, GEN, NOW, ask, &token).expect("apply");
+        assert!(report.failures.is_empty(), "got {:?}", report.failures);
+
+        let landed = Command::new("/usr/bin/xattr")
+            .arg(destination.path().join("deep/doc.txt"))
+            .output()
+            .expect("xattr");
+        let names = String::from_utf8_lossy(&landed.stdout);
+        assert!(
+            names.contains("user.rdirstat.probe"),
+            "the copy dropped the extended attribute; got {names:?}"
+        );
+    }
+
+    /// A tree whose files are all empty must still be copied.
+    ///
+    /// Guards the failure family filed as nato-b6h.1, where a size-driven
+    /// batcher never tripped its threshold and so transferred nothing while
+    /// exiting 0. Nothing here is size-driven, and this is what keeps it that
+    /// way. Empty files are not exotic: lockfiles, `__init__.py`, `.gitkeep`.
+    #[test]
+    fn a_tree_of_only_zero_byte_files_is_still_copied() {
+        let source = scratch();
+        let destination = scratch();
+        for name in ["a.lock", "pkg/__init__.py", "deep/nested/.gitkeep"] {
+            write(source.path(), name, b"");
+        }
+
+        let keys = RandomState::new();
+        let ask = request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip);
+        let plan = plan(&keys, GEN, NOW, ask).expect("plan");
+        let token = plan.token.clone().expect("an all-empty tree is still a copyable plan");
+        let report = apply(&keys, GEN, NOW, ask, &token).expect("apply");
+
+        assert_eq!(report.copied, 3, "failures: {:?}", report.failures);
+        for name in ["a.lock", "pkg/__init__.py", "deep/nested/.gitkeep"] {
+            assert!(destination.path().join(name).exists(), "{name} never arrived");
+        }
+    }
+
+    /// A newline in a filename must not lose the file.
+    ///
+    /// `mkbom -i` is line-delimited with no NUL form, so such a name cannot go
+    /// into the bom — it takes the per-file path instead. Guards the failure
+    /// family filed against `rgigasync` as nato-b6h.3, where the same shape
+    /// split one path into two bogus ones and lost the file.
+    #[test]
+    fn a_name_containing_a_newline_still_arrives() {
+        let source = scratch();
+        let destination = scratch();
+        write(source.path(), "we\nird.txt", b"awkward");
+        write(source.path(), "plain.txt", b"ordinary");
+
+        let keys = RandomState::new();
+        let ask = request(source.path(), destination.path(), CompareMode::Quick, OnDiffer::Skip);
+        let plan = plan(&keys, GEN, NOW, ask).expect("plan");
+        let token = plan.token.clone().expect("token");
+        let report = apply(&keys, GEN, NOW, ask, &token).expect("apply");
+
+        assert_eq!(report.copied, 2, "failures: {:?}", report.failures);
+        assert_eq!(fs::read(destination.path().join("we\nird.txt")).expect("read"), b"awkward");
+        assert_eq!(fs::read(destination.path().join("plain.txt")).expect("read"), b"ordinary");
+    }
+
+    /// Every ancestor of every path, and the root, exactly once.
+    ///
+    /// `mkbom` rejects an entry whose parent it has not already seen, and it
+    /// does so while still exiting 0 — so getting this wrong yields a bom that
+    /// copies less than the plan and reports success.
+    #[test]
+    fn a_bom_list_names_every_directory_above_every_file() {
+        let entries = vec![
+            SyncEntry { relative_path: "deep/nested/file.txt".to_owned(), bytes: 1, reason: SyncReason::Missing },
+            SyncEntry { relative_path: "top.txt".to_owned(), bytes: 1, reason: SyncReason::Missing },
+        ];
+        let lines: Vec<String> = bom_lines(&entries).into_iter().collect();
+        assert_eq!(lines, vec![".", "./deep", "./deep/nested", "./deep/nested/file.txt", "./top.txt"]);
+        // Sorted, so a parent always precedes its children — which is the
+        // property `mkbom` actually requires.
+        assert!(lines.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
