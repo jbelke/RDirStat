@@ -402,7 +402,7 @@ cmd_dmg() {
 
   local dir; dir="$(bundle_dir release)" || die "no bundle directory; the build produced nothing."
   local dmg
-  dmg="$(find "$dir/dmg" -name '*.dmg' -maxdepth 1 2>/dev/null | sort | tail -1)"
+  dmg="$(find "$dir/dmg" -maxdepth 1 -name '*.dmg' 2>/dev/null | sort | tail -1)"
   [ -n "$dmg" ] || die "the build finished but no .dmg was produced under $dir/dmg."
 
   say "Built"

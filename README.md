@@ -1,4 +1,4 @@
-# RDirStat
+# Stellar RDIRSTAT
 
 A native macOS disk-usage and file-inventory app. A Tauri v2 + Rust rewrite of
 [QDirStat](https://github.com/shundhammer/qdirstat) built to answer two questions
@@ -23,21 +23,116 @@ under `.settings/` is gitignored and is not part of this repository.
 
 ## Requirements
 
-- macOS 14+
+- macOS 14+ (required to build or run the app; see [Containers](#containers))
 - Rust 1.90 (MSRV); the pinned toolchain is in `rust-toolchain.toml` (1.97.1)
 - Node.js ≥ 22.12
 - pnpm 10.30.1 (`packageManager` in `package.json`)
+- Docker (optional; only the container profiles use it)
 
 ## Quick start
 
 ```bash
 just bootstrap     # pnpm install --frozen-lockfile
 just check         # formatting, lints, tests, frontend build
-just dev           # Tauri development app
+./rush.sh dev      # the development app
+./rush.sh dmg      # the installable, branded .dmg
+./rush.sh doctor   # what is installed, and what each environment resolves to
 ```
 
 `just ci` adds dependency license/advisory reports (`cargo-deny`, `pnpm audit`).
 GitHub Actions runs it on macOS for pushes to `main` and pull requests.
+
+`just dev` still exists and runs `pnpm tauri dev` unadorned. `./rush.sh dev` is
+the same thing with an environment applied.
+
+## Environments
+
+`./rush.sh` resolves an environment name into exactly two files, and everything
+else follows from that:
+
+| | |
+| --- | --- |
+| `.env.<environment>` | exported into the child process before it starts |
+| `src-tauri/tauri.<profile>.conf.json` | merged over `src-tauri/tauri.conf.json` |
+
+The environment file is looked up in order: `--env-file`, then
+`.env.<environment>`, then the tracked `.env.<environment>.example` template
+(with a warning), then `.env`. Only the templates are committed; your copies are
+git-ignored. The app treats a real environment variable as higher precedence
+than the `.env` it reads on its own, so this wins without deleting anything.
+
+| Environment | Bundle identifier | Purpose |
+| --- | --- | --- |
+| `development` | `jbelke.rdirstat.dev` | Debug build, verbose logs, disposable snapshot store |
+| `staging` | `jbelke.rdirstat.staging` | Release build that installs **beside** production |
+| `production` | `jbelke.rdirstat` | The build that ships |
+
+The separate identifiers are the point of the split: settings, the snapshot
+store and Keychain items are keyed by bundle identifier, so staging cannot
+evict the data a release install depends on, and an upgrade can be rehearsed
+with both versions on one machine.
+
+`--env` and `--profile` are separate, so values and build shape can be mixed:
+
+```bash
+./rush.sh dmg -e production -p staging   # production values, staging bundle id
+./rush.sh run -e demo                    # .env.demo + tauri.demo.conf.json
+```
+
+A new environment needs nothing but those two files. `./rush.sh --help` has the
+full flag set.
+
+## Packaging
+
+```bash
+./rush.sh dmg                # production
+./rush.sh dmg -e staging     # installs alongside it
+```
+
+The disk image is branded end to end: window size and icon positions come from
+`bundle.macOS.dmg` in `src-tauri/tauri.conf.json`, and the backdrop is generated
+alongside the icons.
+
+Every brand asset — the `.icns`, the `.ico`, the Windows tiles, the menu-bar
+template, the DMG backdrop and the favicon — is rendered from one source file,
+`scripts/generate-icons.mjs`, with no image dependencies: shapes are
+signed-distance fields, PNG/ICO output is written on top of `node:zlib`, and
+Tauri packages the macOS ICNS from the same rendered source. It is
+byte-reproducible, which is what lets
+`just check-icons` assert that the committed icons are still the generated ones.
+That check is in `just check` because the failure it catches is otherwise
+silent — nothing about a successful build tells you the icon reverted to the
+Tauri v2 template.
+
+```bash
+just icons          # regenerate
+just check-icons    # fail if the committed assets drifted
+```
+
+`./rush.sh dmg` refuses to package when that check fails, and reports whether
+`APPLE_SIGNING_IDENTITY` is set. An unsigned image opens on the machine that
+built it and is quarantined everywhere else, usually reported as "damaged" —
+which is a signing failure wearing a corruption message.
+
+## Containers
+
+**Docker does not build the app or the `.dmg`, and no Dockerfile can:** the
+shell links AppKit and `Security.framework`, and `hdiutil` is part of macOS
+rather than a package. The container profiles cover the parts that are portable.
+
+```bash
+./rush.sh up dev                   # Vite dev server        http://localhost:1420
+./rush.sh up staging -d            # built bundle via nginx http://localhost:4174
+./rush.sh compose run --rm check   # typecheck, tests, docs
+./rush.sh compose run --rm rust    # fmt/clippy/test for the portable crates
+./rush.sh compose run --rm assets  # regenerate the brand assets
+```
+
+The webview served by the `dev`, `staging` and `prod` profiles has no Tauri
+backend, so the shell renders and nothing scans. Those profiles are for
+frontend work, not QA. The `rust` profile names the portable crates explicitly
+and excludes `src-tauri`, which cannot compile off macOS; the real gate is
+`just check` on a Mac.
 
 ## Stack
 
@@ -75,6 +170,10 @@ These are gates, not estimates.
 | `src/` | React + TypeScript frontend |
 | `skills/` | Project-carried agent skills |
 | `Justfile`, `scripts/` | Local task surface and repository validators |
+| `rush.sh` | Environment-aware entry point: run, build, package, containers |
+| `Dockerfile`, `docker-compose.yml`, `docker/` | Container profiles for the portable work |
+| `.env.*.example` | Per-environment templates; copy, drop the suffix, edit |
+| `src-tauri/tauri.*.conf.json` | Per-profile config merged over the base |
 | `.github/` | macOS CI |
 | `LICENSE`, `NOTICE`, `LICENSING.md` | AGPL-3.0-only text, attribution, dual-licensing policy |
 
@@ -88,7 +187,7 @@ with this repository.
 
 ## License
 
-RDirStat is dual-licensed.
+Stellar RDIRSTAT is dual-licensed.
 
 - **Open source:** [GNU AGPL-3.0-only](LICENSE). Free to use, modify, and
   redistribute, provided derivatives stay AGPL-3.0-only, the attribution in
