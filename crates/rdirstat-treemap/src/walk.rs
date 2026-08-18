@@ -194,54 +194,7 @@ pub fn layout_tiles_coloured(
         if total <= 0.0 || scratch.is_empty() {
             continue;
         }
-
-        let child_depth = frame.depth.saturating_add(1);
-        let cap = plan.child_cap(frame.region, child_depth, scratch.len());
-        if cap == 0 {
-            continue;
-        }
-        sort_drawable_prefix(&mut scratch, cap);
-
-        let placed = match plan.kind {
-            LayoutKind::Icicle | LayoutKind::Sunburst => slice(
-                &mut scratch,
-                frame.region.x,
-                frame.region.w,
-                total,
-                plan.min_extent(child_depth),
-            ),
-            // `Treemap`, plus the `#[non_exhaustive]` tail: an unrecognised kind
-            // draws as a treemap rather than as an empty canvas.
-            _ => squarify(&mut scratch, frame.region, total, plan.min_area),
-        };
-
-        // Pushed smallest-first so the LIFO stack POPS largest-first.
-        //
-        // `scratch` is sorted descending, so iterating it forwards and pushing
-        // would put the smallest child on top of the stack and expand it first.
-        // That matters because `max_tiles` truncates whatever has not been
-        // reached yet: spending the budget smallest-first meant a 1M-node
-        // subtree drew thousands of pinhead tiles from its least significant
-        // corner and then ran out before subdividing the blocks the user can
-        // actually see. The budget belongs to the largest subtrees, which are
-        // the ones occupying enough pixels to be worth resolving.
-        //
-        // Paint order is unaffected: a parent is emitted when it is popped,
-        // before any of its children are pushed, so a node still always precedes
-        // its descendants whatever order its siblings are in.
-        for slot in scratch.iter().take(placed).rev() {
-            if !plan.is_drawable(slot.rect) {
-                continue;
-            }
-            stack.push(Frame {
-                emit: NodeId::from_raw(slot.node),
-                source: NodeId::from_raw(slot.node),
-                category: slot.category,
-                depth: child_depth,
-                region: slot.rect,
-                files_only: false,
-            });
-        }
+        enqueue_children(&plan, &frame, total, &mut scratch, &mut stack);
     }
 
     fit_depth_axis(&mut tiles, &plan);
@@ -273,6 +226,57 @@ pub fn layout_tiles_coloured(
         "layout"
     );
     Ok(tiles)
+}
+
+/// Partitions a frame's children and pushes them onto the walk stack.
+///
+/// Pushed smallest-first so the LIFO stack **pops largest-first**.
+///
+/// `scratch` is sorted descending, so iterating it forwards and pushing would
+/// put the smallest child on top and expand it first. That matters because
+/// `max_tiles` truncates whatever has not been reached yet: spending the budget
+/// smallest-first meant a 1M-node subtree drew thousands of pinhead tiles from
+/// its least significant corner and then ran out before subdividing the blocks
+/// the user can actually see. The budget belongs to the largest subtrees, which
+/// are the ones occupying enough pixels to be worth resolving.
+///
+/// Paint order is unaffected: a parent is emitted when it is popped, before any
+/// of its children are pushed, so a node still always precedes its descendants
+/// whatever order its siblings are in.
+fn enqueue_children(plan: &Plan, frame: &Frame, total: f64, scratch: &mut Vec<Slot>, stack: &mut Vec<Frame>) {
+    let child_depth = frame.depth.saturating_add(1);
+    let cap = plan.child_cap(frame.region, child_depth, scratch.len());
+    if cap == 0 {
+        return;
+    }
+    sort_drawable_prefix(scratch, cap);
+
+    let placed = match plan.kind {
+        LayoutKind::Icicle | LayoutKind::Sunburst => slice(
+            scratch,
+            frame.region.x,
+            frame.region.w,
+            total,
+            plan.min_extent(child_depth),
+        ),
+        // `Treemap`, plus the `#[non_exhaustive]` tail: an unrecognised kind
+        // draws as a treemap rather than as an empty canvas.
+        _ => squarify(scratch, frame.region, total, plan.min_area),
+    };
+
+    for slot in scratch.iter().take(placed).rev() {
+        if !plan.is_drawable(slot.rect) {
+            continue;
+        }
+        stack.push(Frame {
+            emit: NodeId::from_raw(slot.node),
+            source: NodeId::from_raw(slot.node),
+            category: slot.category,
+            depth: child_depth,
+            region: slot.rect,
+            files_only: false,
+        });
+    }
 }
 
 impl Plan {
