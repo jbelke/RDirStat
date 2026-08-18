@@ -5,10 +5,14 @@
  * Renders every shipped icon from one geometric definition, with no image
  * dependencies at all: shapes are signed-distance fields evaluated per pixel,
  * and the PNG/ICO containers are written by hand on top of `node:zlib`. The
- * point is reproducibility — `node scripts/generate-icons.mjs` produces
- * byte-identical output on a developer Mac, in the Docker `assets` profile,
- * and in CI, so "are these still the branded icons?" is a question `git
- * status` can answer.
+ * The point is verifiability. `--check` re-renders and compares against what
+ * is committed, so "are these still the branded icons?" has an answer that is
+ * not somebody's recollection.
+ *
+ * That comparison is on decoded PIXELS, not file bytes: deflate output depends
+ * on the zlib the running Node was linked against, so the same artwork
+ * compresses differently under Node 24 and Node 25. Bytes would make the gate
+ * fail by accident; pixels make it fail only when the artwork changed.
  *
  * That includes the `.icns`, which is written here rather than handed to
  * `iconutil`: `iconutil` is macOS-only AND its output is not byte-stable
@@ -19,7 +23,7 @@
  */
 
 import { Buffer } from "node:buffer";
-import { deflateSync } from "node:zlib";
+import { deflateSync, inflateSync } from "node:zlib";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
@@ -382,6 +386,150 @@ function drawDmgBackground(width, height) {
 // Output
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Reading the containers back, for `--check`
+//
+// The check compares PIXELS, not file bytes. `deflateSync` output depends on
+// the zlib the running Node was linked against — Node 24 carries zlib 1.3.2.1
+// and Node 25 carries 1.2.12, and the two emit different, equally valid
+// streams for identical input. A byte comparison therefore fails on any
+// machine whose Node differs from the one that last regenerated, which would
+// make the gate a nuisance rather than a signal.
+//
+// Decoding costs a hundred lines and answers the question actually being
+// asked: is this the branded artwork?
+// ---------------------------------------------------------------------------
+
+function paeth(a, b, c) {
+  const p = a + b - c;
+  const pa = Math.abs(p - a);
+  const pb = Math.abs(p - b);
+  const pc = Math.abs(p - c);
+  if (pa <= pb && pa <= pc) return a;
+  return pb <= pc ? b : c;
+}
+
+/** Decodes the 8-bit RGBA PNGs this file writes. Not a general decoder. */
+function decodePng(buffer) {
+  if (buffer.length < 8 || buffer.readUInt32BE(0) !== 0x89504e47) {
+    throw new Error("not a PNG");
+  }
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  const parts = [];
+
+  let at = 8;
+  while (at + 8 <= buffer.length) {
+    const length = buffer.readUInt32BE(at);
+    const type = buffer.toString("ascii", at + 4, at + 8);
+    const body = buffer.subarray(at + 8, at + 8 + length);
+    if (type === "IHDR") {
+      width = body.readUInt32BE(0);
+      height = body.readUInt32BE(4);
+      bitDepth = body[8];
+      colorType = body[9];
+    } else if (type === "IDAT") {
+      parts.push(body);
+    } else if (type === "IEND") {
+      break;
+    }
+    at += 12 + length;
+  }
+  if (bitDepth !== 8 || colorType !== 6) {
+    throw new Error(`unsupported PNG: depth ${bitDepth}, colour type ${colorType}`);
+  }
+
+  const raw = inflateSync(Buffer.concat(parts));
+  const bpp = 4;
+  const stride = width * bpp;
+  const pixels = Buffer.alloc(height * stride);
+
+  let read = 0;
+  let write = 0;
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[read];
+    read += 1;
+    for (let x = 0; x < stride; x += 1) {
+      const current = raw[read + x];
+      const left = x >= bpp ? pixels[write + x - bpp] : 0;
+      const above = y > 0 ? pixels[write - stride + x] : 0;
+      const corner = x >= bpp && y > 0 ? pixels[write - stride + x - bpp] : 0;
+      let value;
+      switch (filter) {
+        case 0: value = current; break;
+        case 1: value = current + left; break;
+        case 2: value = current + above; break;
+        case 3: value = current + ((left + above) >> 1); break;
+        case 4: value = current + paeth(left, above, corner); break;
+        default: throw new Error(`unknown PNG filter ${filter}`);
+      }
+      pixels[write + x] = value & 0xff;
+    }
+    read += stride;
+    write += stride;
+  }
+  return { width, height, pixels };
+}
+
+/** The embedded PNGs of an ICO, in directory order. */
+function splitIco(buffer) {
+  const count = buffer.readUInt16LE(4);
+  const members = [];
+  for (let index = 0; index < count; index += 1) {
+    const at = 6 + index * 16;
+    const length = buffer.readUInt32LE(at + 8);
+    const offset = buffer.readUInt32LE(at + 12);
+    members.push(buffer.subarray(offset, offset + length));
+  }
+  return members;
+}
+
+/** The embedded PNGs of an ICNS, in chunk order. The TOC is not one. */
+function splitIcns(buffer) {
+  const members = [];
+  let at = 8;
+  while (at + 8 <= buffer.length) {
+    const type = buffer.toString("ascii", at, at + 4);
+    const length = buffer.readUInt32BE(at + 4);
+    if (length < 8) break;
+    if (type !== "TOC ") members.push(buffer.subarray(at + 8, at + length));
+    at += length;
+  }
+  return members;
+}
+
+/**
+ * True when two assets carry the same artwork, whatever the compressor did.
+ * Any parse failure is a difference: an unreadable committed file is exactly
+ * the situation this check exists to catch.
+ */
+function sameArtwork(path, committed, generated) {
+  try {
+    if (path.endsWith(".svg")) return committed.equals(generated);
+
+    let left = [committed];
+    let right = [generated];
+    if (path.endsWith(".ico")) {
+      left = splitIco(committed);
+      right = splitIco(generated);
+    } else if (path.endsWith(".icns")) {
+      left = splitIcns(committed);
+      right = splitIcns(generated);
+    }
+    if (left.length !== right.length) return false;
+
+    return left.every((member, index) => {
+      const a = decodePng(member);
+      const b = decodePng(right[index]);
+      return a.width === b.width && a.height === b.height && a.pixels.equals(b.pixels);
+    });
+  } catch {
+    return false;
+  }
+}
+
 /**
  * `--check` renders everything in memory and compares it against what is
  * committed instead of writing. That turns "we are not shipping the Tauri v2
@@ -411,7 +559,7 @@ function emit(path, buffer) {
       drifted.push(`${relative(path)} — missing`);
       return;
     }
-    if (current.equals(buffer)) {
+    if (sameArtwork(path, current, buffer)) {
       written.push(relative(path));
     } else {
       drifted.push(

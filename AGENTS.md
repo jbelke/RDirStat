@@ -75,8 +75,12 @@ tracked Markdown links, skill manifests, and rejects known stale claims.
 `scripts/generate-icons.mjs` and compares the result against what is committed,
 because a reverted icon is a silent failure: nothing about a successful build
 reports that the app went back to the Tauri v2 template. Regenerate with
-`just icons`, never by editing a PNG. The generator has no image dependencies
-and is byte-reproducible on any platform, `.icns` included.
+`just icons`, never by editing a PNG and never with `tauri icon`.
+
+The comparison decodes both sides and compares pixels. It cannot compare file
+bytes: `deflateSync` output depends on the zlib the running Node was linked
+against, so the same artwork compresses differently under Node 24 and Node 25,
+and a byte check would fail by accident on half the machines that run it.
 
 Packaging is `./rush.sh dmg` and only runs on macOS. An environment name selects
 `.env.<environment>` and `src-tauri/tauri.<profile>.conf.json`; staging carries
