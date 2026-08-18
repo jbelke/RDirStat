@@ -268,7 +268,7 @@ fn browse_blocking(requested: &str) -> BrowseListing {
         })
         .collect();
 
-    directories.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    directories.sort_by_key(|entry| entry.name.to_lowercase());
     let truncated = directories.len() > MAX_BROWSE_ENTRIES;
     directories.truncate(MAX_BROWSE_ENTRIES);
 
