@@ -128,6 +128,18 @@ pub struct NameBlob {
 }
 
 impl NameBlob {
+    /// Bytes of heap this blob occupies.
+    ///
+    /// `capacity`, not `len`: the question this answers is "how much memory is
+    /// this holding", and a `Vec` that doubled to 4 GiB and then had half its
+    /// contents dropped is still holding 4 GiB. Reporting `len` would make the
+    /// scan-admission budget in `src-tauri` optimistic in exactly the situation
+    /// where it must not be.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        self.bytes.capacity()
+    }
+
     /// An empty blob.
     #[must_use]
     pub const fn new() -> Self {

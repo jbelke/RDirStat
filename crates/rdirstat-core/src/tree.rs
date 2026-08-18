@@ -57,6 +57,29 @@ impl Tree {
         self.nodes.len()
     }
 
+    /// Bytes of heap this arena holds, for the concurrent-scan budget.
+    ///
+    /// The three allocations that scale with the tree: the node array, the name
+    /// blob, and the directory index. Everything else here is a handful of
+    /// scalars.
+    ///
+    /// **A floor, and deliberately named as an estimate.** It counts what this
+    /// crate allocated and cannot see allocator fragmentation, the pages the
+    /// scanner touched and freed, or anything `src-tauri` layered on top. The
+    /// admission control in `src-tauri` reserves headroom precisely because
+    /// this number is a floor rather than a measurement — a scan that was
+    /// admitted on the strength of an exact-looking figure and then pushed the
+    /// process past its RSS gate is the failure this is meant to prevent, so it
+    /// must not read as more precise than it is.
+    #[must_use]
+    pub fn retained_bytes(&self) -> u64 {
+        let nodes = self.nodes.capacity().saturating_mul(core::mem::size_of::<Node>());
+        let total = nodes
+            .saturating_add(self.names.heap_bytes())
+            .saturating_add(self.dirs.heap_bytes());
+        u64::try_from(total).unwrap_or(u64::MAX)
+    }
+
     /// Whether the tree holds no nodes.
     #[must_use]
     pub fn is_empty(&self) -> bool {

@@ -423,17 +423,80 @@ pub struct ScanSummary {
 /// populated at the same time as `state == ScanState::Scanning`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ScanStatus {
-    /// Where the lifecycle is.
+    /// Where the lifecycle is, collapsed to one answer.
+    ///
+    /// The busiest state among the running scans, or `Ready`/`Idle` when none
+    /// are. Kept alongside [`running`](Self::running) rather than replaced by
+    /// it because "is this app busy" is a real question with a scalar answer,
+    /// and every surface that only needs that — the tray, the window title —
+    /// should not have to fold a list to get it.
     pub state: ScanState,
-    /// The active scan, if one is running.
+    /// The newest running scan, if any.
+    ///
+    /// Scalar for the same reason as [`state`](Self::state). A caller that
+    /// cares which scans are running reads [`running`](Self::running).
     pub active_scan: Option<ScanId>,
-    /// The published tree, or [`TreeGeneration::NONE`] if nothing is published.
+    /// The most recently published tree, or [`TreeGeneration::NONE`].
     pub generation: TreeGeneration,
-    /// The published scan's summary, if there is one.
+    /// That tree's summary, if there is one.
     pub summary: Option<ScanSummary>,
-    /// The most recent progress snapshot, so a client that just connected does
-    /// not have to wait up to 100 ms for the next event.
+    /// The most recent progress snapshot from any scan, so a client that just
+    /// connected does not have to wait up to 100 ms for the next event.
     pub last_progress: Option<ScanProgress>,
+    /// Every scan that is running or waiting to run, oldest first.
+    ///
+    /// Empty when nothing is scanning. A scan appears here from the moment it
+    /// is accepted — including while it is *waiting* for a device or for
+    /// memory — because a user who clicked Scan and sees nothing concludes the
+    /// click was lost.
+    pub running: Vec<RunningScanRow>,
+    /// Every completed tree still resident, so the user can switch between
+    /// them. Bounded; the least-recently-read is evicted first and remains
+    /// restorable from the snapshot store.
+    pub ready: Vec<ReadyScanRow>,
+}
+
+/// Why a scan has been accepted but has not started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WaitReason {
+    /// Another scan is already reading this filesystem. Running both would
+    /// finish *later* than running them one after the other, so this one waits.
+    SameDevice {
+        /// The scan it is waiting behind.
+        scan_id: ScanId,
+    },
+    /// Starting now could push the process past its memory budget.
+    Memory,
+}
+
+/// One scan that is running, or waiting to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct RunningScanRow {
+    pub scan_id: ScanId,
+    /// The generation this scan *will* publish under.
+    ///
+    /// Assigned at admission rather than at completion, so the UI can name the
+    /// tree a progress bar is building before that tree exists — and so a
+    /// user's click on a still-running scan has something to address.
+    pub generation: TreeGeneration,
+    /// The root, for a list showing several at once.
+    pub root: DisplayPath,
+    pub state: ScanState,
+    /// `Some` while this scan is waiting rather than running. The UI shows the
+    /// reason, because a progress bar at 0% with no explanation reads as broken.
+    pub waiting: Option<WaitReason>,
+    pub last_progress: Option<ScanProgress>,
+}
+
+/// One completed tree the user can switch to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct ReadyScanRow {
+    pub generation: TreeGeneration,
+    pub scan_id: ScanId,
+    pub root: DisplayPath,
+    pub summary: ScanSummary,
 }
 
 /// One throttled progress snapshot.
