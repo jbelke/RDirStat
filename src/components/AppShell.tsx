@@ -569,6 +569,25 @@ export function AppShell() {
    * pass a state check and race, and the second `scan_start` would come back
    * `AlreadyScanning` — a confusing error for a button that looks idle.
    */
+  /**
+   * Plain English for the one refusal a drive switch can still hit.
+   *
+   * `restore_snapshot` answers `internal: a scan is running; cancel it first`,
+   * which is the right refusal and the wrong sentence to put in front of
+   * someone: it names a command they did not type and a state they thought
+   * they had already dealt with. `switchDrive` stops the scan first precisely
+   * so this should not happen — but a scan started from another window, or one
+   * that has not finished stopping, can still produce it, and the message
+   * should say what to do rather than what the backend called it.
+   */
+  const describeSwitchFailure = (cause: unknown): string => {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    if (message.includes("a scan is running")) {
+      return "That drive could not be put on screen because a scan is still stopping. Try again in a moment.";
+    }
+    return message;
+  };
+
   const switchDrive = useCallback(
     (next: () => Promise<void>) => {
       if (switchingRef.current) return;
@@ -579,7 +598,7 @@ export function AppShell() {
           await supersedeRunningScan();
           await next();
         } catch (cause) {
-          setActionError(cause instanceof Error ? cause.message : String(cause));
+          setActionError(describeSwitchFailure(cause));
         } finally {
           switchingRef.current = false;
           setCancelling(false);
