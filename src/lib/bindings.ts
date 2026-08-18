@@ -338,6 +338,25 @@ export const commands = {
 	 */
 	revealInFinder: (generation: TreeGeneration, node: NodeId) => typedError<null, ActionError>(__TAURI_INVOKE("reveal_in_finder", { generation, node })),
 	/**
+	 *  What two folders each hold, for the side-by-side view.
+	 * 
+	 *  Symmetric and read-only. It takes a left and a right rather than a source
+	 *  and a destination because the direction is chosen *after* looking, and it
+	 *  mints no token: copying still goes through [`sync_plan`] and [`sync_apply`],
+	 *  which are the only things that may authorize a write.
+	 * 
+	 *  `differences_only` drops rows the two sides agree about. The row listing is
+	 *  capped, and in a real pair of folders the agreements outnumber the
+	 *  differences by orders of magnitude, so leaving them in spends the cap on
+	 *  rows nobody needs to read. The counts are complete either way.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`SyncError`] for a path that is relative, missing, not a directory, or that
+	 *  overlaps the other side.
+	 */
+	syncDiff: (left: string, right: string, compareMode: CompareMode, differencesOnly: boolean) => typedError<SyncDiff, SyncError>(__TAURI_INVOKE("sync_diff", { left, right, compareMode, differencesOnly })),
+	/**
 	 *  What a folder sync would copy, and the token that authorizes it.
 	 * 
 	 *  Walks the source and `stat`s each matching destination path. Under
@@ -2949,6 +2968,54 @@ export type StoredSnapshot = {
 	/**  The build that wrote it, so an unreadable one has a suspect. */
 	tool_version: string,
 };
+
+/**  What two folders each have, and where they disagree. */
+export type SyncDiff = {
+	left: DisplayPath,
+	right: DisplayPath,
+	compare_mode: CompareMode,
+	entries: SyncDiffEntry[],
+	only_left: number,
+	only_right: number,
+	same: number,
+	differing: number,
+	bytes_only_left: number,
+	bytes_only_right: number,
+	unreadable: number,
+	special_skipped: number,
+	entries_truncated: boolean,
+	left_filesystem: string,
+	right_filesystem: string,
+	left_available: number,
+	right_available: number,
+};
+
+/**
+ *  One row of the side-by-side view.
+ * 
+ *  A row is a *path*, not a file, which is what makes the two panes line up:
+ *  both sides render the same ordered row list and leave a gap where their side
+ *  has nothing. Alignment falls out of the data instead of being a scroll-sync
+ *  problem in the UI.
+ */
+export type SyncDiffEntry = {
+	relative_path: string,
+	status: SyncDiffStatus,
+	/**  `None` means that side does not have this path at all. */
+	left_bytes: number | null,
+	right_bytes: number | null,
+};
+
+/**  Which side holds a file, and whether the two copies agree. */
+export type SyncDiffStatus = 
+/**  Only the left folder has it. */
+"only_left" | 
+/**  Only the right folder has it. */
+"only_right" | 
+/**  Both have it, and they agree as far as the compare mode looked. */
+"same" | 
+/**  Both have it and they do not agree. */
+"differs";
 
 /**  One file the sync would copy. */
 export type SyncEntry = {

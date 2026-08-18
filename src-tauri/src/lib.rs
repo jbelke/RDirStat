@@ -116,6 +116,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::trash_preview,
             commands::move_to_trash,
             commands::reveal_in_finder,
+            commands::sync_diff,
             commands::sync_plan,
             commands::sync_apply,
             commands::storage_report,

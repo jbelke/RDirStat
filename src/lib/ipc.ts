@@ -1183,6 +1183,81 @@ export interface SyncReportView {
 }
 
 /** What a sync would copy. Never writes anything. */
+export type SyncDiffStatus = "only_left" | "only_right" | "same" | "differs";
+
+/** One aligned row of the side-by-side view. */
+export interface SyncDiffEntryView {
+  readonly relativePath: string;
+  readonly status: SyncDiffStatus;
+  /** `null` means that side does not have this path at all. */
+  readonly leftBytes: number | null;
+  readonly rightBytes: number | null;
+}
+
+/**
+ * What two folders each hold.
+ *
+ * Symmetric on purpose — `left`/`right`, not source/destination. Direction is
+ * chosen after looking, and a comparison that already knew the direction would
+ * have to be re-read every time the user changed their mind about it.
+ */
+export interface SyncDiffView {
+  readonly left: string;
+  readonly right: string;
+  readonly entries: readonly SyncDiffEntryView[];
+  /** True counts, even when `entries` was capped or filtered for display. */
+  readonly onlyLeft: number;
+  readonly onlyRight: number;
+  readonly same: number;
+  readonly differing: number;
+  readonly bytesOnlyLeft: number;
+  readonly bytesOnlyRight: number;
+  readonly unreadable: number;
+  readonly specialSkipped: number;
+  readonly entriesTruncated: boolean;
+  readonly leftFilesystem: string;
+  readonly rightFilesystem: string;
+  readonly leftAvailable: number;
+  readonly rightAvailable: number;
+}
+
+/**
+ * Compares two folders without proposing to change either.
+ *
+ * Read-only and tokenless: copying still goes through `syncPlan`/`syncApply`.
+ */
+export async function syncDiff(
+  left: string,
+  right: string,
+  compareMode: CompareMode,
+  differencesOnly: boolean,
+): Promise<SyncDiffView> {
+  const result = await unwrap("sync_diff", commands.syncDiff(left, right, compareMode, differencesOnly));
+  return {
+    left: result.left,
+    right: result.right,
+    entries: result.entries.map((entry) => ({
+      relativePath: entry.relative_path,
+      status: entry.status,
+      leftBytes: entry.left_bytes === null ? null : num(entry.left_bytes),
+      rightBytes: entry.right_bytes === null ? null : num(entry.right_bytes),
+    })),
+    onlyLeft: num(result.only_left),
+    onlyRight: num(result.only_right),
+    same: num(result.same),
+    differing: num(result.differing),
+    bytesOnlyLeft: num(result.bytes_only_left),
+    bytesOnlyRight: num(result.bytes_only_right),
+    unreadable: num(result.unreadable),
+    specialSkipped: num(result.special_skipped),
+    entriesTruncated: result.entries_truncated,
+    leftFilesystem: result.left_filesystem,
+    rightFilesystem: result.right_filesystem,
+    leftAvailable: num(result.left_available),
+    rightAvailable: num(result.right_available),
+  };
+}
+
 export async function syncPlan(
   source: string,
   destination: string,

@@ -637,6 +637,315 @@ pub(crate) fn plan<S: BuildHasher>(
 }
 
 // ---------------------------------------------------------------------------
+// Comparing
+// ---------------------------------------------------------------------------
+
+/// Ceiling on rows a comparison will enumerate.
+///
+/// Separate from [`MAX_PLANNED_ENTRIES`] because it bounds a different thing: a
+/// plan lists what will be written, a comparison lists what exists on either
+/// side, and the second is the larger number by however many files the two
+/// folders already agree about.
+pub(crate) const MAX_DIFF_ROWS: usize = 5_000;
+
+/// Which side holds a file, and whether the two copies agree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SyncDiffStatus {
+    /// Only the left folder has it.
+    OnlyLeft,
+    /// Only the right folder has it.
+    OnlyRight,
+    /// Both have it, and they agree as far as the compare mode looked.
+    Same,
+    /// Both have it and they do not agree.
+    Differs,
+}
+
+/// One row of the side-by-side view.
+///
+/// A row is a *path*, not a file, which is what makes the two panes line up:
+/// both sides render the same ordered row list and leave a gap where their side
+/// has nothing. Alignment falls out of the data instead of being a scroll-sync
+/// problem in the UI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub(crate) struct SyncDiffEntry {
+    pub relative_path: String,
+    pub status: SyncDiffStatus,
+    /// `None` means that side does not have this path at all.
+    pub left_bytes: Option<u64>,
+    pub right_bytes: Option<u64>,
+}
+
+/// What two folders each have, and where they disagree.
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+pub(crate) struct SyncDiff {
+    pub left: DisplayPath,
+    pub right: DisplayPath,
+    pub compare_mode: CompareMode,
+    pub entries: Vec<SyncDiffEntry>,
+    pub only_left: u64,
+    pub only_right: u64,
+    pub same: u64,
+    pub differing: u64,
+    pub bytes_only_left: u64,
+    pub bytes_only_right: u64,
+    pub unreadable: u64,
+    pub special_skipped: u64,
+    pub entries_truncated: bool,
+    pub left_filesystem: String,
+    pub right_filesystem: String,
+    pub left_available: u64,
+    pub right_available: u64,
+}
+
+/// What to compare, and how hard to look.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DiffRequest<'a> {
+    pub left: &'a Path,
+    pub right: &'a Path,
+    pub compare_mode: CompareMode,
+    /// Drops rows the two sides agree about.
+    ///
+    /// Not cosmetic: the row listing is capped, and in any real pair of folders
+    /// the agreements outnumber the differences by orders of magnitude. Without
+    /// this the cap is spent on rows nobody needs to read and the differences —
+    /// the entire reason for looking — fall off the end.
+    pub differences_only: bool,
+}
+
+/// Running totals while walking both sides.
+#[derive(Debug, Default)]
+struct DiffTally {
+    only_left: u64,
+    only_right: u64,
+    same: u64,
+    differing: u64,
+    bytes_only_left: u64,
+    bytes_only_right: u64,
+    unreadable: u64,
+    special_skipped: u64,
+    /// Rows that passed the `differences_only` filter, capped or not.
+    recordable: u64,
+}
+
+/// Reads one directory level, or accounts for its absence.
+///
+/// A missing directory is not an error: a folder that exists on one side only
+/// is the most ordinary thing this can find, and it is how an entire subtree
+/// gets reported as `OnlyLeft`. Only a directory that exists and refuses to be
+/// read is counted as unreadable.
+fn children_of(here: &Path, unreadable: &mut u64) -> BTreeMap<std::ffi::OsString, fs::DirEntry> {
+    match fs::read_dir(here) {
+        Ok(read) => read.flatten().map(|entry| (entry.file_name(), entry)).collect(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(_) => {
+            *unreadable = unreadable.saturating_add(1);
+            BTreeMap::new()
+        }
+    }
+}
+
+/// True for a thing `ditto` could carry, or for a side that has nothing here.
+fn copyable(kind: Option<fs::FileType>) -> bool {
+    match kind {
+        None => true,
+        Some(kind) => kind.is_file() || kind.is_symlink(),
+    }
+}
+
+/// Walks both trees together, one directory level at a time.
+///
+/// This enumerates BOTH sides, which is exactly what [`walk`] refuses to do and
+/// for a reason worth stating: `walk` answers "what is the destination
+/// missing", and it can answer that with one `stat` per source file and no map
+/// of the destination at all. This answers "what do these two folders each
+/// have", and there is no way to know what the right side holds alone without
+/// reading it. The extra cost is one directory read per level per side, and the
+/// transient memory is the union of one level's names — not of the tree.
+fn walk_pair(
+    request: DiffRequest<'_>,
+    relative: &Path,
+    cap: usize,
+    entries: &mut Vec<SyncDiffEntry>,
+    tally: &mut DiffTally,
+) {
+    let left_children = children_of(&request.left.join(relative), &mut tally.unreadable);
+    let right_children = children_of(&request.right.join(relative), &mut tally.unreadable);
+
+    // Sorted union, so the two panes are in the same order as each other and
+    // the same order between runs.
+    let names: BTreeSet<std::ffi::OsString> = left_children.keys().chain(right_children.keys()).cloned().collect();
+
+    for name in names {
+        if SKIPPED_DIRECTORY_NAMES.iter().any(|skip| name == *skip) {
+            continue;
+        }
+        let child = relative.join(&name);
+        let left_kind = left_children.get(&name).and_then(|entry| entry.file_type().ok());
+        let right_kind = right_children.get(&name).and_then(|entry| entry.file_type().ok());
+        let left_dir = left_kind.is_some_and(|kind| kind.is_dir());
+        let right_dir = right_kind.is_some_and(|kind| kind.is_dir());
+
+        // A folder on one side and a file on the other. Descending would
+        // compare a directory's children against a file's absence and report
+        // the whole subtree as missing, which is true of the path and a lie
+        // about the cause. Report the clash itself and stop.
+        let clashes = (left_dir && right_kind.is_some_and(|kind| !kind.is_dir()))
+            || (right_dir && left_kind.is_some_and(|kind| !kind.is_dir()));
+        if clashes {
+            tally.differing = tally.differing.saturating_add(1);
+            tally.recordable = tally.recordable.saturating_add(1);
+            if entries.len() < cap {
+                entries.push(SyncDiffEntry {
+                    relative_path: child.display().to_string(),
+                    status: SyncDiffStatus::Differs,
+                    left_bytes: None,
+                    right_bytes: None,
+                });
+            }
+            continue;
+        }
+
+        if left_dir || right_dir {
+            walk_pair(request, &child, cap, entries, tally);
+            continue;
+        }
+
+        if !copyable(left_kind) || !copyable(right_kind) {
+            tally.special_skipped = tally.special_skipped.saturating_add(1);
+            continue;
+        }
+
+        let left_bytes = left_children
+            .get(&name)
+            .and_then(|entry| entry.metadata().ok())
+            .map(|meta| meta.len());
+        let right_bytes = right_children
+            .get(&name)
+            .and_then(|entry| entry.metadata().ok())
+            .map(|meta| meta.len());
+
+        // Present but unmeasurable. Reporting it as absent would put it in the
+        // copy set for a direction the user did not ask for, so it is counted
+        // as unreadable and left out of the row list entirely.
+        if (left_kind.is_some() && left_bytes.is_none()) || (right_kind.is_some() && right_bytes.is_none()) {
+            tally.unreadable = tally.unreadable.saturating_add(1);
+            continue;
+        }
+
+        let status = match (left_bytes, right_bytes) {
+            (Some(_), None) => SyncDiffStatus::OnlyLeft,
+            (None, Some(_)) => SyncDiffStatus::OnlyRight,
+            (None, None) => continue,
+            (Some(left_size), Some(right_size)) => {
+                let both_plain =
+                    left_kind.is_some_and(|kind| kind.is_file()) && right_kind.is_some_and(|kind| kind.is_file());
+                // Short-circuits deliberately: a size mismatch already settles
+                // it, and reading both files in full to confirm what `stat`
+                // just proved is the expensive half of Verify.
+                let differs = left_size != right_size
+                    || (request.compare_mode == CompareMode::Verify
+                        && both_plain
+                        && contents_differ(&request.left.join(&child), &request.right.join(&child)).unwrap_or(false));
+                if differs {
+                    SyncDiffStatus::Differs
+                } else {
+                    SyncDiffStatus::Same
+                }
+            }
+        };
+
+        match status {
+            SyncDiffStatus::OnlyLeft => {
+                tally.only_left = tally.only_left.saturating_add(1);
+                tally.bytes_only_left = tally.bytes_only_left.saturating_add(left_bytes.unwrap_or(0));
+            }
+            SyncDiffStatus::OnlyRight => {
+                tally.only_right = tally.only_right.saturating_add(1);
+                tally.bytes_only_right = tally.bytes_only_right.saturating_add(right_bytes.unwrap_or(0));
+            }
+            SyncDiffStatus::Same => tally.same = tally.same.saturating_add(1),
+            SyncDiffStatus::Differs => tally.differing = tally.differing.saturating_add(1),
+        }
+
+        if request.differences_only && status == SyncDiffStatus::Same {
+            continue;
+        }
+        tally.recordable = tally.recordable.saturating_add(1);
+        if entries.len() < cap {
+            entries.push(SyncDiffEntry {
+                relative_path: child.display().to_string(),
+                status,
+                left_bytes,
+                right_bytes,
+            });
+        }
+    }
+}
+
+/// Describes what two folders each hold, without proposing to change either.
+///
+/// **Read-only, and it mints no token.** A token means "the user reviewed a
+/// specific additive set and this is the authority to write it"; a comparison
+/// is not that, and handing one out here would create a second way to authorize
+/// a write that never went through [`plan`]. Copying still goes plan → token →
+/// apply, in whichever direction the user picks.
+///
+/// The comparison is symmetric — it takes a left and a right, not a source and
+/// a destination — because direction is the user's choice made *after* seeing
+/// this, and baking it in would mean re-reading both trees every time they
+/// changed their mind.
+///
+/// # Errors
+///
+/// A relative path, a path that is not a directory, or two paths that overlap.
+pub(crate) fn diff(request: DiffRequest<'_>, cap: usize) -> Result<SyncDiff, SyncError> {
+    for path in [request.left, request.right] {
+        if !acceptable(path) {
+            return Err(SyncError::BadPath {
+                path: display(path),
+                reason: "it must be an absolute path with no `..` segments".to_owned(),
+            });
+        }
+        if !path.is_dir() {
+            return Err(SyncError::BadPath {
+                path: display(path),
+                reason: "it is not a directory".to_owned(),
+            });
+        }
+    }
+    check_disjoint(request.left, request.right)?;
+
+    let mut entries = Vec::new();
+    let mut tally = DiffTally::default();
+    walk_pair(request, Path::new(""), cap, &mut entries, &mut tally);
+
+    let (left_available, left_filesystem) = filesystem_facts(request.left);
+    let (right_available, right_filesystem) = filesystem_facts(request.right);
+
+    Ok(SyncDiff {
+        left: display(request.left),
+        right: display(request.right),
+        compare_mode: request.compare_mode,
+        entries_truncated: tally.recordable > entries.len() as u64,
+        entries,
+        only_left: tally.only_left,
+        only_right: tally.only_right,
+        same: tally.same,
+        differing: tally.differing,
+        bytes_only_left: tally.bytes_only_left,
+        bytes_only_right: tally.bytes_only_right,
+        unreadable: tally.unreadable,
+        special_skipped: tally.special_skipped,
+        left_filesystem,
+        right_filesystem,
+        left_available,
+        right_available,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Applying
 // ---------------------------------------------------------------------------
 
@@ -1576,5 +1885,293 @@ mod tests {
         )
         .expect_err("a changed source must invalidate the plan");
         assert!(matches!(error, SyncError::InvalidConfirmation), "got {error:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Comparing
+    // -----------------------------------------------------------------------
+
+    fn diff_of(left: &Path, right: &Path, mode: CompareMode) -> SyncDiff {
+        diff(
+            DiffRequest {
+                left,
+                right,
+                compare_mode: mode,
+                differences_only: false,
+            },
+            MAX_DIFF_ROWS,
+        )
+        .expect("comparable")
+    }
+
+    fn row<'a>(result: &'a SyncDiff, relative_path: &str) -> &'a SyncDiffEntry {
+        result
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == relative_path)
+            .unwrap_or_else(|| panic!("no row for {relative_path}: {:?}", result.entries))
+    }
+
+    #[test]
+    fn each_side_is_reported_with_the_sizes_it_actually_has() {
+        let scratch = scratch();
+        let (left, right) = (scratch.path().join("l"), scratch.path().join("r"));
+        write(&left, "mine.txt", b"left only");
+        write(&right, "theirs.txt", b"right");
+        write(&left, "both.txt", b"same");
+        write(&right, "both.txt", b"same");
+
+        let result = diff_of(&left, &right, CompareMode::Quick);
+
+        assert_eq!(row(&result, "mine.txt").status, SyncDiffStatus::OnlyLeft);
+        assert_eq!(row(&result, "mine.txt").left_bytes, Some(9));
+        assert_eq!(row(&result, "mine.txt").right_bytes, None);
+        assert_eq!(row(&result, "theirs.txt").status, SyncDiffStatus::OnlyRight);
+        assert_eq!(row(&result, "theirs.txt").left_bytes, None);
+        assert_eq!(row(&result, "both.txt").status, SyncDiffStatus::Same);
+        assert_eq!(result.only_left, 1);
+        assert_eq!(result.only_right, 1);
+        assert_eq!(result.same, 1);
+        assert_eq!(result.bytes_only_left, 9);
+        assert_eq!(result.bytes_only_right, 5);
+    }
+
+    /// The comparison is a view, and a view that edits what it looks at is a
+    /// bug of the worst kind. Asserted rather than assumed.
+    #[test]
+    fn comparing_writes_nothing_to_either_side() {
+        let scratch = scratch();
+        let (left, right) = (scratch.path().join("l"), scratch.path().join("r"));
+        write(&left, "a.txt", b"aaa");
+        write(&left, "deep/b.txt", b"bb");
+        write(&right, "c.txt", b"c");
+
+        let before = |root: &Path| {
+            let mut found: Vec<String> = Vec::new();
+            let mut stack = vec![root.to_path_buf()];
+            while let Some(here) = stack.pop() {
+                for entry in fs::read_dir(&here).expect("read").flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path.clone());
+                    }
+                    found.push(path.display().to_string());
+                }
+            }
+            found.sort();
+            found
+        };
+
+        let (left_before, right_before) = (before(&left), before(&right));
+        let _ = diff_of(&left, &right, CompareMode::Verify);
+        assert_eq!(before(&left), left_before);
+        assert_eq!(before(&right), right_before);
+    }
+
+    #[test]
+    fn a_same_sized_file_with_different_contents_only_shows_up_under_verify() {
+        let scratch = scratch();
+        let (left, right) = (scratch.path().join("l"), scratch.path().join("r"));
+        write(&left, "same-size.txt", b"aaaa");
+        write(&right, "same-size.txt", b"bbbb");
+
+        assert_eq!(
+            row(&diff_of(&left, &right, CompareMode::Quick), "same-size.txt").status,
+            SyncDiffStatus::Same
+        );
+        assert_eq!(
+            row(&diff_of(&left, &right, CompareMode::Verify), "same-size.txt").status,
+            SyncDiffStatus::Differs
+        );
+    }
+
+    #[test]
+    fn a_folder_only_one_side_has_reports_every_file_under_it() {
+        let scratch = scratch();
+        let (left, right) = (scratch.path().join("l"), scratch.path().join("r"));
+        write(&left, "album/one.jpg", b"1");
+        write(&left, "album/nested/two.jpg", b"22");
+        fs::create_dir_all(&right).expect("right root");
+
+        let result = diff_of(&left, &right, CompareMode::Quick);
+
+        assert_eq!(result.only_left, 2);
+        assert_eq!(row(&result, "album/one.jpg").status, SyncDiffStatus::OnlyLeft);
+        assert_eq!(row(&result, "album/nested/two.jpg").status, SyncDiffStatus::OnlyLeft);
+    }
+
+    /// Descending here would report every file under the folder as missing,
+    /// which is true of each path and a lie about what is wrong.
+    #[test]
+    fn a_folder_facing_a_file_is_one_difference_not_a_whole_subtree() {
+        let scratch = scratch();
+        let (left, right) = (scratch.path().join("l"), scratch.path().join("r"));
+        write(&left, "thing/inside.txt", b"deep");
+        write(&right, "thing", b"actually a file");
+
+        let result = diff_of(&left, &right, CompareMode::Quick);
+
+        assert_eq!(result.differing, 1);
+        assert_eq!(result.only_left, 0);
+        assert_eq!(row(&result, "thing").status, SyncDiffStatus::Differs);
+        assert!(
+            result
+                .entries
+                .iter()
+                .all(|entry| entry.relative_path != "thing/inside.txt")
+        );
+    }
+
+    /// The cap is spent on differences, but the agreements are still counted —
+    /// a filtered listing must not become a wrong total.
+    #[test]
+    fn differences_only_hides_agreements_without_forgetting_them() {
+        let scratch = scratch();
+        let (left, right) = (scratch.path().join("l"), scratch.path().join("r"));
+        for index in 0..5 {
+            let name = format!("agreed-{index}.txt");
+            write(&left, &name, b"identical");
+            write(&right, &name, b"identical");
+        }
+        write(&left, "only-here.txt", b"x");
+
+        let filtered = diff(
+            DiffRequest {
+                left: &left,
+                right: &right,
+                compare_mode: CompareMode::Quick,
+                differences_only: true,
+            },
+            MAX_DIFF_ROWS,
+        )
+        .expect("comparable");
+
+        assert_eq!(filtered.same, 5, "agreements are still counted");
+        assert_eq!(filtered.entries.len(), 1, "but not listed");
+        assert_eq!(filtered.entries[0].relative_path, "only-here.txt");
+        assert!(!filtered.entries_truncated, "filtering is not truncation");
+    }
+
+    #[test]
+    fn the_row_listing_is_capped_and_says_so() {
+        let scratch = scratch();
+        let (left, right) = (scratch.path().join("l"), scratch.path().join("r"));
+        for index in 0..12 {
+            write(&left, &format!("file-{index:03}.txt"), b"x");
+        }
+        fs::create_dir_all(&right).expect("right root");
+
+        let result = diff(
+            DiffRequest {
+                left: &left,
+                right: &right,
+                compare_mode: CompareMode::Quick,
+                differences_only: false,
+            },
+            5,
+        )
+        .expect("comparable");
+
+        assert_eq!(result.entries.len(), 5);
+        assert_eq!(result.only_left, 12, "the count is complete even when the list is not");
+        assert!(result.entries_truncated);
+    }
+
+    /// Both panes render the same ordered row list, which is what makes them
+    /// line up without any scroll-syncing in the UI.
+    #[test]
+    fn rows_come_back_in_one_stable_sorted_order() {
+        let scratch = scratch();
+        let (left, right) = (scratch.path().join("l"), scratch.path().join("r"));
+        write(&left, "b.txt", b"b");
+        write(&right, "a.txt", b"a");
+        write(&left, "c.txt", b"c");
+        write(&right, "c.txt", b"c");
+
+        let result = diff_of(&left, &right, CompareMode::Quick);
+        let names: Vec<&str> = result
+            .entries
+            .iter()
+            .map(|entry| entry.relative_path.as_str())
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted);
+    }
+
+    #[test]
+    fn a_folder_cannot_be_compared_with_itself_or_its_own_child() {
+        let scratch = scratch();
+        let root = scratch.path().join("l");
+        write(&root, "inner/thing.txt", b"x");
+        let inner = root.join("inner");
+
+        assert!(matches!(
+            diff(
+                DiffRequest {
+                    left: &root,
+                    right: &root,
+                    compare_mode: CompareMode::Quick,
+                    differences_only: false
+                },
+                MAX_DIFF_ROWS
+            ),
+            Err(SyncError::Overlapping { .. })
+        ));
+        assert!(matches!(
+            diff(
+                DiffRequest {
+                    left: &root,
+                    right: &inner,
+                    compare_mode: CompareMode::Quick,
+                    differences_only: false
+                },
+                MAX_DIFF_ROWS
+            ),
+            Err(SyncError::Overlapping { .. })
+        ));
+    }
+
+    #[test]
+    fn a_relative_path_is_refused_before_anything_is_read() {
+        let scratch = scratch();
+        let right = scratch.path().join("r");
+        fs::create_dir_all(&right).expect("right root");
+
+        assert!(matches!(
+            diff(
+                DiffRequest {
+                    left: Path::new("relative/thing"),
+                    right: &right,
+                    compare_mode: CompareMode::Quick,
+                    differences_only: false
+                },
+                MAX_DIFF_ROWS
+            ),
+            Err(SyncError::BadPath { .. })
+        ));
+    }
+
+    /// Swapping the two arguments must mirror the answer exactly. Direction is
+    /// the user's choice made after seeing this, so a comparison that read
+    /// differently depending on argument order would make that choice a lie.
+    #[test]
+    fn swapping_the_sides_mirrors_the_result() {
+        let scratch = scratch();
+        let (left, right) = (scratch.path().join("l"), scratch.path().join("r"));
+        write(&left, "mine.txt", b"left only");
+        write(&right, "theirs.txt", b"right");
+        write(&left, "both.txt", b"same");
+        write(&right, "both.txt", b"same");
+
+        let forward = diff_of(&left, &right, CompareMode::Quick);
+        let backward = diff_of(&right, &left, CompareMode::Quick);
+
+        assert_eq!(forward.only_left, backward.only_right);
+        assert_eq!(forward.only_right, backward.only_left);
+        assert_eq!(forward.same, backward.same);
+        assert_eq!(forward.bytes_only_left, backward.bytes_only_right);
+        assert_eq!(row(&backward, "mine.txt").status, SyncDiffStatus::OnlyRight);
+        assert_eq!(row(&backward, "mine.txt").right_bytes, Some(9));
     }
 }

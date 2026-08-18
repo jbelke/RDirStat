@@ -30,7 +30,7 @@ use crate::relocate::{RelocateError, RelocateMode, RelocatePlan, RelocateReport,
 use crate::remote::{self, RemoteConfigError};
 use crate::state::AppState;
 use crate::storage::{self, StorageReport};
-use crate::sync::{self, CompareMode, OnDiffer, SyncError, SyncPlan, SyncReport};
+use crate::sync::{self, CompareMode, OnDiffer, SyncDiff, SyncError, SyncPlan, SyncReport};
 use crate::transfers::{self, JobState, TransferId, TransferJob, TransferManager};
 use crate::{actions, progress, query, relocate, volumes};
 use rdirstat_remote::RemotePlan;
@@ -1305,6 +1305,46 @@ pub(crate) async fn sync_apply(
                 on_differ,
             },
             &confirmation,
+        )
+    })
+    .await
+    .map_err(|error| SyncError::Internal(error.to_string()))?
+}
+
+/// What two folders each hold, for the side-by-side view.
+///
+/// Symmetric and read-only. It takes a left and a right rather than a source
+/// and a destination because the direction is chosen *after* looking, and it
+/// mints no token: copying still goes through [`sync_plan`] and [`sync_apply`],
+/// which are the only things that may authorize a write.
+///
+/// `differences_only` drops rows the two sides agree about. The row listing is
+/// capped, and in a real pair of folders the agreements outnumber the
+/// differences by orders of magnitude, so leaving them in spends the cap on
+/// rows nobody needs to read. The counts are complete either way.
+///
+/// # Errors
+///
+/// [`SyncError`] for a path that is relative, missing, not a directory, or that
+/// overlaps the other side.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn sync_diff(
+    _state: tauri::State<'_, AppState>,
+    left: String,
+    right: String,
+    compare_mode: CompareMode,
+    differences_only: bool,
+) -> Result<SyncDiff, SyncError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sync::diff(
+            sync::DiffRequest {
+                left: Path::new(&left),
+                right: Path::new(&right),
+                compare_mode,
+                differences_only,
+            },
+            sync::MAX_DIFF_ROWS,
         )
     })
     .await

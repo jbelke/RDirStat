@@ -21,8 +21,15 @@ import { cn } from "@/lib/utils";
 
 export interface SegmentedOption<T extends string> {
   readonly value: T;
-  readonly label: string;
+  /**
+   * What the segment shows. An icon is allowed — set `srLabel` when it is one,
+   * because an icon-only segment otherwise reaches a screen reader as a radio
+   * button with no name at all.
+   */
+  readonly label: React.ReactNode;
   readonly title?: string;
+  /** The accessible name, for when `label` is not readable text. */
+  readonly srLabel?: string;
 }
 
 export interface SegmentedControlProps<T extends string> {
@@ -73,6 +80,7 @@ export function SegmentedControl<T extends string>({
               className="sr-only"
             />
             {option.label}
+            {option.srLabel !== undefined && <span className="sr-only">{option.srLabel}</span>}
           </label>
         );
       })}
