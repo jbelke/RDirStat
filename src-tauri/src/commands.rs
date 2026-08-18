@@ -1507,17 +1507,32 @@ pub(crate) async fn layout(
         }
 
         let options = rdirstat_treemap::LayoutOptions::new(kind, viewport, min_px)?.with_metric(metric);
+        // What colour a *folder* is. The scanner categorises files, so without
+        // this every directory tile is uncategorized — invisible under a
+        // treemap's leaves and the entire picture in an icicle or sunburst,
+        // which are bounded by depth and on a deep disk never reach a file.
+        // Cached on (generation, root, metric), so a resize pays for it once.
+        let cache = tauri::Manager::state::<AppState>(&app);
+        let colours = cache.dominant_categories(&scan, root, metric);
         match filter {
-            None => Ok(rdirstat_treemap::layout_with(&scan.tree, generation, root, &options)?),
+            None => {
+                let tiles = rdirstat_treemap::layout_tiles_coloured(&scan.tree, root, &options, None, Some(&colours))?;
+                Ok(rdirstat_treemap::tiles_to_response(&tiles, generation)?)
+            }
             Some(set) => {
                 let options = options.with_categories(Some(set));
                 // Reused across a window resize: the weights do not depend on
                 // the viewport, and rebuilding them per drag step is the
                 // difference between paying 163 ms once and paying it
                 // continuously while the edge is being dragged.
-                let cache = tauri::Manager::state::<AppState>(&app);
                 let weights = cache.filter_weights(&scan, root, options.metric, set);
-                let tiles = rdirstat_treemap::layout_tiles_with(&scan.tree, root, &options, Some(&weights))?;
+                let tiles = rdirstat_treemap::layout_tiles_coloured(
+                    &scan.tree,
+                    root,
+                    &options,
+                    Some(&weights),
+                    Some(&colours),
+                )?;
                 Ok(rdirstat_treemap::tiles_to_response(&tiles, generation)?)
             }
         }

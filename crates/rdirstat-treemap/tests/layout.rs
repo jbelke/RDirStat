@@ -1047,3 +1047,116 @@ fn the_size_metric_decides_which_bytes_the_areas_encode() {
         "and the file that does occupy blocks must own the allocated layout: {solid_allocated}"
     );
 }
+
+// --------------------------------------- a folder is coloured by its content --
+
+/// ```text
+/// root
+///   media/
+///     clip.mov   9_000   (category 3)
+///     notes.txt    100   (category 7)
+///   code/
+///     deep/
+///       lib.rs     500   (category 7)
+/// ```
+fn categorised_tree() -> Tree {
+    fn push_categorised(
+        builder: &mut TreeBuilder,
+        parent: NodeId,
+        name: &[u8],
+        bytes: u64,
+        category: u8,
+    ) -> Result<NodeId, ArenaError> {
+        let reference = builder.intern(name)?;
+        let node = Node::leaf(reference, Kind::File, bytes, bytes, MTIME).with_category(CategoryId::from_raw(category));
+        let id = builder.push_child(parent, node)?;
+        if let Some(totals) = builder.dir_totals_mut(parent) {
+            totals.absorb_direct_file(bytes, bytes, MTIME);
+        }
+        Ok(id)
+    }
+
+    let mut builder = TreeBuilder::new();
+    let root = push_dir(&mut builder, None, b"root").expect("root");
+    let media = push_dir(&mut builder, Some(root), b"media").expect("media");
+    push_categorised(&mut builder, media, b"clip.mov", 9_000, 3).expect("clip.mov");
+    push_categorised(&mut builder, media, b"notes.txt", 100, 7).expect("notes.txt");
+    let code = push_dir(&mut builder, Some(root), b"code").expect("code");
+    let deep = push_dir(&mut builder, Some(code), b"deep").expect("deep");
+    push_categorised(&mut builder, deep, b"lib.rs", 500, 7).expect("lib.rs");
+    builder.rollup().expect("rollup");
+    builder.finish().expect("finish")
+}
+
+/// A directory tile takes the category of the heaviest thing inside it.
+///
+/// The bug this pins was reported from a sunburst of an 8 TB disk: every ring
+/// was grey. Icicle and sunburst draw a bounded number of *levels*, so on a
+/// deep tree every drawn tile is a directory — and a directory has no content
+/// category, so the whole chart came out one colour and said nothing.
+#[test]
+fn a_directory_borrows_the_category_of_the_biggest_thing_inside_it() {
+    let tree = categorised_tree();
+    let root = NodeId::ROOT;
+    let colours = rdirstat_treemap::DominantCategories::build(&tree, root, SizeMetric::Allocated);
+
+    let media = tree
+        .children(root)
+        .find(|id| tree.name_bytes(*id) == Some(b"media".as_slice()))
+        .expect("media");
+    let code = tree
+        .children(root)
+        .find(|id| tree.name_bytes(*id) == Some(b"code".as_slice()))
+        .expect("code");
+
+    assert_eq!(
+        colours.of(&tree, media),
+        3,
+        "9 kB of category 3 beats 100 B of category 7"
+    );
+    assert_eq!(
+        colours.of(&tree, code),
+        7,
+        "the only file under code/ is two levels down and still colours it"
+    );
+    assert_eq!(colours.of(&tree, root), 3, "and the winner propagates to the root");
+
+    // Without the colours the same layout is uniformly uncategorized, which is
+    // what the sunburst was drawing.
+    let viewport = Viewport {
+        width: 800.0,
+        height: 600.0,
+        device_pixel_ratio: 1.0,
+    };
+    let options = LayoutOptions::new(LayoutKind::Sunburst, viewport, 1.0).expect("options");
+
+    let plain = layout_tiles(&tree, root, &options).expect("plain layout");
+    let coloured =
+        rdirstat_treemap::layout_tiles_coloured(&tree, root, &options, None, Some(&colours)).expect("coloured layout");
+
+    let directory_tiles = |tiles: &TileBuffer| -> Vec<u8> {
+        tiles
+            .iter()
+            .filter(|tile| tree.node(tile.node).is_some_and(|node| node.kind().is_directory()))
+            .map(|tile| tile.category.get())
+            .collect()
+    };
+
+    let before = directory_tiles(&plain);
+    let after = directory_tiles(&coloured);
+    assert!(!before.is_empty(), "the fixture must draw some directories");
+    assert!(
+        before.iter().all(|category| *category == 0),
+        "today a directory tile is uncategorized: {before:?}"
+    );
+    assert!(
+        after.iter().any(|category| *category != 0),
+        "with the colours resolved, folders carry one: {after:?}"
+    );
+
+    // Geometry is untouched — this changes what a tile is painted, never where.
+    assert_eq!(plain.len(), coloured.len());
+    for (a, b) in plain.iter().zip(coloured.iter()) {
+        assert_eq!((a.node, a.x, a.y, a.w, a.h), (b.node, b.x, b.y, b.w, b.h));
+    }
+}

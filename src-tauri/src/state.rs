@@ -19,7 +19,7 @@ use rdirstat_core::{
     ActionError, CancelState, CompletedScan, NodeId, QueryError, ScanId, ScanProgress, ScanState, ScanStatus,
     StartError, TreeGeneration,
 };
-use rdirstat_treemap::{CategorySet, FilteredWeights, SizeMetric};
+use rdirstat_treemap::{CategorySet, DominantCategories, FilteredWeights, SizeMetric};
 
 use crate::progress::ProgressCounters;
 
@@ -120,6 +120,21 @@ pub struct AppState {
     /// The last filtered-layout weights, so a window resize does not recompute
     /// them on every drag step. See [`filter_weights`](Self::filter_weights).
     filter_cache: Mutex<Option<FilterCache>>,
+    /// The last resolved directory colours, memoised for the same reason and on
+    /// the same terms. See [`dominant_categories`](Self::dominant_categories).
+    dominant_cache: Mutex<Option<DominantCache>>,
+}
+
+/// One memoised set of directory colours.
+///
+/// Same single-slot reasoning as [`FilterCache`]: one view is on screen at a
+/// time, and each entry is a byte plus a `u64` per directory.
+#[derive(Debug)]
+struct DominantCache {
+    generation: TreeGeneration,
+    root: NodeId,
+    metric: SizeMetric,
+    colours: Arc<DominantCategories>,
 }
 
 /// One memoised set of filtered layout weights.
@@ -167,6 +182,7 @@ impl AppState {
             next_generation: AtomicU64::new(TreeGeneration::FIRST.get()),
             token_keys: RandomState::new(),
             filter_cache: Mutex::new(None),
+            dominant_cache: Mutex::new(None),
         }
     }
 
@@ -221,6 +237,47 @@ impl AppState {
             weights: Arc::clone(&weights),
         });
         weights
+    }
+
+    /// The category a directory borrows from the heaviest thing inside it,
+    /// memoised per `(generation, root, metric)`.
+    ///
+    /// A directory has no content category, so without this every tile an
+    /// icicle or a sunburst draws is uncategorized — those two are bounded by
+    /// depth rather than by area, and on a deep disk they never reach a file.
+    /// The pass is `O(subtree)`, and the viewport is not part of its key, so a
+    /// window resize computes it once and then reuses it exactly like the
+    /// filtered weights beside it.
+    pub(crate) fn dominant_categories(
+        &self,
+        scan: &CompletedScan,
+        root: NodeId,
+        metric: SizeMetric,
+    ) -> Arc<DominantCategories> {
+        let mut slot = lock(&self.dominant_cache);
+        if let Some(entry) = slot.as_ref()
+            && entry.generation == scan.generation
+            && entry.root == root
+            && entry.metric == metric
+        {
+            return Arc::clone(&entry.colours);
+        }
+
+        let started = std::time::Instant::now();
+        let colours = Arc::new(DominantCategories::build(&scan.tree, root, metric));
+        tracing::debug!(
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            nodes = scan.tree.len(),
+            directories = scan.tree.directory_count(),
+            "resolved directory colours"
+        );
+        *slot = Some(DominantCache {
+            generation: scan.generation,
+            root,
+            metric,
+            colours: Arc::clone(&colours),
+        });
+        colours
     }
 
     /// The keys used to sign confirmation tokens.

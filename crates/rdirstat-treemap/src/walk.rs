@@ -11,6 +11,7 @@
 //! recursion: it is the icicle's `(depth, offset, extent)` triple read in polar
 //! coordinates.
 
+use crate::dominant::DominantCategories;
 use crate::error::LayoutError;
 use crate::filter::FilteredWeights;
 use crate::geom::{Rect, Slot, slice, sort_drawable_prefix, squarify};
@@ -102,9 +103,43 @@ pub fn layout_tiles_with(
     options: &LayoutOptions,
     reuse: Option<&FilteredWeights>,
 ) -> Result<TileBuffer, LayoutError> {
+    layout_tiles_coloured(tree, root, options, reuse, None)
+}
+
+/// [`layout_tiles_with`], plus the directory colours from
+/// [`DominantCategories`].
+///
+/// A directory has no content category of its own, so its tile is drawn
+/// uncategorized — invisible in a treemap, where leaves cover it, and the
+/// entire picture in an icicle or a sunburst, where the drawn set is bounded by
+/// *depth* and on a large disk never reaches a file at all. Passing the
+/// resolved colours lets a folder be painted as what it holds.
+///
+/// Like the filtered weights, these depend on `(tree, root, metric)` and not on
+/// the viewport, so a resize computes them once. `None` keeps the previous
+/// behaviour exactly.
+///
+/// # Errors
+///
+/// [`LayoutError::UnknownNode`] if `root` names neither a live node nor a
+/// virtual group whose owning directory exists.
+pub fn layout_tiles_coloured(
+    tree: &Tree,
+    root: NodeId,
+    options: &LayoutOptions,
+    reuse: Option<&FilteredWeights>,
+    dominant: Option<&DominantCategories>,
+) -> Result<TileBuffer, LayoutError> {
     let started = std::time::Instant::now();
     let plan = Plan::resolve(options);
-    let root_frame = root_frame(tree, root, &plan, options.canvas.width(), options.canvas.height())?;
+    let root_frame = root_frame(
+        tree,
+        root,
+        &plan,
+        options.canvas.width(),
+        options.canvas.height(),
+        dominant,
+    )?;
 
     let mut tiles = TileBuffer::with_capacity(options.max_tiles.min(4_096));
     let mut stack: Vec<Frame> = Vec::with_capacity(64);
@@ -147,7 +182,15 @@ pub fn layout_tiles_with(
             continue;
         }
 
-        let total = gather(tree, &frame, options.metric, weights, &mut scratch, &mut considered);
+        let total = gather(
+            tree,
+            &frame,
+            options.metric,
+            weights,
+            dominant,
+            &mut scratch,
+            &mut considered,
+        );
         if total <= 0.0 || scratch.is_empty() {
             continue;
         }
@@ -325,7 +368,14 @@ impl Plan {
 }
 
 /// Builds the frame for the layout root.
-fn root_frame(tree: &Tree, root: NodeId, plan: &Plan, width: f64, height: f64) -> Result<Frame, LayoutError> {
+fn root_frame(
+    tree: &Tree,
+    root: NodeId,
+    plan: &Plan,
+    width: f64,
+    height: f64,
+    dominant: Option<&DominantCategories>,
+) -> Result<Frame, LayoutError> {
     let region = match plan.kind {
         LayoutKind::Icicle => Rect {
             x: 0.0,
@@ -365,10 +415,14 @@ fn root_frame(tree: &Tree, root: NodeId, plan: &Plan, width: f64, height: f64) -
     }
 
     let node = tree.node(root).ok_or(LayoutError::UnknownNode { node: root })?;
+    let category = match dominant {
+        Some(colours) if node.kind().is_directory() => colours.of(tree, root),
+        _ => node.category().get(),
+    };
     Ok(Frame {
         emit: root,
         source: root,
-        category: node.category().get(),
+        category,
         depth: 0,
         region,
         files_only: false,
@@ -386,6 +440,7 @@ fn gather(
     frame: &Frame,
     metric: SizeMetric,
     filter: Option<&FilteredWeights>,
+    dominant: Option<&DominantCategories>,
     scratch: &mut Vec<Slot>,
     considered: &mut u64,
 ) -> f64 {
@@ -439,7 +494,14 @@ fn gather(
         }
         let weight = to_weight(bytes);
         total += weight;
-        scratch.push(Slot::new(child.raw(), weight, node.category().get()));
+        // A directory borrows the category of the heaviest thing inside it,
+        // when the caller has resolved that. Without it a folder is drawn
+        // uncategorized, which is the whole picture in an icicle or sunburst.
+        let category = match dominant {
+            Some(colours) if directory => colours.of(tree, child),
+            _ => node.category().get(),
+        };
+        scratch.push(Slot::new(child.raw(), weight, category));
     }
     total
 }
