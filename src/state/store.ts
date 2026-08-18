@@ -76,7 +76,27 @@ export interface UiState {
 
   layoutKind: LayoutKind;
   sizeMetric: SizeMetric;
+
+  /**
+   * Whether the details panel is on screen. Meaningful only while unpinned —
+   * a pinned panel is always present, which is what pinning means.
+   */
   detailsOpen: boolean;
+
+  /**
+   * Docked, rather than sliding in over the content.
+   *
+   * Unpinned is the default because the panel is selection-driven: for most of
+   * a session there is no selection, and an empty 320-point column that says
+   * "select an item" is spending permanent width on a transient answer. Pinning
+   * is for the workflow where you *are* reading details continuously and want
+   * the tree to reflow around them once rather than jump on every selection.
+   *
+   * Persisted, unlike everything else here, because it is a statement about how
+   * someone works rather than about the scan in front of them. `deletionArmed`
+   * two fields down is the opposite case and is deliberately never persisted.
+   */
+  detailsPinned: boolean;
 
   /**
    * Whether the destructive actions are live.
@@ -114,11 +134,41 @@ export interface UiState {
   setLayoutKind: (kind: LayoutKind) => void;
   setSizeMetric: (metric: SizeMetric) => void;
   toggleDetails: () => void;
+  setDetailsOpen: (open: boolean) => void;
+  setDetailsPinned: (pinned: boolean) => void;
   /** Arms or disarms Trash. Only ever called from an explicit user gesture. */
   setDeletionArmed: (armed: boolean) => void;
 }
 
 const EMPTY_SELECTION: ReadonlySet<number> = new Set<number>();
+
+/** Where the pin preference lives between launches. */
+const DETAILS_PINNED_KEY = "rdirstat.detailsPinned";
+
+/*
+ * Both wrapped in try/catch rather than assumed.
+ *
+ * `localStorage` throws — not returns null — when storage is disabled or the
+ * quota is exhausted, and a layout preference is not worth taking the whole app
+ * down over. Failing to read means "unpinned", which is the default anyway;
+ * failing to write means the pin lasts this session only, which is a smaller
+ * loss than a blank window.
+ */
+function readPinned(): boolean {
+  try {
+    return window.localStorage.getItem(DETAILS_PINNED_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function writePinned(pinned: boolean): void {
+  try {
+    window.localStorage.setItem(DETAILS_PINNED_KEY, String(pinned));
+  } catch {
+    // Preference not retained. The panel still works.
+  }
+}
 
 export const useUiStore = create<UiState>((set) => ({
   route: "volumes",
@@ -129,7 +179,8 @@ export const useUiStore = create<UiState>((set) => ({
   hovered: null,
   layoutKind: "treemap",
   sizeMetric: "allocated",
-  detailsOpen: true,
+  detailsOpen: false,
+  detailsPinned: readPinned(),
   deletionArmed: false,
 
   setRoute: (route) => set({ route }),
@@ -208,6 +259,17 @@ export const useUiStore = create<UiState>((set) => ({
   setLayoutKind: (layoutKind) => set({ layoutKind }),
   setSizeMetric: (sizeMetric) => set({ sizeMetric }),
   toggleDetails: () => set((state) => ({ detailsOpen: !state.detailsOpen })),
+
+  setDetailsOpen: (detailsOpen) => set({ detailsOpen }),
+
+  setDetailsPinned: (detailsPinned) => {
+    writePinned(detailsPinned);
+    // Pinning implies showing it: pinning a hidden panel and getting nothing
+    // reads as a broken switch. Unpinning leaves it up so the content does not
+    // vanish from under the click that unpinned it — it slides away on the
+    // next dismissal instead.
+    set({ detailsPinned, detailsOpen: true });
+  },
   setDeletionArmed: (deletionArmed) => set({ deletionArmed }),
 }));
 

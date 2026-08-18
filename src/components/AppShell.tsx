@@ -95,7 +95,7 @@ import {
 import { cn } from "@/lib/utils";
 import { GENERATION_NONE, isRealNode } from "@/lib/wire";
 import { useCurrentRoot, useSoleSelection, useUiStore, type Route } from "@/state/store";
-import { CircleAlert, X } from "lucide-react";
+import { CircleAlert, PanelRightOpen, X } from "lucide-react";
 
 /**
  * The report routes, all of them live.
@@ -178,6 +178,10 @@ export function AppShell() {
   const progress = useScanProgress();
 
   const route = useUiStore((state) => state.route);
+  const detailsOpen = useUiStore((state) => state.detailsOpen);
+  const detailsPinned = useUiStore((state) => state.detailsPinned);
+  const setDetailsOpen = useUiStore((state) => state.setDetailsOpen);
+  const setDetailsPinned = useUiStore((state) => state.setDetailsPinned);
   const setRoute = useUiStore((state) => state.setRoute);
   const generation = useUiStore((state) => state.generation);
   const navStack = useUiStore((state) => state.navStack);
@@ -327,6 +331,37 @@ export function AppShell() {
       stop?.();
     };
   }, []);
+
+  /*
+   * A selection opens the panel. This is what makes "slide-in" the default
+   * rather than a control the user has to find: the panel appears when there is
+   * something for it to say, which is the same moment it used to stop saying
+   * "select an item".
+   *
+   * Only when unpinned — a pinned panel is already open, and setting `open`
+   * again on every selection would fight the user's own dismissals.
+   */
+  useEffect(() => {
+    if (!detailsPinned && soleSelection !== null) setDetailsOpen(true);
+  }, [detailsPinned, soleSelection, setDetailsOpen]);
+
+  /*
+   * Escape dismisses the sliding panel.
+   *
+   * Bound at the document rather than on the panel because the panel does not
+   * hold focus — it slides in beside whatever you were doing, and requiring a
+   * click into it before Escape works would mean the key does nothing at the
+   * moment you most want it. Ignored while pinned, where dismissal is not the
+   * gesture on offer.
+   */
+  useEffect(() => {
+    if (detailsPinned || !detailsOpen) return undefined;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDetailsOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [detailsOpen, detailsPinned, setDetailsOpen]);
 
   const handleCancel = useCallback(async () => {
     if (activeScan === null) return;
@@ -657,7 +692,7 @@ export function AppShell() {
         <ScanBar onScan={(root) => void handleScan(root)} busy={scanning || starting} />
       </Titlebar>
 
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
         <nav aria-label="Tools" className="flex w-36 shrink-0 flex-col gap-3 border-r border-border/60 p-2">
           {RAIL_GROUPS.map((group) => (
             <div key={group.id} className="flex flex-col gap-0.5">
@@ -955,17 +990,58 @@ export function AppShell() {
           )}
         </main>
 
-        <DetailsPanel
-          generation={generation}
-          node={soleSelection}
-          selectionCount={selection.size}
-          onReveal={handleReveal}
-          onTrash={handleTrash}
-          onRelocate={(node) => setRelocating([node])}
-          onTrashDropped={handleTrash}
-          deletionArmed={deletionArmed}
-          onArmDeletion={setDeletionArmed}
-        />
+        {/* Pinned: an ordinary column, and the layout reflows around it once.
+          * Unpinned: the same element positioned over the content, so showing
+          * and hiding it never reflows the tree underneath — a treemap that
+          * relaid itself on every selection would move the tile you were about
+          * to click. */}
+        <div
+          className={cn(
+            detailsPinned
+              ? "flex min-h-0 shrink-0"
+              : cn(
+                  "absolute inset-y-0 right-0 z-30 transition-transform duration-200 ease-out",
+                  "motion-reduce:transition-none",
+                  detailsOpen ? "translate-x-0 shadow-2xl" : "pointer-events-none translate-x-full",
+                ),
+          )}
+          // Hidden from the accessibility tree when slid away, so a screen
+          // reader does not read out a panel that is not on screen. `inert`
+          // would be better but is not on every WebKit this ships to.
+          aria-hidden={!detailsPinned && !detailsOpen}
+        >
+          <DetailsPanel
+            generation={generation}
+            node={soleSelection}
+            selectionCount={selection.size}
+            onReveal={handleReveal}
+            onTrash={handleTrash}
+            onRelocate={(node) => setRelocating([node])}
+            onTrashDropped={handleTrash}
+            deletionArmed={deletionArmed}
+            onArmDeletion={setDeletionArmed}
+            pinned={detailsPinned}
+            onTogglePin={() => setDetailsPinned(!detailsPinned)}
+            onClose={() => setDetailsOpen(false)}
+            className={detailsPinned ? undefined : "h-full bg-background"}
+          />
+        </div>
+
+        {/* The way back in when nothing is selected. Without it the panel is
+          * only reachable by selecting something, which makes the pin — and the
+          * deletion switch that lives in the panel — unreachable from an empty
+          * selection. */}
+        {!detailsPinned && !detailsOpen && (
+          <button
+            type="button"
+            onClick={() => setDetailsOpen(true)}
+            title="Show details"
+            className="absolute right-0 top-1/2 z-20 -translate-y-1/2 rounded-l-md border border-r-0 border-border/60 bg-background/90 px-1 py-3 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <PanelRightOpen aria-hidden className="size-4" />
+            <span className="sr-only">Show details</span>
+          </button>
+        )}
       </div>
 
       <RelocateDialog

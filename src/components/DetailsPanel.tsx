@@ -6,6 +6,16 @@
  * context menu only, so Trash is never one stray click away from a
  * multi-selection."
  *
+ * **"Always present" is now "always available".** The panel slides in over the
+ * content by default and can be pinned to dock it, because selection-driven and
+ * always-on-screen turn out to conflict: for most of a session there is no
+ * selection, and a permanent 320-point column reading "select an item" spends
+ * fixed width on a transient answer. Pinning restores the docked behaviour for
+ * anyone reading details continuously. Nothing about *what* the panel shows,
+ * or about the authority rules below, changes with it — a slid-in panel is the
+ * same panel in a different place, still not a dialog: it takes no focus trap,
+ * dims nothing, and never blocks the tree behind it.
+ *
  * Four rules the markup enforces:
  *
  * 1. **Logical and allocated are shown side by side and never summed.** They
@@ -30,7 +40,7 @@
  *    released.
  */
 
-import { CircleAlert, Eye, HardDriveDownload, Loader, Lock, Package, Trash2 } from "lucide-react";
+import { CircleAlert, Eye, HardDriveDownload, Loader, Lock, Package, Pin, PinOff, Trash2, X } from "lucide-react";
 import { useState } from "react";
 
 import { CategoryChip } from "@/components/cells/CategoryChip";
@@ -56,6 +66,12 @@ export interface DetailsPanelProps {
   deletionArmed?: boolean;
   /** Flips the arming. Omitted means the switch is not offered at all. */
   onArmDeletion?: (armed: boolean) => void;
+  /** Docked rather than sliding over the content. */
+  pinned?: boolean;
+  /** Flips the pin. Omitted means the pin control is not offered. */
+  onTogglePin?: () => void;
+  /** Dismisses a sliding panel. Omitted while pinned, where there is nothing to dismiss. */
+  onClose?: () => void;
   className?: string;
 }
 
@@ -69,6 +85,9 @@ export function DetailsPanel({
   onTrashDropped,
   deletionArmed = false,
   onArmDeletion,
+  pinned = false,
+  onTogglePin,
+  onClose,
   className,
 }: DetailsPanelProps) {
   const { data, error, isLoading } = useNodeDetails(generation, node);
@@ -76,8 +95,51 @@ export function DetailsPanel({
   return (
     <aside
       aria-label="Details"
-      className={cn("flex min-h-0 w-80 shrink-0 flex-col gap-4 border-l border-border/60 p-4", className)}
+      className={cn(
+        "flex min-h-0 w-80 shrink-0 flex-col gap-4 border-l border-border/60 p-4",
+        className,
+      )}
     >
+      {(onTogglePin !== undefined || onClose !== undefined) && (
+        <header className="-mt-1 flex shrink-0 items-center gap-1">
+          <h2 className="flex-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Details
+          </h2>
+          {onTogglePin !== undefined && (
+            <button
+              type="button"
+              onClick={onTogglePin}
+              // aria-pressed rather than two labels: it is one control with a
+              // state, and a screen reader should hear the state rather than
+              // have to infer it from the verb changing.
+              aria-pressed={pinned}
+              title={pinned ? "Unpin — let the panel slide away" : "Pin — keep the panel open"}
+              className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {pinned ? (
+                <Pin aria-hidden className="size-3.5 text-foreground" />
+              ) : (
+                <PinOff aria-hidden className="size-3.5" />
+              )}
+              <span className="sr-only">{pinned ? "Unpin details" : "Pin details open"}</span>
+            </button>
+          )}
+          {/* No close button while pinned: pinning IS "stay open", so offering
+            * a dismissal beside it asks the user to reconcile two controls that
+            * disagree. Unpin is the way out of a pinned panel. */}
+          {onClose !== undefined && !pinned && (
+            <button
+              type="button"
+              onClick={onClose}
+              title="Close (Esc)"
+              className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <X aria-hidden className="size-3.5" />
+              <span className="sr-only">Close details</span>
+            </button>
+          )}
+        </header>
+      )}
       {node === null && (
         <p className="text-sm text-muted-foreground">
           {selectionCount > 1
