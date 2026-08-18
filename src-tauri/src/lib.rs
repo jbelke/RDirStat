@@ -50,6 +50,7 @@ mod state;
 mod storage;
 mod sync;
 mod token;
+mod verify;
 mod transfers;
 mod tray;
 mod volumes;
@@ -110,6 +111,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::path_of,
             commands::complete_path,
             commands::browse_directories,
+            commands::verify_duplicates,
             commands::volumes,
             commands::trash_preview,
             commands::move_to_trash,

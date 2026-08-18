@@ -85,7 +85,12 @@ fn normalize(scan: &CompletedScan, nodes: &[NodeId]) -> Normalized {
 }
 
 /// Resolves and revalidates one selected node.
-fn resolve(scan: &CompletedScan, node: NodeId) -> Result<(PathBuf, fsident::Observation), ActionError> {
+///
+/// `pub(crate)` because duplicate verification opens these files too, and it
+/// must go through the same revalidation the destructive actions do: a file
+/// replaced since the scan has to be reported as changed, never hashed and
+/// then offered for deletion on the strength of that hash.
+pub(crate) fn resolve(scan: &CompletedScan, node: NodeId) -> Result<(PathBuf, fsident::Observation), ActionError> {
     let path = fsident::action_path(scan, node, false)?;
     fsident::confirm_within_root(scan, &path)?;
     let observation = fsident::revalidate(scan, node, &path)?;

@@ -89,6 +89,7 @@ specta-typescript = "=0.0.12"
 
 # --- macOS actions: NSFileManager trashItem, never fs::remove_file ---
 trash = { workspace = true }
+sha2 = { workspace = true }
 
 # --- remote destinations: S3, WebDAV and SFTP ---
 rdirstat-remote = { workspace = true }

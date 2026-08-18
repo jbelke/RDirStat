@@ -813,6 +813,33 @@ pub(crate) async fn duplicate_candidates(
     .map_err(|error| QueryError::Internal(error.to_string()))?
 }
 
+/// Reads candidate duplicates and groups them by SHA-256 of their contents.
+///
+/// The duplicates panel groups by size, which finds *candidates*: two files of
+/// the same length are not the same file. This is the step that reads the
+/// bytes, and it is deliberately a separate command rather than part of
+/// [`duplicate_candidates`] — grouping by size is instant and this is not, so
+/// the expensive half happens when the user asks for it and on the set they
+/// asked about.
+///
+/// # Errors
+///
+/// [`QueryError::NoScan`] or [`QueryError::StaleGeneration`]. Per-file
+/// problems are reported inside the result rather than failing the batch: one
+/// unreadable file must not cost the answer for the other ninety-nine.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn verify_duplicates(
+    state: tauri::State<'_, AppState>,
+    generation: TreeGeneration,
+    nodes: Vec<NodeId>,
+) -> Result<crate::verify::VerifyReport, QueryError> {
+    let scan = state.tree_for_query(generation)?;
+    tauri::async_runtime::spawn_blocking(move || crate::verify::verify(&scan, &nodes))
+        .await
+        .map_err(|error| QueryError::Internal(error.to_string()))
+}
+
 /// Compares the published scan against the previous snapshot of the same root.
 ///
 /// **Both halves of the comparison are chosen here, not by the caller.** The

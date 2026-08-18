@@ -41,8 +41,8 @@
  * candidates is exactly the mistake this whole file is written to avoid.
  */
 
-import { ChevronRight, Copy, Eye, Info, Link2, Lock, Trash2, TriangleAlert } from "lucide-react";
-import { Fragment, useState } from "react";
+import { ChevronRight, Copy, Eye, Info, Link2, Loader, Lock, ShieldCheck, Trash2, TriangleAlert } from "lucide-react";
+import { Fragment, useCallback, useState } from "react";
 
 import {
   ContextMenu,
@@ -51,7 +51,9 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import { Button } from "@/components/ui/button";
 import { formatCount, formatMtime, formatSI } from "@/lib/format";
+import { verifyDuplicates, type VerifyReportView } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 
 /**
@@ -107,6 +109,8 @@ export interface DupesReportView {
 }
 
 export interface DupesRouteProps {
+  /** Needed to read the files: verification goes back to Rust by NodeId. */
+  generation: number;
   report: DupesReportView | undefined;
   isLoading: boolean;
   error: Error | null;
@@ -124,11 +128,22 @@ export interface DupesRouteProps {
  * therefore unique across the report. Node ids would work too but change between
  * generations, and this key survives a refetch so an open row stays open.
  */
+/**
+ * Short names for confirmed groups inside one size cluster.
+ *
+ * A cluster that verifies into two or more distinct contents needs those told
+ * apart at a glance, and a letter does that where eight hex characters make the
+ * reader compare strings. The digest is still on the chip and in full in its
+ * title — the letter is a handle, not an identity.
+ */
+const GROUP_LABELS = ["A", "B", "C", "D", "E", "F", "G", "H"] as const;
+
 function clusterKey(cluster: DupesClusterView): string {
   return String(cluster.logicalBytes);
 }
 
 export function DupesRoute({
+  generation,
   report,
   isLoading,
   error,
@@ -141,6 +156,35 @@ export function DupesRoute({
   const [notesOpen, setNotesOpen] = useState(false);
   /** Cluster key -> the node id protected from deletion in that cluster. */
   const [kept, setKept] = useState<Record<string, number>>({});
+
+  /** Cluster key -> what reading the files proved. Absent means "not checked". */
+  const [checked, setChecked] = useState<Record<string, VerifyReportView>>({});
+  /** The cluster being read right now; only one at a time, since it is I/O. */
+  const [verifying, setVerifying] = useState<string | null>(null);
+  const [verifyError, setVerifyError] = useState<Record<string, string>>({});
+
+  const runVerify = useCallback(
+    async (key: string, nodes: readonly number[]) => {
+      setVerifying(key);
+      setVerifyError((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      try {
+        const result = await verifyDuplicates(generation, nodes);
+        setChecked((current) => ({ ...current, [key]: result }));
+      } catch (cause) {
+        setVerifyError((current) => ({
+          ...current,
+          [key]: cause instanceof Error ? cause.message : String(cause),
+        }));
+      } finally {
+        setVerifying(null);
+      }
+    },
+    [generation],
+  );
 
   if (error !== null) {
     return (
@@ -207,8 +251,9 @@ export function DupesRoute({
           <TriangleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0" />
           <span>
             Candidates only — these files share a size, which is not the same as sharing their
-            contents. Confirming a duplicate means reading both files and comparing them, and that
-            step has not run.
+            contents. Open a group and choose <strong className="font-medium">Check contents</strong>{" "}
+            to read the files and compare them by SHA-256; until then every figure here is an upper
+            bound.
           </span>
         </p>
       )}
@@ -295,6 +340,12 @@ export function DupesRoute({
                           onReveal={onReveal}
                           onTrash={onTrash}
                           trashEnabled={trashEnabled}
+                          verification={checked[key] ?? null}
+                          verifying={verifying === key}
+                          verifyError={verifyError[key] ?? null}
+                          onVerify={() =>
+                            void runVerify(key, cluster.members.map((member) => member.node))
+                          }
                         />
                       </td>
                     </tr>
@@ -353,6 +404,10 @@ function ClusterMembers({
   onReveal,
   onTrash,
   trashEnabled,
+  verification,
+  verifying,
+  verifyError,
+  onVerify,
 }: {
   cluster: DupesClusterView;
   keptNode: number | null;
@@ -360,8 +415,27 @@ function ClusterMembers({
   onReveal?: (node: number) => void;
   onTrash?: (node: number) => void;
   trashEnabled: boolean;
+  /** What reading the files proved, or `null` if they have not been read. */
+  verification: VerifyReportView | null;
+  verifying: boolean;
+  verifyError: string | null;
+  onVerify: () => void;
 }) {
   const key = clusterKey(cluster);
+
+  /*
+   * node -> which confirmed group it landed in, and that group's digest.
+   *
+   * Built here rather than in the row so the lookup is one pass over a small
+   * report instead of a scan per member, and so a member that appears in no
+   * group can be told apart from one in a group of its own.
+   */
+  const placement = new Map<number, { digest: string; index: number }>();
+  verification?.groups.forEach((group, index) => {
+    for (const node of group.nodes) placement.set(node, { digest: group.digest, index });
+  });
+  const uniqueNodes = new Set(verification?.unique ?? []);
+  const failures = new Map((verification?.failed ?? []).map((f) => [f.node, f.reason]));
 
   if (cluster.members.length === 0) {
     return (
@@ -374,12 +448,57 @@ function ClusterMembers({
 
   return (
     <div className="flex flex-col gap-2 bg-background/60 px-4 py-3">
-      <div className="text-xs text-muted-foreground">
-        {/* The range, written out. A single number here reads as a promise. */}
-        Range if these turn out to be copies: {formatSI(cluster.potentialRecoveryLowerBytes)} –{" "}
-        {formatSI(cluster.potentialRecoveryUpperBytes)}. The floor is zero because no contents have
-        been compared.
-      </div>
+      {verification === null ? (
+        <div className="flex items-center gap-3">
+          <div className="flex-1 text-xs text-muted-foreground">
+            {/* The range, written out. A single number here reads as a promise. */}
+            Range if these turn out to be copies: {formatSI(cluster.potentialRecoveryLowerBytes)} –{" "}
+            {formatSI(cluster.potentialRecoveryUpperBytes)}. The floor is zero because no contents
+            have been compared.
+          </div>
+          <Button size="sm" variant="outline" disabled={verifying} onClick={onVerify}>
+            {verifying ? (
+              <Loader aria-hidden className="animate-spin" />
+            ) : (
+              <ShieldCheck aria-hidden />
+            )}
+            {verifying ? "Reading…" : "Check contents"}
+          </Button>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-1 text-xs">
+          <div className="flex items-center gap-2">
+            <ShieldCheck aria-hidden className="size-3.5 shrink-0 text-brand" />
+            <span className="font-medium">
+              {verification.groups.length === 0
+                ? "No duplicates here — every file has different contents."
+                : `${verification.groups.length === 1 ? "1 confirmed group" : `${verification.groups.length} confirmed groups`}, by SHA-256.`}
+            </span>
+            <span className="text-muted-foreground">{formatSI(verification.bytesRead)} read</span>
+          </div>
+          {/* The recoverable figure stops being a range once contents are known:
+            * every member past the first in a confirmed group is a real copy. */}
+          {verification.groups.length > 0 && (
+            <span className="text-muted-foreground">
+              {formatSI(
+                verification.groups.reduce(
+                  (total, group) => total + group.bytes * (group.nodes.length - 1),
+                  0,
+                ),
+              )}{" "}
+              can be freed here, and that is now a measurement rather than an upper bound.
+            </span>
+          )}
+          {verification.failed.length > 0 && (
+            <span className="text-pressure-warn">
+              {verification.failed.length} could not be read and {verification.failed.length === 1 ? "is" : "are"} not counted.
+            </span>
+          )}
+        </div>
+      )}
+      {verifyError !== null && (
+        <div className="text-xs text-pressure-critical">Could not read these files: {verifyError}</div>
+      )}
       <ul className="flex flex-col">
         {cluster.members.map((member) => {
           const isKept = member.node === keptNode;
@@ -408,6 +527,47 @@ function ClusterMembers({
                   <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={member.path}>
                     {member.path}
                   </span>
+                  {/* What reading this file proved. Absent until it is read,
+                    * because an unverified row must not imply a verdict. The
+                    * digest is shown truncated but the full 64 characters are
+                    * in the title: a user comparing against `shasum` output
+                    * needs the whole thing, and eight hex characters is enough
+                    * to tell two groups apart on screen. */}
+                  {(() => {
+                    const failure = failures.get(member.node);
+                    if (failure !== undefined) {
+                      return (
+                        <span
+                          className="shrink-0 rounded bg-pressure-warn/15 px-1.5 py-0.5 font-mono text-[10px] text-pressure-warn"
+                          title={failure}
+                        >
+                          unreadable
+                        </span>
+                      );
+                    }
+                    const place = placement.get(member.node);
+                    if (place !== undefined) {
+                      return (
+                        <span
+                          className="shrink-0 rounded bg-brand/15 px-1.5 py-0.5 font-mono text-[10px] text-brand"
+                          title={`sha256:${place.digest}`}
+                        >
+                          {GROUP_LABELS[place.index % GROUP_LABELS.length]} · {place.digest.slice(0, 8)}
+                        </span>
+                      );
+                    }
+                    if (uniqueNodes.has(member.node)) {
+                      return (
+                        <span
+                          className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                          title="Read and hashed: nothing else in this group has these contents."
+                        >
+                          not a copy
+                        </span>
+                      );
+                    }
+                    return null;
+                  })()}
                   {member.hardLinked && (
                     <span
                       className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground"

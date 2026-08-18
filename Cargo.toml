@@ -140,6 +140,12 @@ tokio = { version = "1.49.0", default-features = false }
 # links `md-5` for Content-MD5 on upload, so this names a crate the tree
 # already contains rather than adding one.
 md-5 = "0.10.6"
+# Confirming two files are the same file. SHA-256 rather than the `md-5`
+# already in the tree: a duplicate report's consequence is deleting one of the
+# pair, and MD5 collisions are constructible — two different files that hash
+# alike is exactly the failure that costs data here. Same RustCrypto `digest`
+# traits as md-5, so it is one crate, not a new toolchain.
+sha2 = "0.10.9"
 # The macOS Keychain. Already in the tree via native-tls; named here so the one
 # module that stores a credential declares it rather than borrowing it.
 security-framework = "3.7.0"

@@ -870,6 +870,7 @@ export function AppShell() {
 
           {route === "dupes" && currentRoot !== null && (
             <DupesRoute
+              generation={generation}
               report={dupes.data}
               isLoading={dupes.isLoading}
               error={dupes.error}

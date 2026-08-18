@@ -391,6 +391,67 @@ export async function scanStart(root: string, options: ScanOptions = defaultScan
  */
 export const OPEN_SETTINGS_EVENT = "rdirstat://open-settings";
 
+/** Files confirmed byte-identical by SHA-256. */
+export interface VerifiedGroupView {
+  /** Lowercase hex SHA-256 of the whole file. */
+  readonly digest: string;
+  readonly nodes: readonly number[];
+  readonly bytes: number;
+}
+
+/** A candidate that could not be hashed, and why. */
+export interface VerifyFailureView {
+  readonly node: number;
+  readonly path: string;
+  readonly reason: string;
+}
+
+/** The result of reading a set of duplicate candidates. */
+export interface VerifyReportView {
+  readonly groups: readonly VerifiedGroupView[];
+  /**
+   * Candidates that turned out to be unique. Named rather than dropped: a file
+   * that silently disappears from the list looks like a bug, and "not a
+   * duplicate after all" is the answer the user asked for.
+   */
+  readonly unique: readonly number[];
+  readonly failed: readonly VerifyFailureView[];
+  /** Bytes actually read, so the cost of the check is visible. */
+  readonly bytesRead: number;
+}
+
+/**
+ * Reads candidate duplicates and groups them by SHA-256 of their contents.
+ *
+ * Size grouping finds candidates; this is the step that proves it. Separate
+ * from `duplicateCandidates` because grouping by size is instant and this is
+ * not — the expensive half runs when the user asks, on the set they asked
+ * about.
+ */
+export async function verifyDuplicates(
+  generation: number,
+  nodes: readonly number[],
+): Promise<VerifyReportView> {
+  const report = await unwrap(
+    "verify_duplicates",
+    commands.verifyDuplicates(toWireU64(generation), [...nodes]),
+  );
+  return {
+    groups: report.groups.map((group) => ({
+      digest: group.digest,
+      nodes: group.nodes.map(num),
+      bytes: num(group.bytes),
+    })),
+    unique: report.unique.map(num),
+    failed: report.failed.map((failure) => ({
+      node: num(failure.node),
+      path: failure.path,
+      reason: failure.reason,
+    })),
+    bytesRead: num(report.bytes_read),
+  };
+}
+
 /** One child directory in a destination listing. */
 export interface BrowseEntryView {
   readonly name: string;

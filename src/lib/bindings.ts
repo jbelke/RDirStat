@@ -283,6 +283,23 @@ export const commands = {
 	 */
 	browseDirectories: (path: string) => __TAURI_INVOKE<BrowseListing>("browse_directories", { path }),
 	/**
+	 *  Reads candidate duplicates and groups them by SHA-256 of their contents.
+	 * 
+	 *  The duplicates panel groups by size, which finds *candidates*: two files of
+	 *  the same length are not the same file. This is the step that reads the
+	 *  bytes, and it is deliberately a separate command rather than part of
+	 *  [`duplicate_candidates`] — grouping by size is instant and this is not, so
+	 *  the expensive half happens when the user asks for it and on the set they
+	 *  asked about.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`QueryError::NoScan`] or [`QueryError::StaleGeneration`]. Per-file
+	 *  problems are reported inside the result rather than failing the batch: one
+	 *  unreadable file must not cost the answer for the other ninety-nine.
+	 */
+	verifyDuplicates: (generation: TreeGeneration, nodes: NodeId[]) => typedError<VerifyReport, QueryError>(__TAURI_INVOKE("verify_duplicates", { generation, nodes })),
+	/**
 	 *  Mounted local volumes, for the launch screen.
 	 * 
 	 *  # Errors
@@ -3253,6 +3270,45 @@ export type UnreadableSnapshot = {
 	path: string,
 	bytes: number,
 	reason: string,
+};
+
+/**  Files confirmed identical by content. */
+export type VerifiedGroup = {
+	/**  Lowercase hex SHA-256 of the whole file. */
+	digest: string,
+	/**  Every node whose contents hashed to `digest`, in the order asked for. */
+	nodes: NodeId[],
+	/**  The size of one member, which they all share. */
+	bytes: number,
+};
+
+/**  A candidate that could not be hashed, and why. */
+export type VerifyFailure = {
+	node: NodeId,
+	path: DisplayPath,
+	reason: string,
+};
+
+/**  The result of reading a set of candidates. */
+export type VerifyReport = {
+	/**  Groups of two or more files with identical contents. */
+	groups: VerifiedGroup[],
+	/**
+	 *  Candidates that turned out to be unique. Named rather than dropped: a
+	 *  file that silently disappears from the list looks like a bug, and "this
+	 *  one is not a duplicate after all" is the answer the user asked for.
+	 */
+	unique: NodeId[],
+	/**
+	 *  Candidates that could not be read, changed since the scan, or left the
+	 *  scan root.
+	 */
+	failed: VerifyFailure[],
+	/**
+	 *  Bytes actually read, both passes summed. Reported so the cost of the
+	 *  check is visible rather than guessed at.
+	 */
+	bytes_read: number,
 };
 
 /**  The canvas region a layout is computed for. */
