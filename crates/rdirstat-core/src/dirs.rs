@@ -138,6 +138,14 @@ pub struct DirIndex {
 }
 
 impl DirIndex {
+    /// Bytes of heap this index occupies. `capacity`-based; see
+    /// [`NameBlob::heap_bytes`](crate::NameBlob::heap_bytes).
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        self.ids.capacity() * core::mem::size_of::<NodeId>()
+            + self.totals.capacity() * core::mem::size_of::<DirTotals>()
+    }
+
     /// An empty index.
     #[must_use]
     pub const fn new() -> Self {

@@ -219,8 +219,9 @@ pub use crate::id::{
 pub use crate::name::{MAX_NAME_LEN, MAX_NAME_OFFSET, NameBlob, NameRef};
 pub use crate::node::{Kind, Node, flags};
 pub use crate::scan::{
-    CancelState, CompletedScan, ConfigHash, ExclusionRule, RuleAction, RuleScope, RuleSyntax, ScanCounts, ScanOptions,
-    ScanProgress, ScanState, ScanStatus, ScanSummary, ScanTotals, VolumeId,
+    CancelState, CompletedScan, ConfigHash, ExclusionRule, ReadyScanRow, RuleAction, RuleScope, RuleSyntax,
+    RunningScanRow, ScanCounts, ScanOptions, ScanProgress, ScanState, ScanStatus, ScanSummary, ScanTotals, VolumeId,
+    WaitReason,
 };
 pub use crate::tree::{Children, MAX_TREE_DEPTH, Tree, TreeBuilder};
 pub use crate::wire::{

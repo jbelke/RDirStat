@@ -30,7 +30,7 @@ use crate::relocate::{RelocateError, RelocateMode, RelocatePlan, RelocateReport,
 use crate::remote::{self, RemoteConfigError};
 use crate::schedules::SyncSchedule;
 use crate::settings::Theme;
-use crate::state::AppState;
+use crate::state::{self, AppState};
 use crate::storage::{self, StorageReport};
 use crate::sync::{self, CompareMode, OnDiffer, SyncDiff, SyncError, SyncPlan, SyncReport};
 use crate::transfers::{self, JobState, TransferId, TransferJob, TransferManager};
@@ -328,20 +328,65 @@ pub(crate) async fn scan_start(
         .await
         .map_err(|error| StartError::Internal(error.to_string()))??;
 
-    let active = state.begin_scan()?;
-    let generation = state.next_generation();
-    let scan_id = active.scan_id;
-    let counters = Arc::clone(&active.counters);
-    let cancel = Arc::clone(&active.cancel);
+    // `st_dev` of the root: which filesystem this scan will read. Admission
+    // groups by it so two scans never contend for one device. A path that
+    // cannot be stat'd here was already rejected by `validate_root` above, so
+    // the fallback is unreachable in practice and is a distinct sentinel rather
+    // than 0, which is a real device number on some systems.
+    let device =
+        std::fs::metadata(&root_path).map_or(u64::MAX, |metadata| std::os::unix::fs::MetadataExt::dev(&metadata));
+    let display = DisplayPath::from_bytes(root_path.as_os_str().as_encoded_bytes());
 
-    // A dedicated OS thread, not the blocking pool: a scan runs for minutes and
-    // must not occupy a pool slot the rest of the app needs.
+    match state.accept(root_path, display, device, options)? {
+        state::Admission::Start(pending) => {
+            let scan_id = pending.scan_id;
+            spawn_scan(app, *pending)?;
+            Ok(scan_id)
+        }
+        // Accepted, not started. The id is real, the scan is in `scan_status`
+        // with its reason, and Cancel works on it — so returning it is honest
+        // rather than optimistic.
+        state::Admission::Wait { scan_id, reason } => {
+            tracing::info!(scan = scan_id.get(), ?reason, "scan is waiting to start");
+            Ok(scan_id)
+        }
+    }
+}
+
+/// Runs one admitted scan on its own thread.
+///
+/// A dedicated OS thread, not the blocking pool: a scan runs for minutes and
+/// must not occupy a pool slot the rest of the app needs.
+///
+/// Extracted from [`scan_start`] because it is now called from two places — a
+/// user's click, and the queue draining after some other scan ended.
+///
+/// # Errors
+///
+/// [`StartError::Internal`] if the thread could not be spawned. The scan is
+/// retired from the running set first, so a failure here does not leave a
+/// phantom holding a device.
+fn spawn_scan(app: tauri::AppHandle, pending: state::WaitingScan) -> Result<(), StartError> {
+    let state::WaitingScan {
+        scan_id,
+        generation,
+        root,
+        options,
+        cancel,
+        counters,
+        ..
+    } = pending;
+    let emit_counters = Arc::clone(&counters);
+    // Kept back from the closure, which takes ownership: the failure arm below
+    // still has to reach the state to hand the slot back.
+    let retirer = app.clone();
+
     let spawned = std::thread::Builder::new()
         .name("rdirstat-scan".to_owned())
         .spawn(move || {
-            let emitter = progress::spawn_emitter(app.clone(), scan_id, Arc::clone(&counters));
+            let emitter = progress::spawn_emitter(app.clone(), scan_id, emit_counters);
             let outcome = engine::run(ScanRequest {
-                root: root_path,
+                root,
                 options,
                 scan_id,
                 generation,
@@ -356,25 +401,46 @@ pub(crate) async fn scan_start(
                     let scan = Arc::from(scan);
                     // Published first, saved second. The tree is what the user
                     // asked for and it is ready now; writing gigabytes of arena
-                    // must not stand between them and it. `publish` swaps an
+                    // must not stand between them and it. `publish` inserts an
                     // `Arc`, so the save below reads the same immutable tree the
                     // UI is already querying.
                     state.publish(Arc::clone(&scan));
                     save_snapshot(&app, &scan);
                 }
-                ScanOutcome::Cancelled => state.release_unpublished(false),
+                ScanOutcome::Cancelled => state.release_unpublished(scan_id, false),
                 ScanOutcome::Failed(error) => {
                     tracing::error!(%error, "scan failed");
-                    state.release_unpublished(true);
+                    state.release_unpublished(scan_id, true);
                 }
             }
+            // This scan's device and its share of the budget are free now, so
+            // whatever was waiting on them can go. Done here rather than in
+            // `publish` because starting a scan needs an `AppHandle`, which
+            // `state.rs` deliberately does not have.
+            start_admissible(&app);
         });
 
     if spawned.is_err() {
-        state.release_unpublished(true);
+        // Not `release_unpublished`: nothing ran, so there is no outcome to
+        // report — the slot simply has to go back.
+        tauri::Manager::state::<AppState>(&retirer).retire(scan_id);
         return Err(StartError::Internal("could not spawn the scan thread".to_owned()));
     }
-    Ok(scan_id)
+    Ok(())
+}
+
+/// Starts every scan whose reason for waiting has cleared.
+///
+/// A loop, because one large scan finishing can free enough budget for two
+/// small ones, and because starting one changes what the next may do.
+fn start_admissible(app: &tauri::AppHandle) {
+    let state = tauri::Manager::state::<AppState>(app);
+    for pending in state.take_admissible() {
+        let scan_id = pending.scan_id;
+        if let Err(error) = spawn_scan(app.clone(), pending) {
+            tracing::error!(scan = scan_id.get(), %error, "a queued scan could not be started");
+        }
+    }
 }
 
 /// Writes the completed scan to the snapshot store so the next launch is a file
