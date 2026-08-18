@@ -1032,6 +1032,111 @@ export async function revealInFinder(generation: number, node: number): Promise<
 }
 
 // ---------------------------------------------------------------------------
+// Folder sync
+// ---------------------------------------------------------------------------
+
+export type CompareMode = "quick" | "verify";
+export type OnDiffer = "skip" | "replace";
+export type SyncReason = "missing" | "size_differs" | "content_differs";
+
+export interface SyncEntryView {
+  readonly relativePath: string;
+  readonly bytes: number;
+  readonly reason: SyncReason;
+}
+
+export interface SyncWarningView {
+  readonly code: string;
+  readonly message: string;
+}
+
+export interface SyncPlanView {
+  /** `null` means there is nothing to copy, or no room to copy it. */
+  readonly token: string | null;
+  readonly source: string;
+  readonly destination: string;
+  readonly entries: readonly SyncEntryView[];
+  /** True count, even when `entries` was truncated for display. */
+  readonly totalToCopy: number;
+  readonly bytesToCopy: number;
+  readonly alreadyPresent: number;
+  readonly differingSkipped: number;
+  readonly specialSkipped: number;
+  readonly unreadable: number;
+  readonly destinationAvailable: number;
+  readonly destinationFilesystem: string;
+  readonly entriesTruncated: boolean;
+  readonly warnings: readonly SyncWarningView[];
+}
+
+export interface SyncReportView {
+  readonly source: string;
+  readonly destination: string;
+  readonly copied: number;
+  readonly bytesCopied: number;
+  readonly failures: readonly { readonly relativePath: string; readonly reason: string }[];
+}
+
+/** What a sync would copy. Never writes anything. */
+export async function syncPlan(
+  source: string,
+  destination: string,
+  compareMode: CompareMode,
+  onDiffer: OnDiffer,
+): Promise<SyncPlanView> {
+  const plan = await unwrap("sync_plan", commands.syncPlan(source, destination, compareMode, onDiffer));
+  return {
+    token: plan.token,
+    source: plan.source,
+    destination: plan.destination,
+    entries: plan.entries.map((entry) => ({
+      relativePath: entry.relative_path,
+      bytes: num(entry.bytes),
+      reason: entry.reason,
+    })),
+    totalToCopy: num(plan.total_to_copy),
+    bytesToCopy: num(plan.bytes_to_copy),
+    alreadyPresent: num(plan.already_present),
+    differingSkipped: num(plan.differing_skipped),
+    specialSkipped: num(plan.special_skipped),
+    unreadable: num(plan.unreadable),
+    destinationAvailable: num(plan.destination_available),
+    destinationFilesystem: plan.destination_filesystem,
+    entriesTruncated: plan.entries_truncated,
+    warnings: plan.warnings.map((warning) => ({ code: warning.code, message: warning.message })),
+  };
+}
+
+/**
+ * Runs a planned sync. Long-running.
+ *
+ * The backend re-plans and re-checks the token, so a source that changed since
+ * the review fails closed rather than copying something never seen counted.
+ */
+export async function syncApply(
+  source: string,
+  destination: string,
+  compareMode: CompareMode,
+  onDiffer: OnDiffer,
+  token: string,
+): Promise<SyncReportView> {
+  const report = await unwrap(
+    "sync_apply",
+    commands.syncApply(source, destination, compareMode, onDiffer, token),
+  );
+  return {
+    source: report.source,
+    destination: report.destination,
+    copied: num(report.copied),
+    bytesCopied: num(report.bytes_copied),
+    failures: report.failures.map((failure) => ({
+      relativePath: failure.relative_path,
+      reason: failure.reason,
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Stored data
 // ---------------------------------------------------------------------------
 

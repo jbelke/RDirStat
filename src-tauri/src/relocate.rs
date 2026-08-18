@@ -1495,8 +1495,19 @@ mod tests {
             },
         )
         .expect("plan");
-        let token = plan.token.clone().expect("an ordinary path must get a token");
-        assert_eq!(plan.risk, RiskTier::Ordinary);
+        // Deliberately NOT asserting `RiskTier::Ordinary` here. The fixture
+        // lives under `CARGO_MANIFEST_DIR/../target`, so its risk tier depends
+        // on where the checkout happens to sit: in the repo it is Ordinary, but
+        // in a git worktree under /tmp it resolves beneath /private and is
+        // correctly Risky — which made this end-to-end test fail for a
+        // colleague building in `/tmp/mw/…` while passing here. A test whose
+        // result depends on the checkout's path is not testing what it claims.
+        //
+        // What this test is actually about is the round trip, so it asserts the
+        // plan is ACTIONABLE. The tier mapping itself is covered by
+        // `assess_risk` tests that use fixed literal paths and cannot drift.
+        let token = plan.token.clone().expect("a relocatable path must get a token");
+        assert_ne!(plan.risk, RiskTier::Blocked, "the fixture must not be a refused path");
 
         let report = apply(
             &scan,
@@ -1810,5 +1821,3 @@ mod tests {
         assert!(plan.warnings.iter().any(|warning| warning.code == "same-volume"));
     }
 }
-
-

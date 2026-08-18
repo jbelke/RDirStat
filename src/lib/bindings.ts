@@ -309,6 +309,34 @@ export const commands = {
 	 */
 	revealInFinder: (generation: TreeGeneration, node: NodeId) => typedError<null, ActionError>(__TAURI_INVOKE("reveal_in_finder", { generation, node })),
 	/**
+	 *  What a folder sync would copy, and the token that authorizes it.
+	 * 
+	 *  Walks the source and `stat`s each matching destination path. Under
+	 *  `Verify` it also compares the contents of same-sized files, which reads
+	 *  both sides in full — the frontend offers that as an explicit choice
+	 *  because the cost is proportional to the overlap, not to the difference.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`SyncError`] for a path that is relative, missing, not a directory, or
+	 *  that overlaps the other side. Everything else is reported inside the plan.
+	 */
+	syncPlan: (source: string, destination: string, compareMode: CompareMode, onDiffer: OnDiffer) => typedError<SyncPlan, SyncError>(__TAURI_INVOKE("sync_plan", { source, destination, compareMode, onDiffer })),
+	/**
+	 *  Runs a planned folder sync.
+	 * 
+	 *  **Long-running and blocking.** Re-plans from scratch and verifies the token
+	 *  against the fresh shape, so a source that changed since the review fails
+	 *  closed rather than copying something the user never saw counted.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`SyncError::InvalidConfirmation`] when the plan no longer matches, or any
+	 *  path error from planning. Per-file copy failures are reported inside the
+	 *  report rather than aborting the run.
+	 */
+	syncApply: (source: string, destination: string, compareMode: CompareMode, onDiffer: OnDiffer, confirmation: ConfirmationToken) => typedError<SyncReport, SyncError>(__TAURI_INVOKE("sync_apply", { source, destination, compareMode, onDiffer, confirmation })),
+	/**
 	 *  What the app has stored on disk.
 	 * 
 	 *  Reads the snapshot store's directory and peeks each file's header — never
@@ -797,6 +825,13 @@ export type CommandError =
 } } | 
 /**  Anything unexpected, already logged with its full source chain. */
 { kind: "internal"; detail: string };
+
+/**  How hard to look before calling two same-sized files the same. */
+export type CompareMode = 
+/**  Path and size only. Fast enough to plan a large tree interactively. */
+"quick" | 
+/**  Also compares contents when sizes match. Reads both sides in full. */
+"verify";
 
 /**
  *  A hex-encoded configuration digest.
@@ -1428,6 +1463,13 @@ export type LayoutKind =
  *  not a directory. [`NodeId::is_valid`] rejects it.
  */
 export type NodeId = number;
+
+/**  What to do about a file that exists on both sides but differs. */
+export type OnDiffer = 
+/**  Leave it. The destination keeps whatever it has. The default. */
+"skip" | 
+/**  Overwrite it from the source. The only setting that destroys anything. */
+"replace";
 
 /**
  *  What the scanner or an action was doing when something failed.
@@ -2420,6 +2462,111 @@ export type StoredSnapshot = {
 	allocated: number,
 	/**  The build that wrote it, so an unreadable one has a suspect. */
 	tool_version: string,
+};
+
+/**  One file the sync would copy. */
+export type SyncEntry = {
+	/**
+	 *  Path relative to the source root, which is also its path under the
+	 *  destination root. Shown to the user; never used as authority.
+	 */
+	relative_path: string,
+	bytes: number,
+	reason: SyncReason,
+};
+
+/**
+ *  A sync-specific failure.
+ * 
+ *  `Display` and `Error` are hand-written for the same reason as
+ *  [`crate::relocate::RelocateError`]: `src-tauri` does not depend on
+ *  `thiserror`, and adding it for one enum is the wrong end of that trade.
+ */
+export type SyncError = 
+/**  A path was relative, contained `..`, or was not a directory. */
+{ kind: "bad_path"; detail: {
+	path: DisplayPath,
+	reason: string,
+} } | 
+/**  Source and destination are the same tree, or one contains the other. */
+{ kind: "overlapping"; detail: {
+	source: DisplayPath,
+	destination: DisplayPath,
+} } | 
+/**  The destination does not have room for what would be copied. */
+{ kind: "not_enough_space"; detail: {
+	needed: number,
+	available: number,
+} } | 
+/**  The confirmation token does not authorize this plan. */
+{ kind: "invalid_confirmation" } | { kind: "internal"; detail: string };
+
+export type SyncFailure = {
+	relative_path: string,
+	reason: string,
+};
+
+/**  What a sync would do. */
+export type SyncPlan = {
+	generation: TreeGeneration,
+	/**  `None` when the sync cannot proceed. The UI keys its button on this. */
+	token: ConfirmationToken | null,
+	source: DisplayPath,
+	destination: DisplayPath,
+	compare_mode: CompareMode,
+	on_differ: OnDiffer,
+	/**  The files that would be copied, capped at [`MAX_PLANNED_ENTRIES`]. */
+	entries: SyncEntry[],
+	/**  True count of files to copy, even when `entries` was truncated. */
+	total_to_copy: number,
+	bytes_to_copy: number,
+	/**  Files present and identical on both sides. Nothing to do for these. */
+	already_present: number,
+	/**  Files that differ and are being left alone because `on_differ` is Skip. */
+	differing_skipped: number,
+	/**
+	 *  Sockets, FIFOs and device nodes seen in the source. Nothing can copy
+	 *  them, so they are counted and excluded rather than failing the sync.
+	 */
+	special_skipped: number,
+	/**
+	 *  Directories that could not be read on either side. Their contents are
+	 *  not in the plan, so the plan is a floor.
+	 */
+	unreadable: number,
+	destination_available: number,
+	destination_filesystem: string,
+	entries_truncated: boolean,
+	warnings: SyncWarning[],
+};
+
+/**  Why one file is in the plan. */
+export type SyncReason = 
+/**  No file at that relative path in the destination. */
+"missing" | 
+/**  Present, but a different size. */
+"size_differs" | 
+/**
+ *  Present and the same size, but the bytes differ. Only ever produced
+ *  under [`CompareMode::Verify`].
+ */
+"content_differs";
+
+/**  What a sync actually did. */
+export type SyncReport = {
+	generation: TreeGeneration,
+	source: DisplayPath,
+	destination: DisplayPath,
+	copied: number,
+	bytes_copied: number,
+	/**  Per-file failures. A sync continues past one bad file. */
+	failures: SyncFailure[],
+};
+
+/**  Something the user should read before confirming. */
+export type SyncWarning = {
+	code: string,
+	message: string,
 };
 
 /**  What happened to one item in a Trash request. */

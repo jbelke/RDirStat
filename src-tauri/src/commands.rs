@@ -28,6 +28,7 @@ use crate::engine::{self, ScanOutcome, ScanRequest};
 use crate::query::Ancestor;
 use crate::relocate::{RelocateError, RelocateMode, RelocatePlan, RelocateReport, SourceDisposal};
 use crate::state::AppState;
+use crate::sync::{self, CompareMode, OnDiffer, SyncError, SyncPlan, SyncReport};
 use crate::storage::{self, StorageReport};
 use crate::{actions, progress, query, relocate, volumes};
 
@@ -1073,6 +1074,91 @@ pub(crate) async fn export_snapshot(
     })
     .await
     .map_err(|error| CommandError::Internal(error.to_string()))?
+}
+
+/// What a folder sync would copy, and the token that authorizes it.
+///
+/// Walks the source and `stat`s each matching destination path. Under
+/// `Verify` it also compares the contents of same-sized files, which reads
+/// both sides in full — the frontend offers that as an explicit choice
+/// because the cost is proportional to the overlap, not to the difference.
+///
+/// # Errors
+///
+/// [`SyncError`] for a path that is relative, missing, not a directory, or
+/// that overlaps the other side. Everything else is reported inside the plan.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn sync_plan(
+    state: tauri::State<'_, AppState>,
+    source: String,
+    destination: String,
+    compare_mode: CompareMode,
+    on_differ: OnDiffer,
+) -> Result<SyncPlan, SyncError> {
+    let keys = state.token_keys().clone();
+    // A sync reads no scanned tree, so there is no generation for it to be
+    // stale against — it works with no scan loaded at all. The token is scoped
+    // to a fixed generation and does its real work by binding the plan's SHAPE
+    // (file count, byte count), which `apply` recomputes and re-checks. The
+    // TTL, not the generation, is what expires a forgotten confirmation.
+    let generation = TreeGeneration::FIRST;
+    tauri::async_runtime::spawn_blocking(move || {
+        sync::plan(
+            &keys,
+            generation,
+            now_unix_ms(),
+            sync::SyncRequest {
+                source: Path::new(&source),
+                destination: Path::new(&destination),
+                compare_mode,
+                on_differ,
+            },
+        )
+    })
+    .await
+    .map_err(|error| SyncError::Internal(error.to_string()))?
+}
+
+/// Runs a planned folder sync.
+///
+/// **Long-running and blocking.** Re-plans from scratch and verifies the token
+/// against the fresh shape, so a source that changed since the review fails
+/// closed rather than copying something the user never saw counted.
+///
+/// # Errors
+///
+/// [`SyncError::InvalidConfirmation`] when the plan no longer matches, or any
+/// path error from planning. Per-file copy failures are reported inside the
+/// report rather than aborting the run.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn sync_apply(
+    state: tauri::State<'_, AppState>,
+    source: String,
+    destination: String,
+    compare_mode: CompareMode,
+    on_differ: OnDiffer,
+    confirmation: ConfirmationToken,
+) -> Result<SyncReport, SyncError> {
+    let keys = state.token_keys().clone();
+    let generation = TreeGeneration::FIRST;
+    tauri::async_runtime::spawn_blocking(move || {
+        sync::apply(
+            &keys,
+            generation,
+            now_unix_ms(),
+            sync::SyncRequest {
+                source: Path::new(&source),
+                destination: Path::new(&destination),
+                compare_mode,
+                on_differ,
+            },
+            &confirmation,
+        )
+    })
+    .await
+    .map_err(|error| SyncError::Internal(error.to_string()))?
 }
 
 /// Mounted local volumes, for the launch screen.

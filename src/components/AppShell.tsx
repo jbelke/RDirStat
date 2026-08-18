@@ -36,6 +36,7 @@ import { DriveSwitcher } from "@/components/DriveSwitcher";
 import { RelocateDialog } from "@/components/RelocateDialog";
 import { SelectionActions } from "@/components/SelectionActions";
 import { StoragePanel } from "@/components/StoragePanel";
+import { SyncRoute } from "@/components/SyncRoute";
 import { CategoryLegend } from "@/components/canvas/CategoryLegend";
 import {
   HierarchyCanvas,
@@ -108,11 +109,55 @@ import { CircleAlert, X } from "lucide-react";
  * The catalog still has a job (many scans, cross-scan queries, retention), but
  * it was never what these five needed.
  */
-const REPORT_ROUTES: readonly { id: Route; label: string }[] = [
-  { id: "types", label: "Types" },
-  { id: "ages", label: "Ages" },
-  { id: "diff", label: "Diff" },
-  { id: "dupes", label: "Dupes" },
+/**
+ * The left rail, grouped by what kind of tool each route is.
+ *
+ * This app started as a disk *analyser* and is becoming a general disk
+ * utility, so the rail is organised by the job rather than as one flat list.
+ * The grouping is data, not markup: adding a tool — cloning, verifying,
+ * archiving — is a row in this table and nothing else, which is the point when
+ * the set is expected to grow.
+ *
+ * `needsScan` is the load-bearing field. Everything under Analysis reads the
+ * tree in memory and is meaningless without one, so it is visibly disabled
+ * with the reason rather than hidden — a missing feature you can see and
+ * understand beats a navigation that changes shape underneath you. Tools that
+ * operate on paths rather than on a scan are always available, which is why
+ * Sync is not gated: syncing two folders has nothing to do with having scanned
+ * a volume.
+ */
+interface RailItem {
+  readonly id: Route;
+  readonly label: string;
+  /** Disabled until a tree is loaded. */
+  readonly needsScan: boolean;
+}
+
+interface RailGroup {
+  readonly id: string;
+  readonly label: string;
+  readonly items: readonly RailItem[];
+}
+
+const RAIL_GROUPS: readonly RailGroup[] = [
+  {
+    id: "analysis",
+    label: "Analyse",
+    items: [
+      { id: "volumes", label: "Volumes", needsScan: false },
+      { id: "tree", label: "Tree", needsScan: true },
+      { id: "sizes", label: "Sizes", needsScan: true },
+      { id: "types", label: "Types", needsScan: true },
+      { id: "ages", label: "Ages", needsScan: true },
+      { id: "diff", label: "Diff", needsScan: true },
+      { id: "dupes", label: "Dupes", needsScan: true },
+    ],
+  },
+  {
+    id: "transfer",
+    label: "Transfer",
+    items: [{ id: "sync", label: "Sync folders", needsScan: false }],
+  },
 ];
 
 const LAYOUT_OPTIONS = [
@@ -528,39 +573,38 @@ export function AppShell() {
       </Titlebar>
 
       <div className="flex min-h-0 flex-1">
-        <nav aria-label="Views" className="flex w-32 shrink-0 flex-col gap-0.5 border-r border-border/60 p-2">
-          <RailButton id="volumes" label="Volumes" route={route} onSelect={setRoute} />
-          <RailButton
-            id="tree"
-            label="Tree"
-            route={route}
-            onSelect={setRoute}
-            disabled={generation === GENERATION_NONE}
-          />
-          <RailButton
-            id="sizes"
-            label="Sizes"
-            route={route}
-            onSelect={setRoute}
-            disabled={generation === GENERATION_NONE}
-          />
-          {REPORT_ROUTES.map((entry) => (
-            <RailButton
-              key={entry.id}
-              id={entry.id}
-              label={entry.label}
-              route={route}
-              onSelect={setRoute}
-              disabled={generation === GENERATION_NONE}
-            />
+        <nav aria-label="Tools" className="flex w-36 shrink-0 flex-col gap-3 border-r border-border/60 p-2">
+          {RAIL_GROUPS.map((group) => (
+            <div key={group.id} className="flex flex-col gap-0.5">
+              {/* A real heading, not a styled div: the rail is the app's
+                * primary navigation and a screen-reader user should be able to
+                * jump between tool families rather than hearing ten peer
+                * buttons with no structure. */}
+              <h2 className="px-2 pb-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                {group.label}
+              </h2>
+              {group.items.map((item) => (
+                <RailButton
+                  key={item.id}
+                  id={item.id}
+                  label={item.label}
+                  route={route}
+                  onSelect={setRoute}
+                  disabled={item.needsScan && generation === GENERATION_NONE}
+                />
+              ))}
+            </div>
           ))}
 
-          {/* Below a spacer: this is about the app's own data rather than the
-            * scanned volume's, so it does not belong in the same run as the
-            * views. Never disabled — what the app has stored is a question you
-            * can ask before you have scanned anything, and the honest answer
-            * then is "nothing yet". */}
-          <div className="mt-auto pt-2">
+          {/* Pinned to the bottom and outside the groups: this is about the
+            * app's own data rather than any disk you asked it to look at.
+            * Never disabled — "what is this app storing" is a fair question
+            * before you have scanned anything, and the honest answer is
+            * "nothing yet". */}
+          <div className="mt-auto flex flex-col gap-0.5">
+            <h2 className="px-2 pb-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+              App
+            </h2>
             <RailButton id="storage" label="Stored data" route={route} onSelect={setRoute} />
           </div>
         </nav>
@@ -586,6 +630,8 @@ export function AppShell() {
               </button>
             </Alert>
           )}
+
+          {route === "sync" && <SyncRoute />}
 
           {route === "storage" && (
             <StoragePanel
