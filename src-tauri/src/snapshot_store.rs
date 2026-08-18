@@ -76,7 +76,8 @@ const EXTENSION: &str = "rdstat";
 /// The on-disk snapshot cache.
 #[derive(Debug, Clone)]
 pub(crate) struct SnapshotStore {
-    /// `<app data>/snapshots`.
+    /// The resolved store root — `<app data>/snapshots` unless the user or the
+    /// environment moved it. See [`crate::settings::resolve_root`].
     root: PathBuf,
 }
 
@@ -134,15 +135,9 @@ impl SnapshotStore {
     /// cannot be created is not fatal: the app still scans, it just cannot
     /// remember.
     pub(crate) fn new(app: &tauri::AppHandle) -> Result<Self, std::io::Error> {
-        use tauri::Manager as _;
-
-        let base = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| std::io::Error::other(format!("no app data directory: {error}")))?;
-        let root = base.join("snapshots");
-        fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        let resolved = resolve(app)?;
+        fs::create_dir_all(&resolved.path)?;
+        Ok(Self { root: resolved.path })
     }
 
     /// A store rooted at an explicit directory. For tests.
@@ -150,7 +145,40 @@ impl SnapshotStore {
     pub(crate) fn at(root: PathBuf) -> Self {
         Self { root }
     }
+}
 
+/// Where the store *would* be, and why, without creating anything.
+///
+/// Separate from [`SnapshotStore::new`] because the settings surface has to be
+/// able to describe a configured location that is currently unreachable — an
+/// external disk that is not mounted — and creating the directory would be
+/// exactly the wrong response to that. `/Volumes/big` with the disk absent is a
+/// writable path on the boot volume, so a `create_dir_all` there would
+/// silently manufacture a shadow store that the real disk would later mask.
+///
+/// # Errors
+///
+/// Only if the platform has no app data directory at all, which is the same
+/// condition that would defeat every other persistence path in the app.
+pub(crate) fn resolve(app: &tauri::AppHandle) -> Result<crate::settings::SnapshotRoot, std::io::Error> {
+    Ok(crate::settings::resolve_root(&app_data_dir(app)?))
+}
+
+/// The app data directory itself, which is where `settings.json` lives no
+/// matter where the store has been moved to.
+///
+/// # Errors
+///
+/// As [`resolve`].
+pub(crate) fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, std::io::Error> {
+    use tauri::Manager as _;
+
+    app.path()
+        .app_data_dir()
+        .map_err(|error| std::io::Error::other(format!("no app data directory: {error}")))
+}
+
+impl SnapshotStore {
     /// Writes `scan` and prunes older snapshots of the same root.
     ///
     /// Returns the path written.

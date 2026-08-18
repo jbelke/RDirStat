@@ -84,6 +84,7 @@ import {
   useScanDiff,
   useScanStatus,
   useSnapshotOffers,
+  useSetSnapshotDir,
   useStorageReport,
   useVolumes,
   useSizeBands,
@@ -162,6 +163,7 @@ export function AppShell() {
   // Only while the panel is open: reading this walks the store directory and
   // peeks every file, which is cheap but not free.
   const storage = useStorageReport(route === "storage");
+  const setSnapshotDir = useSetSnapshotDir();
 
   const [sorting, setSorting] = useState<SortingState>([{ id: "logical", desc: true }]);
   const [starting, setStarting] = useState(false);
@@ -295,8 +297,8 @@ export function AppShell() {
         return;
       }
       setActionError(
-        `Move to Trash is not wired up in this build (${nodes.length} item${nodes.length === 1 ? "" : "s"} selected). ` +
-          "The confirmation sheet that binds a token to this generation has not been built, and issuing the action without it is not acceptable.",
+        `Move to Trash is not available yet for ${nodes.length} item${nodes.length === 1 ? "" : "s"}. ` +
+          "It needs a confirmation step that shows exactly what will move, and moving things to the Trash without showing you that first is not something this will do.",
       );
     },
     [deletionArmed],
@@ -577,6 +579,13 @@ export function AppShell() {
                 // interpret a 960 MB binary.
                 if (directory !== undefined) void revealItemInDir(directory);
               }}
+              onChangeDirectory={async (directory) => {
+                // Deliberately not caught here: the panel renders the
+                // backend's reason inline, next to the field the user just
+                // edited, rather than in the shell-wide error strip where it
+                // would be detached from the thing that caused it.
+                await setSnapshotDir.mutateAsync(directory);
+              }}
               onExport={(snapshot) => {
                 setActionError(null);
                 exportSnapshot(snapshot.path)
@@ -736,6 +745,7 @@ export function AppShell() {
                 formatBytes={formatSI}
                 colorBy={colorBy}
                 categoryFilter={categoryFilter}
+                metric={sizeMetric}
               />
 
               {/* The key to the colours. Without it the encoding is decoration:

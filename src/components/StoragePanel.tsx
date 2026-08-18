@@ -1,20 +1,20 @@
 /**
  * What this app has stored on your disk, and how to get it out.
  *
- * ## The honest part
+ * The store is the `*.rdstat` snapshots. From the user's point of view they ARE
+ * the database: it is where scans live, it is what survives a relaunch, it is
+ * what "back up the data-snapshot" refers to, and it is the app's entire disk
+ * footprint. A tool that measures everyone else's disk usage owes an especially
+ * straight answer about its own.
  *
- * The user asked to see "the database and the details for it (duckdb)". There
- * is no DuckDB in this build. `docs/06-DATA.md` describes a DuckDB/Parquet
- * catalog as an explicitly optional later phase, and nothing in the workspace
- * depends on it. So this panel does not draw an empty database and let it look
- * like a broken one — it says the catalog is not present, and shows the store
- * that actually exists.
+ * ## Nothing in here describes the build
  *
- * That store is the `*.rdstat` snapshots. From the user's point of view they
- * ARE the database: it is where scans live, it is what survives a relaunch, it
- * is what "back up the data-snapshot" refers to, and it is the app's entire
- * disk footprint. A tool that measures everyone else's disk usage owes an
- * especially straight answer about its own.
+ * An earlier version explained that the DuckDB catalog was a later phase, citing
+ * the design doc. That is roadmap, and roadmap is for the people writing the
+ * app, not the people using it: a user reading their own storage does not need
+ * to know which phase something is in, and a panel that lists unbuilt features
+ * makes the built ones look provisional. If a capability is absent, it is simply
+ * not shown.
  *
  * ## Presentational on purpose
  *
@@ -24,9 +24,9 @@
  * a directory and peeks every file.
  */
 
-import { AlertTriangle, Database, Download, FolderOpen, HardDrive, Info } from "lucide-react";
+import { AlertTriangle, Check, Database, Download, FolderOpen, HardDrive, Lock, RotateCcw } from "lucide-react";
+import { useEffect, useState } from "react";
 
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { formatSI } from "@/lib/format";
 import type { StorageReportView, StoredSnapshotView } from "@/lib/ipc";
@@ -37,9 +37,158 @@ export interface StoragePanelProps {
   loading?: boolean;
   /** Opens the store directory in Finder. */
   onRevealDirectory?: () => void;
+  /**
+   * Points the store somewhere else, or at the default when null.
+   *
+   * Rejected paths come back as a thrown error carrying the backend's reason,
+   * which is the string this panel renders — "that folder is not writable" is
+   * an answer the user can act on, and inventing a friendlier one here would
+   * mean guessing which of a dozen causes applied.
+   */
+  onChangeDirectory?: (directory: string | null) => Promise<unknown>;
   /** Copies one snapshot somewhere the user chooses. */
   onExport?: (snapshot: StoredSnapshotView) => void;
   className?: string;
+}
+
+/**
+ * Where the store is, and — when it is allowed — where to move it.
+ *
+ * Three things have to be visible at once, and leaving any of them out
+ * produces a control that looks broken:
+ *
+ * - **the location in effect**, which is what the snapshots below are read from;
+ * - **which layer chose it**, because `RDIRSTAT_DATA_DIR` silently outranking a
+ *   saved folder is indistinguishable from the setting not working;
+ * - **whether it can be written to**, since an existing-but-unwritable folder
+ *   and an empty store look identical until a scan finishes and cannot be saved.
+ *
+ * Changing the location does not move the files that are already stored. They
+ * are a cache — pruned to two per volume, rebuilt by the next scan — and
+ * silently relocating gigabytes as a side effect of editing a text field is
+ * not a thing a preference should do. The note under the field says so, rather
+ * than leaving the user to discover it from a suddenly empty list.
+ */
+function Location({
+  report,
+  onReveal,
+  onChange,
+}: {
+  report: StorageReportView;
+  onReveal?: () => void;
+  onChange?: (directory: string | null) => Promise<unknown>;
+}) {
+  const saved = report.configuredDirectory ?? "";
+  const [draft, setDraft] = useState(saved);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Re-sync when the report changes underneath — after a successful save, or
+  // when another surface changed it. Keyed on the saved value, so typing is
+  // never interrupted by an unrelated refetch.
+  useEffect(() => {
+    setDraft(saved);
+    setError(null);
+  }, [saved]);
+
+  const editable = onChange !== undefined && !report.directoryLocked;
+  const dirty = draft.trim() !== saved;
+
+  async function apply(directory: string | null) {
+    if (onChange === undefined) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onChange(directory);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <div className="flex items-baseline gap-2">
+        <span className="text-xs text-muted-foreground">Location</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-xs" title={report.directory}>
+          {report.directory}
+        </span>
+        {report.directoryState === "readOnly" && (
+          <span className="shrink-0 text-xs font-medium text-destructive">not writable</span>
+        )}
+        {onReveal !== undefined && report.directoryState !== "missing" && (
+          <Button variant="ghost" size="sm" onClick={onReveal}>
+            <FolderOpen aria-hidden />
+            Reveal
+          </Button>
+        )}
+      </div>
+
+      {report.directoryLocked && (
+        <p className="mt-2 flex items-start gap-1.5 text-xs text-muted-foreground">
+          <Lock aria-hidden className="mt-0.5 size-3 shrink-0" />
+          <span>
+            Set by <code className="font-mono">RDIRSTAT_DATA_DIR</code> in the environment, which
+            wins for this run.
+            {saved !== "" && (
+              <>
+                {" "}
+                Your saved folder is <code className="font-mono">{saved}</code> and takes effect
+                again when the variable is unset.
+              </>
+            )}
+          </span>
+        </p>
+      )}
+
+      {editable && (
+        <div className="mt-3 flex flex-col gap-1.5">
+          <label className="text-xs text-muted-foreground" htmlFor="snapshot-dir">
+            Keep snapshots in
+          </label>
+          <div className="flex items-center gap-2">
+            <input
+              id="snapshot-dir"
+              className="min-w-0 flex-1 rounded border border-border/60 bg-transparent px-2 py-1 font-mono text-xs"
+              placeholder={report.defaultDirectory}
+              spellCheck={false}
+              value={draft}
+              disabled={busy}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && dirty) void apply(draft.trim() === "" ? null : draft.trim());
+              }}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busy || !dirty}
+              onClick={() => void apply(draft.trim() === "" ? null : draft.trim())}
+            >
+              <Check aria-hidden />
+              Use this
+            </Button>
+            {saved !== "" && (
+              <Button variant="ghost" size="sm" disabled={busy} onClick={() => void apply(null)}>
+                <RotateCcw aria-hidden />
+                Default
+              </Button>
+            )}
+          </div>
+          {error !== null ? (
+            <p className="text-xs text-destructive">{error}</p>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Snapshots already saved stay where they are; this only changes where the next one is
+              written. An absolute path — leave it empty for{" "}
+              <code className="font-mono">{report.defaultDirectory}</code>.
+            </p>
+          )}
+        </div>
+      )}
+    </>
+  );
 }
 
 function whenTaken(unixMs: number): string {
@@ -53,6 +202,7 @@ export function StoragePanel({
   report,
   loading = false,
   onRevealDirectory,
+  onChangeDirectory,
   onExport,
   className,
 }: StoragePanelProps) {
@@ -81,18 +231,7 @@ export function StoragePanel({
       </header>
 
       <section className="mb-4 rounded border border-border/60 p-3">
-        <div className="flex items-baseline gap-2">
-          <span className="text-xs text-muted-foreground">Location</span>
-          <span className="min-w-0 flex-1 truncate font-mono text-xs" title={report.directory}>
-            {report.directory}
-          </span>
-          {onRevealDirectory !== undefined && report.directoryExists && (
-            <Button variant="ghost" size="sm" onClick={onRevealDirectory}>
-              <FolderOpen aria-hidden />
-              Reveal
-            </Button>
-          )}
-        </div>
+        <Location report={report} onReveal={onRevealDirectory} onChange={onChangeDirectory} />
         <dl className="mt-2 grid grid-cols-3 gap-2 text-xs">
           <Stat label="Saved scans" value={report.snapshots.length.toLocaleString()} />
           <Stat label="Disk used" value={formatSI(report.totalBytes)} />
@@ -104,25 +243,11 @@ export function StoragePanel({
         </dl>
       </section>
 
-      {/* Stated rather than left as a blank panel. A "database" section that is
-        * simply empty reads as broken; saying the catalog is a later phase
-        * reads as a plan. */}
-      {!report.catalogPresent && (
-        <Alert className="mb-4">
-          <Info aria-hidden />
-          <AlertTitle>The query catalog is not part of this build</AlertTitle>
-          <AlertDescription>
-            docs/06-DATA.md specifies an optional DuckDB/Parquet catalog for cross-scan reporting. It
-            is not implemented yet, and nothing here depends on it — scanning, browsing, and the
-            saved scans below all work without it. The routes that would need it say so where they
-            are disabled.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {!report.directoryExists ? (
+      {report.directoryState === "missing" ? (
         <p className="text-sm text-muted-foreground">
-          Nothing saved yet. The first completed scan creates the store.
+          {report.directorySource === "default"
+            ? "Nothing saved yet. The first completed scan creates the store."
+            : "That folder is not there. If it lives on a removable disk, connect it — scans cannot be saved until then."}
         </p>
       ) : report.snapshots.length === 0 && report.unreadable.length === 0 ? (
         <p className="text-sm text-muted-foreground">The store is empty.</p>

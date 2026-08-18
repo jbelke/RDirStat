@@ -39,6 +39,7 @@ import {
   type ScanError,
   type ScanOptions,
   type ScanState,
+  type StorageReport,
   type Sort,
   type SortDirection,
   type SortKey,
@@ -1032,9 +1033,33 @@ export interface UnreadableSnapshotView {
   readonly reason: string;
 }
 
+/**
+ * Whether the store directory is there and usable.
+ *
+ * Three states rather than two booleans, mirroring the backend: a directory
+ * that exists and rejects writes — an unplugged disk's mount point, a folder
+ * owned by another account — looks exactly like an empty store until a scan
+ * finishes and cannot be saved.
+ */
+export type DirectoryStateView = "missing" | "readOnly" | "writable";
+
+/** Which layer of the resolution order chose the store location. */
+export type DirectorySourceView = "environment" | "setting" | "default";
+
 export interface StorageReportView {
   readonly directory: string;
-  readonly directoryExists: boolean;
+  readonly directoryState: DirectoryStateView;
+  /**
+   * True when the location came from `RDIRSTAT_DATA_DIR`. The panel disables
+   * its editor and says why: an edit that saves a setting the environment is
+   * about to override would look like a bug.
+   */
+  readonly directoryLocked: boolean;
+  readonly directorySource: DirectorySourceView;
+  /** What "reset to default" would select. */
+  readonly defaultDirectory: string;
+  /** The saved setting, shown even when the environment is overriding it. */
+  readonly configuredDirectory: string | null;
   readonly snapshots: readonly StoredSnapshotView[];
   readonly unreadable: readonly UnreadableSnapshotView[];
   readonly totalBytes: number;
@@ -1050,9 +1075,30 @@ export interface StorageReportView {
 /** Everything the app keeps on disk. Peeks headers only; never decodes an arena. */
 export async function storageReport(): Promise<StorageReportView> {
   const report = await unwrap("storage_report", commands.storageReport());
+  return toStorageReport(report);
+}
+
+/**
+ * Point the store at `directory`, or at the default when it is null.
+ *
+ * The backend validates before it saves — an unwritable folder is rejected
+ * here rather than at the end of the next scan — and returns the fresh report,
+ * so the panel never has to guess what took effect.
+ */
+export async function setSnapshotDir(directory: string | null): Promise<StorageReportView> {
+  return toStorageReport(await unwrap("set_snapshot_dir", commands.setSnapshotDir(directory)));
+}
+
+/** The one place the wire shape becomes the view model. */
+function toStorageReport(report: StorageReport): StorageReportView {
   return {
     directory: report.directory,
-    directoryExists: report.directory_exists,
+    directoryState:
+      report.directory_state === "read_only" ? "readOnly" : report.directory_state,
+    directoryLocked: report.directory_source === "environment",
+    directorySource: report.directory_source,
+    defaultDirectory: report.default_directory,
+    configuredDirectory: report.configured_directory,
     snapshots: report.snapshots.map((snapshot) => ({
       path: snapshot.path,
       rootPath: snapshot.root_path,

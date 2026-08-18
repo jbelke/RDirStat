@@ -310,6 +310,27 @@ export const commands = {
 	 */
 	storageReport: () => typedError<StorageReport, CommandError>(__TAURI_INVOKE("storage_report")),
 	/**
+	 *  Points the snapshot store at `directory`, or back at the default.
+	 * 
+	 *  `None` clears the setting. The path is validated before it is saved, not
+	 *  after: a stored location the app cannot write to would fail at the end of
+	 *  the next scan, which is the most expensive possible moment to find out.
+	 * 
+	 *  This does **not** move existing snapshots. They are a cache, keyed by a
+	 *  digest of the scanned root, so a store that starts empty refills itself on
+	 *  the next scan of each volume — and moving gigabytes as a side effect of
+	 *  changing a preference is not something a settings control should do
+	 *  silently. The panel says where the old files are so they can be moved or
+	 *  deleted deliberately.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`CommandError::Internal`] with a reason the user can act on: a relative
+	 *  path, a path that is not a directory and cannot be created, or one that
+	 *  exists but rejects a write.
+	 */
+	setSnapshotDir: (directory: string | null) => typedError<StorageReport, CommandError>(__TAURI_INVOKE("set_snapshot_dir", { directory })),
+	/**
 	 *  Copies one stored snapshot to a path the user chose.
 	 * 
 	 *  `destination_dir` is the folder to write into; empty means the user's
@@ -1086,6 +1107,28 @@ export type DirTotals = {
 };
 
 /**
+ *  Whether the store directory is there, and whether it can be written to.
+ * 
+ *  One enum rather than two booleans because "does not exist but is writable"
+ *  is not a state the world can be in, and a pair of bools invites a UI to
+ *  render it. The distinction that matters to the user is the third rung:
+ *  a directory that exists and rejects writes — an unplugged disk's mount
+ *  point, a folder owned by another account, a full volume — looks identical
+ *  to an empty store until the end of the next scan, which is the worst
+ *  possible moment to find out.
+ */
+export type DirectoryState = 
+/**
+ *  Not there. The ordinary state before the first scan, and also what an
+ *  unmounted volume looks like.
+ */
+"missing" | 
+/**  There, but the app cannot create a file in it. */
+"read_only" | 
+/**  There and writable. */
+"writable";
+
+/**
  *  A path rendered for display, never for a filesystem operation.
  * 
  *  Filesystem names are bytes. This is the escaped, human-readable projection
@@ -1668,6 +1711,15 @@ export type RiskTier =
 /**  Refused outright. [`plan`] returns this with `token: None`. */
 "blocked";
 
+/**  Which layer of the resolution order supplied the store root. */
+export type RootSource = 
+/**  `RDIRSTAT_DATA_DIR` was set, so the saved setting is inert this run. */
+"environment" | 
+/**  The user chose a directory and it is in effect. */
+"setting" | 
+/**  Nothing was configured; this is `<app data>/snapshots`. */
+"default";
+
 /**  Include or exclude. */
 export type RuleAction = 
 /**  Descend into, and retain, matches. Overrides a later exclude. */
@@ -2146,6 +2198,26 @@ export type SizeBandRow = {
 };
 
 /**
+ *  Which byte total drives tile area.
+ * 
+ *  docs/05-UI.md: "default tables and charts to allocated while labelling that
+ *  APFS sharing can make physical recovery smaller than the displayed
+ *  allocation". Logical and allocated are never summed or reconciled — a layout
+ *  is computed from one of them, never a blend.
+ * 
+ *  It is `Serialize`/`specta::Type` because docs/05-UI.md makes this an explicit
+ *  user choice — "a segmented control in the toolbar that retitles the size
+ *  columns, so a screenshot is never ambiguous about which number it is
+ *  showing" — not a silent default. The frozen `layout` signature does not carry
+ *  it yet; when the toolbar lands, this is the type that crosses.
+ */
+export type SizeMetric = 
+/**  `st_blocks * 512` rolled up the subtree. The default. */
+"allocated" | 
+/**  Logical bytes rolled up the subtree. */
+"logical";
+
+/**
  *  Whether a volume has a restorable snapshot, and what it says about itself.
  * 
  *  Read from the snapshot's header and metadata only, so a menu can render this
@@ -2274,10 +2346,25 @@ export type StartError =
 
 /**  Everything the app has on disk. */
 export type StorageReport = {
-	/**  `<app data>/snapshots`. Shown so the user can open it themselves. */
+	/**  The store root in effect. Shown so the user can open it themselves. */
 	directory: string,
-	/**  Whether that directory exists yet — it does not until the first scan. */
-	directory_exists: boolean,
+	/**  Whether that directory is there and usable. */
+	directory_state: DirectoryState,
+	/**
+	 *  Which layer of the resolution order chose [`Self::directory`].
+	 * 
+	 *  The panel needs this to explain itself: a location the user cannot
+	 *  change from the UI because `RDIRSTAT_DATA_DIR` is set looks like a bug
+	 *  unless the UI says which layer won.
+	 */
+	directory_source: RootSource,
+	/**  `<app data>/snapshots` — what "reset to default" would select. */
+	default_directory: string,
+	/**
+	 *  The saved setting, present even when the environment is overriding it,
+	 *  because hiding it would misrepresent what the next launch will do.
+	 */
+	configured_directory: string | null,
 	snapshots: StoredSnapshot[],
 	unreadable: UnreadableSnapshot[],
 	/**

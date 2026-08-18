@@ -20,8 +20,11 @@
 import {
   QueryClient,
   useInfiniteQuery,
+  useMutation,
   useQuery,
+  useQueryClient,
   type UseInfiniteQueryResult,
+  type UseMutationResult,
   type UseQueryResult,
 } from "@tanstack/react-query";
 
@@ -40,6 +43,7 @@ import {
   sizeBandEntries,
   sizeBands,
   snapshotOffers,
+  setSnapshotDir,
   storageReport,
   volumes,
   type AncestorRow,
@@ -232,6 +236,25 @@ export function useStorageReport(enabled: boolean): UseQueryResult<StorageReport
     queryFn: storageReport,
     enabled,
     staleTime: 5_000,
+  });
+}
+
+/**
+ * Move the snapshot store, or put it back on the default.
+ *
+ * The command returns the fresh report, so the cache is *set* from the
+ * response rather than invalidated: re-reading would walk the new directory
+ * and peek every file a second time for an answer the backend just handed us.
+ * A rejection is left to the caller — the panel renders the backend's reason,
+ * which is the only place that knows why a folder was refused.
+ */
+export function useSetSnapshotDir(): UseMutationResult<StorageReportView, Error, string | null> {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: setSnapshotDir,
+    onSuccess: (report) => {
+      client.setQueryData(queryKeys.storageReport(), report);
+    },
   });
 }
 

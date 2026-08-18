@@ -43,6 +43,7 @@ mod fsident;
 mod progress;
 mod query;
 mod relocate;
+mod settings;
 mod snapshot_store;
 mod state;
 mod storage;
@@ -87,6 +88,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::move_to_trash,
             commands::reveal_in_finder,
             commands::storage_report,
+            commands::set_snapshot_dir,
             commands::export_snapshot,
             commands::relocate_plan,
             commands::relocate_apply,
@@ -96,6 +98,9 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
         // generated types for a hand-written `invoke<ArrayBuffer>` call.
         .typ::<rdirstat_core::LayoutKind>()
         .typ::<rdirstat_core::Viewport>()
+        // Which byte count the layout's AREAS encode, so the toolbar's
+        // logical/allocated choice is typed on the wire rather than a string.
+        .typ::<rdirstat_treemap::SizeMetric>()
         .typ::<rdirstat_core::ReportName>()
         .typ::<rdirstat_core::ReportParams>()
         .typ::<rdirstat_core::CatalogScanId>()
@@ -250,6 +255,15 @@ fn restore_last_scan(app: tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> tauri::Result<()> {
     install_tracing();
+
+    // Before anything reads `RDIRSTAT_DATA_DIR`. A development convenience
+    // only: a bundled `.app` is launched with a working directory of `/` and
+    // will never find a project `.env`, which is why the same setting is also
+    // reachable from the storage panel.
+    if let Some(path) = settings::load_dotenv() {
+        tracing::info!(path = %path.display(), "loaded .env");
+    }
+
     let builder = specta_builder();
 
     #[cfg(debug_assertions)]

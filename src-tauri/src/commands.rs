@@ -17,10 +17,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rdirstat_core::{
-    ActionError, CancelState, CatalogScanId, ChildPage, CommandError, CompletedScan, ConfirmationToken, Cursor,
-    Details, DisplayPath, LayoutKind, NodeId, QueryError, ReportName, ReportParams, ScanErrorReport, ScanId,
-    AgeBucketEntry, AgeBucketRow, CategoryEntry, CategoryId, CategoryRow, DuplicateCandidateReport,
-    DiffMetric, DiffReport,
+    ActionError, AgeBucketEntry, AgeBucketRow, CancelState, CatalogScanId, CategoryEntry, CategoryId, CategoryRow,
+    ChildPage, CommandError, CompletedScan, ConfirmationToken, Cursor, Details, DiffMetric, DiffReport, DisplayPath,
+    DuplicateCandidateReport, LayoutKind, NodeId, QueryError, ReportName, ReportParams, ScanErrorReport, ScanId,
     ScanOptions, ScanStatus, SizeBandEntry, SizeBandRow, SnapshotOffer, Sort, StartError, TrashPreview, TrashReport,
     TreeGeneration, VolumeInfo,
 };
@@ -449,7 +448,6 @@ pub(crate) async fn restore_snapshot(
     Ok(restored)
 }
 
-
 /// Content-category totals for a subtree — the Types report.
 ///
 /// `O(subtree)`, so it runs on the blocking pool and the caller fetches it only
@@ -593,7 +591,6 @@ pub(crate) async fn duplicate_candidates(
     .map_err(|error| QueryError::Internal(error.to_string()))?
 }
 
-
 /// Compares the published scan against the previous snapshot of the same root.
 ///
 /// **Both halves of the comparison are chosen here, not by the caller.** The
@@ -629,8 +626,8 @@ pub(crate) async fn scan_diff(
 ) -> Result<DiffReport, QueryError> {
     let live = state.tree_for_query(generation)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let store = crate::snapshot_store::SnapshotStore::new(&app)
-            .map_err(|error| QueryError::Internal(error.to_string()))?;
+        let store =
+            crate::snapshot_store::SnapshotStore::new(&app).map_err(|error| QueryError::Internal(error.to_string()))?;
         let previous = store
             .load_previous_for_root(&live.root_path, live.volume.device)
             .ok_or_else(|| QueryError::Internal("only one saved scan for this volume".to_owned()))?;
@@ -835,13 +832,106 @@ pub(crate) async fn relocate_apply(
 #[specta::specta]
 pub(crate) async fn storage_report(app: tauri::AppHandle) -> Result<StorageReport, CommandError> {
     tauri::async_runtime::spawn_blocking(move || {
-        crate::snapshot_store::SnapshotStore::new(&app).map_or_else(
+        // Resolved, not created. A configured store on an unmounted disk must
+        // be *described* — that is exactly when the user opens this panel —
+        // and creating the directory would write a decoy store onto the mount
+        // point instead.
+        crate::snapshot_store::resolve(&app).map_or_else(
             |error| storage::empty_report(&error.to_string()),
-            |store| storage::describe(store.directory()),
+            |resolved| storage::describe(&resolved),
         )
     })
     .await
     .map_err(|error| CommandError::Internal(error.to_string()))
+}
+
+/// Points the snapshot store at `directory`, or back at the default.
+///
+/// `None` clears the setting. The path is validated before it is saved, not
+/// after: a stored location the app cannot write to would fail at the end of
+/// the next scan, which is the most expensive possible moment to find out.
+///
+/// This does **not** move existing snapshots. They are a cache, keyed by a
+/// digest of the scanned root, so a store that starts empty refills itself on
+/// the next scan of each volume — and moving gigabytes as a side effect of
+/// changing a preference is not something a settings control should do
+/// silently. The panel says where the old files are so they can be moved or
+/// deleted deliberately.
+///
+/// # Errors
+///
+/// [`CommandError::Internal`] with a reason the user can act on: a relative
+/// path, a path that is not a directory and cannot be created, or one that
+/// exists but rejects a write.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn set_snapshot_dir(
+    app: tauri::AppHandle,
+    directory: Option<String>,
+) -> Result<StorageReport, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_data =
+            crate::snapshot_store::app_data_dir(&app).map_err(|error| CommandError::Internal(error.to_string()))?;
+
+        let chosen = match directory.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(raw) => Some(validate_store_dir(Path::new(raw))?),
+        };
+
+        let mut settings = crate::settings::load(&app_data);
+        settings.snapshot_dir = chosen;
+        crate::settings::save(&app_data, &settings)
+            .map_err(|error| CommandError::Internal(format!("could not save settings: {error}")))?;
+
+        crate::snapshot_store::resolve(&app).map_or_else(
+            |error| Ok(storage::empty_report(&error.to_string())),
+            |resolved| Ok(storage::describe(&resolved)),
+        )
+    })
+    .await
+    .map_err(|error| CommandError::Internal(error.to_string()))?
+}
+
+/// Accepts a directory only if the app can actually write there.
+///
+/// Creates it when it is missing, because "choose a folder that does not exist
+/// yet" is a reasonable thing to want and refusing would send the user to
+/// Finder to make an empty directory by hand. It does not create *parents*
+/// beyond one level for the same reason `/Volumes/big/snapshots` must not be
+/// silently manufactured while the disk is unplugged: one missing level is a
+/// new folder, several is a wrong path.
+fn validate_store_dir(path: &Path) -> Result<PathBuf, CommandError> {
+    if !path.is_absolute() {
+        return Err(CommandError::Internal(
+            "the snapshot folder must be an absolute path".to_owned(),
+        ));
+    }
+    if path.components().any(|part| part.as_os_str() == "..") {
+        return Err(CommandError::Internal(
+            "the snapshot folder must not contain `..`".to_owned(),
+        ));
+    }
+    if !path.is_dir() {
+        let parent = path
+            .parent()
+            .ok_or_else(|| CommandError::Internal("that path has no parent directory".to_owned()))?;
+        if !parent.is_dir() {
+            return Err(CommandError::Internal(format!(
+                "{} does not exist, so {} cannot be created there",
+                parent.display(),
+                path.display()
+            )));
+        }
+        std::fs::create_dir(path)
+            .map_err(|error| CommandError::Internal(format!("could not create {}: {error}", path.display())))?;
+    }
+
+    let probe = path.join(format!(".rdirstat-write-probe.{}", std::process::id()));
+    std::fs::File::create(&probe)
+        .map_err(|error| CommandError::Internal(format!("{} is not writable: {error}", path.display())))?;
+    let _ = std::fs::remove_file(&probe);
+
+    Ok(path.to_path_buf())
 }
 
 /// Copies one stored snapshot to a path the user chose.
@@ -1008,6 +1098,7 @@ pub(crate) async fn layout(
     viewport: rdirstat_core::Viewport,
     min_px: f32,
     categories: Option<Vec<u8>>,
+    metric: Option<rdirstat_treemap::SizeMetric>,
 ) -> Result<tauri::ipc::Response, QueryError> {
     let scan = state.tree_for_query(generation)?;
     let response = tauri::async_runtime::spawn_blocking(move || {
@@ -1021,13 +1112,33 @@ pub(crate) async fn layout(
         let filter = categories
             .filter(|ids| !ids.is_empty())
             .map(|ids| rdirstat_treemap::CategorySet::from_ids(&ids));
+        // Which byte count the AREAS encode. docs/05-UI.md makes logical vs
+        // allocated an explicit user choice "so a screenshot is never ambiguous
+        // about which number it is showing" — and a picture drawn from one
+        // number while the toolbar names the other is exactly that ambiguity.
+        // The toolbar sends its choice; `None` keeps the crate's default.
+        let metric = metric.unwrap_or_default();
+
+        if !scan.tree.contains(root) {
+            return Err(QueryError::UnknownNode { node: root });
+        }
+        // A canvas that has not been measured yet asks for a 0-by-0 viewport,
+        // which `LayoutOptions::new` rejects. `layout` answers that case with an
+        // empty batch rather than an error, so it stays the one that handles it
+        // — an empty batch has no geometry, so which metric it was drawn from
+        // cannot matter.
+        let unmeasured = viewport.width.is_finite()
+            && viewport.height.is_finite()
+            && (viewport.width <= 0.0 || viewport.height <= 0.0);
+        if unmeasured {
+            return rdirstat_treemap::layout(&scan.tree, generation, root, kind, viewport, min_px);
+        }
+
+        let options = rdirstat_treemap::LayoutOptions::new(kind, viewport, min_px)?.with_metric(metric);
         match filter {
-            None => rdirstat_treemap::layout(&scan.tree, generation, root, kind, viewport, min_px),
+            None => Ok(rdirstat_treemap::layout_with(&scan.tree, generation, root, &options)?),
             Some(set) => {
-                if !scan.tree.contains(root) {
-                    return Err(QueryError::UnknownNode { node: root });
-                }
-                let options = rdirstat_treemap::LayoutOptions::new(kind, viewport, min_px)?.with_categories(Some(set));
+                let options = options.with_categories(Some(set));
                 // Reused across a window resize: the weights do not depend on
                 // the viewport, and rebuilding them per drag step is the
                 // difference between paying 163 ms once and paying it

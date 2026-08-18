@@ -72,13 +72,45 @@ pub(crate) struct UnreadableSnapshot {
     pub reason: String,
 }
 
+/// Whether the store directory is there, and whether it can be written to.
+///
+/// One enum rather than two booleans because "does not exist but is writable"
+/// is not a state the world can be in, and a pair of bools invites a UI to
+/// render it. The distinction that matters to the user is the third rung:
+/// a directory that exists and rejects writes — an unplugged disk's mount
+/// point, a folder owned by another account, a full volume — looks identical
+/// to an empty store until the end of the next scan, which is the worst
+/// possible moment to find out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DirectoryState {
+    /// Not there. The ordinary state before the first scan, and also what an
+    /// unmounted volume looks like.
+    Missing,
+    /// There, but the app cannot create a file in it.
+    ReadOnly,
+    /// There and writable.
+    Writable,
+}
+
 /// Everything the app has on disk.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub(crate) struct StorageReport {
-    /// `<app data>/snapshots`. Shown so the user can open it themselves.
+    /// The store root in effect. Shown so the user can open it themselves.
     pub directory: String,
-    /// Whether that directory exists yet — it does not until the first scan.
-    pub directory_exists: bool,
+    /// Whether that directory is there and usable.
+    pub directory_state: DirectoryState,
+    /// Which layer of the resolution order chose [`Self::directory`].
+    ///
+    /// The panel needs this to explain itself: a location the user cannot
+    /// change from the UI because `RDIRSTAT_DATA_DIR` is set looks like a bug
+    /// unless the UI says which layer won.
+    pub directory_source: crate::settings::RootSource,
+    /// `<app data>/snapshots` — what "reset to default" would select.
+    pub default_directory: String,
+    /// The saved setting, present even when the environment is overriding it,
+    /// because hiding it would misrepresent what the next launch will do.
+    pub configured_directory: Option<String>,
     pub snapshots: Vec<StoredSnapshot>,
     pub unreadable: Vec<UnreadableSnapshot>,
     /// Total bytes of every snapshot file, readable or not. This is the number
@@ -102,7 +134,10 @@ pub(crate) struct StorageReport {
 pub(crate) fn empty_report(reason: &str) -> StorageReport {
     StorageReport {
         directory: reason.to_owned(),
-        directory_exists: false,
+        directory_state: DirectoryState::Missing,
+        directory_source: crate::settings::RootSource::Default,
+        default_directory: String::new(),
+        configured_directory: None,
         snapshots: Vec::new(),
         unreadable: Vec::new(),
         total_bytes: 0,
@@ -117,17 +152,21 @@ pub(crate) fn empty_report(reason: &str) -> StorageReport {
 /// stops, so this stays a few kilobytes per file rather than the ~960 MB a
 /// 12-million-node snapshot occupies. That matters because this runs whenever
 /// the panel is opened.
-pub(crate) fn describe(store_root: &Path) -> StorageReport {
+pub(crate) fn describe(resolved: &crate::settings::SnapshotRoot) -> StorageReport {
+    let store_root = resolved.path.as_path();
     let mut report = StorageReport {
         directory: store_root.display().to_string(),
-        directory_exists: store_root.is_dir(),
+        directory_state: directory_state(store_root),
+        directory_source: resolved.source,
+        default_directory: resolved.default_path.display().to_string(),
+        configured_directory: resolved.configured.as_ref().map(|path| path.display().to_string()),
         snapshots: Vec::new(),
         unreadable: Vec::new(),
         total_bytes: 0,
         truncated: false,
         catalog_present: false,
     };
-    if !report.directory_exists {
+    if report.directory_state == DirectoryState::Missing {
         return report;
     }
 
@@ -163,8 +202,35 @@ pub(crate) fn describe(store_root: &Path) -> StorageReport {
 
     // Newest first: the most recent scan is the one a user is looking for, and
     // an unsorted directory listing is whatever order the filesystem felt like.
-    report.snapshots.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.taken_unix_ms));
     report
+        .snapshots
+        .sort_by_key(|snapshot| std::cmp::Reverse(snapshot.taken_unix_ms));
+    report
+}
+
+/// Classifies `dir` by probing it.
+///
+/// Writability is probed by writing rather than by reading permission bits,
+/// because the bits are not the whole answer: a read-only mount, a full volume,
+/// an ACL, and a sandbox denial all present as writable metadata on a directory
+/// that will reject the next `create`. The probe file is named with the process
+/// id and removed immediately.
+///
+/// A missing directory is [`DirectoryState::Missing`] and is **not** created —
+/// the caller may be describing an unmounted volume, and manufacturing a
+/// directory on the mount point is precisely the wrong response.
+fn directory_state(dir: &Path) -> DirectoryState {
+    if !dir.is_dir() {
+        return DirectoryState::Missing;
+    }
+    let probe = dir.join(format!(".rdirstat-write-probe.{}", std::process::id()));
+    match fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            DirectoryState::Writable
+        }
+        Err(_) => DirectoryState::ReadOnly,
+    }
 }
 
 fn peek_file(path: &Path) -> Result<snapshot::Peek, String> {
@@ -212,11 +278,7 @@ fn snapshot_files(store_root: &Path) -> Vec<PathBuf> {
 /// failure. The source check is not paranoia: the path comes
 /// from the frontend, and without it this is an arbitrary-file-read primitive
 /// dressed up as an export.
-pub(crate) fn export_snapshot(
-    store_root: &Path,
-    source: &Path,
-    destination_dir: &Path,
-) -> Result<PathBuf, String> {
+pub(crate) fn export_snapshot(store_root: &Path, source: &Path, destination_dir: &Path) -> Result<PathBuf, String> {
     if !source.starts_with(store_root) {
         return Err("that file is not in this app's snapshot store".to_owned());
     }
@@ -261,7 +323,10 @@ mod tests {
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/storage-scratch");
         fs::create_dir_all(&base).expect("scratch root");
         let base = base.canonicalize().expect("canonicalize scratch root");
-        tempfile::Builder::new().prefix("case-").tempdir_in(&base).expect("tempdir")
+        tempfile::Builder::new()
+            .prefix("case-")
+            .tempdir_in(&base)
+            .expect("tempdir")
     }
 
     #[test]
@@ -269,8 +334,8 @@ mod tests {
         // Before the first scan there is no directory. That is the ordinary
         // state on a fresh install, not an error, and the panel has to render.
         let dir = scratch();
-        let report = describe(&dir.path().join("never-created"));
-        assert!(!report.directory_exists);
+        let report = describe(&crate::settings::SnapshotRoot::at(dir.path().join("never-created")));
+        assert_eq!(report.directory_state, DirectoryState::Missing);
         assert!(report.snapshots.is_empty());
         assert_eq!(report.total_bytes, 0);
     }
@@ -280,7 +345,7 @@ mod tests {
         // The load-bearing honesty: no DuckDB exists in this build, and the UI
         // needs to be able to say so instead of drawing an empty database.
         let dir = scratch();
-        assert!(!describe(dir.path()).catalog_present);
+        assert!(!describe(&crate::settings::SnapshotRoot::at(dir.path().to_path_buf())).catalog_present);
     }
 
     #[test]
@@ -292,7 +357,7 @@ mod tests {
         fs::create_dir_all(&root).expect("mkdir");
         fs::write(root.join("1700000000000-00000001.rdstat"), b"not a snapshot").expect("write");
 
-        let report = describe(dir.path());
+        let report = describe(&crate::settings::SnapshotRoot::at(dir.path().to_path_buf()));
         assert!(report.snapshots.is_empty());
         assert_eq!(report.unreadable.len(), 1);
         assert_eq!(report.total_bytes, 14);
@@ -306,7 +371,7 @@ mod tests {
         fs::create_dir_all(&root).expect("mkdir");
         fs::write(root.join("notes.txt"), b"hello").expect("write");
 
-        let report = describe(dir.path());
+        let report = describe(&crate::settings::SnapshotRoot::at(dir.path().to_path_buf()));
         assert!(report.snapshots.is_empty());
         assert!(report.unreadable.is_empty());
         assert_eq!(report.total_bytes, 0, "a stray text file is not the store's cost");
@@ -322,8 +387,8 @@ mod tests {
         let store = dir.path().join("store");
         fs::create_dir_all(&store).expect("mkdir");
 
-        let error = export_snapshot(&store, &outside, dir.path())
-            .expect_err("a source outside the store must be refused");
+        let error =
+            export_snapshot(&store, &outside, dir.path()).expect_err("a source outside the store must be refused");
         assert!(error.contains("not in this app's snapshot store"), "got {error}");
     }
 
@@ -341,8 +406,7 @@ mod tests {
         let destination = out.join("a.rdstat");
         fs::write(&destination, b"do not lose me").expect("write");
 
-        let error = export_snapshot(&dir.path().join("store"), &source, &out)
-            .expect_err("must refuse to clobber");
+        let error = export_snapshot(&dir.path().join("store"), &source, &out).expect_err("must refuse to clobber");
         assert!(error.contains("already exists"), "got {error}");
         assert_eq!(fs::read(&destination).expect("read"), b"do not lose me");
     }
