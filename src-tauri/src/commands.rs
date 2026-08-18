@@ -32,7 +32,7 @@ use crate::state::AppState;
 use crate::storage::{self, StorageReport};
 use crate::sync::{self, CompareMode, OnDiffer, SyncDiff, SyncError, SyncPlan, SyncReport};
 use crate::transfers::{self, JobState, TransferId, TransferJob, TransferManager};
-use crate::{actions, progress, query, relocate, volumes};
+use crate::{actions, digest, progress, query, relocate, volumes};
 use rdirstat_remote::RemotePlan;
 use rdirstat_remote::plan::RemoteCompare;
 
@@ -2177,4 +2177,58 @@ fn start_worker(app: tauri::AppHandle, queue: Arc<TransferManager>, id: Transfer
             tracing::warn!(id = id.get(), %error, "a transfer ended badly");
         }
     });
+}
+
+/// The structure digest for a node's subtree.
+///
+/// Instant by construction: it folds the arena that is already in memory and
+/// reads no file data, so the details panel can ask for it on every selection
+/// without touching the disk. See [`crate::digest`] for why a directory gets
+/// this rather than a content hash.
+///
+/// # Errors
+///
+/// [`QueryError::StaleGeneration`] when `generation` is not the live tree, or
+/// [`QueryError::UnknownNode`] when `node` is not in it.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn structure_digest(
+    state: tauri::State<'_, AppState>,
+    generation: TreeGeneration,
+    node: NodeId,
+) -> Result<digest::StructureDigest, QueryError> {
+    let scan = state.tree_for_query(generation)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        digest::structure(&scan.tree, node).ok_or(QueryError::UnknownNode { node })
+    })
+    .await
+    .map_err(|error| QueryError::Internal(error.to_string()))?
+}
+
+/// SHA-256 over one file's contents.
+///
+/// Deliberately NOT called on selection. Reading a file costs what the file
+/// costs, and a panel that hashed whatever the user clicked would turn browsing
+/// a tree into an unbounded sequence of whole-file reads. The frontend reaches
+/// this only from an explicit control.
+///
+/// Runs on the blocking pool: this is I/O measured in minutes for a large file,
+/// which is not work for the async executor.
+///
+/// # Errors
+///
+/// [`QueryError::StaleGeneration`] when `generation` is not the live tree, or
+/// [`QueryError::Internal`] when the path cannot be resolved, opened or read —
+/// including the ordinary case of a file deleted since the scan.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn file_digest(
+    state: tauri::State<'_, AppState>,
+    generation: TreeGeneration,
+    node: NodeId,
+) -> Result<digest::ContentDigest, QueryError> {
+    let scan = state.tree_for_query(generation)?;
+    tauri::async_runtime::spawn_blocking(move || digest::contents(&scan, node).map_err(QueryError::Internal))
+        .await
+        .map_err(|error| QueryError::Internal(error.to_string()))?
 }

@@ -37,6 +37,7 @@
 mod actions;
 mod commands;
 mod cursor;
+mod digest;
 mod engine;
 mod events;
 mod fsident;
@@ -97,6 +98,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::scan_errors,
             commands::children,
             commands::node_details,
+            commands::structure_digest,
+            commands::file_digest,
             commands::size_bands,
             commands::size_band_entries,
             commands::category_totals,

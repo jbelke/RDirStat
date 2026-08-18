@@ -77,6 +77,38 @@ export const commands = {
 	 */
 	nodeDetails: (generation: TreeGeneration, node: NodeId) => typedError<Details, QueryError>(__TAURI_INVOKE("node_details", { generation, node })),
 	/**
+	 *  The structure digest for a node's subtree.
+	 * 
+	 *  Instant by construction: it folds the arena that is already in memory and
+	 *  reads no file data, so the details panel can ask for it on every selection
+	 *  without touching the disk. See [`crate::digest`] for why a directory gets
+	 *  this rather than a content hash.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`QueryError::StaleGeneration`] when `generation` is not the live tree, or
+	 *  [`QueryError::UnknownNode`] when `node` is not in it.
+	 */
+	structureDigest: (generation: TreeGeneration, node: NodeId) => typedError<StructureDigest, QueryError>(__TAURI_INVOKE("structure_digest", { generation, node })),
+	/**
+	 *  SHA-256 over one file's contents.
+	 * 
+	 *  Deliberately NOT called on selection. Reading a file costs what the file
+	 *  costs, and a panel that hashed whatever the user clicked would turn browsing
+	 *  a tree into an unbounded sequence of whole-file reads. The frontend reaches
+	 *  this only from an explicit control.
+	 * 
+	 *  Runs on the blocking pool: this is I/O measured in minutes for a large file,
+	 *  which is not work for the async executor.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`QueryError::StaleGeneration`] when `generation` is not the live tree, or
+	 *  [`QueryError::Internal`] when the path cannot be resolved, opened or read —
+	 *  including the ordinary case of a file deleted since the scan.
+	 */
+	fileDigest: (generation: TreeGeneration, node: NodeId) => typedError<ContentDigest, QueryError>(__TAURI_INVOKE("file_digest", { generation, node })),
+	/**
 	 *  The size-band histogram for a subtree.
 	 * 
 	 *  Always returns every band, including empty ones — "there is nothing over
@@ -1082,6 +1114,17 @@ export type ConfigHash = string;
  *  the user did not see counted.
  */
 export type ConfirmationToken = string;
+
+/**  A content digest over one file. */
+export type ContentDigest = {
+	/**  Lowercase hex SHA-256 of the file's bytes. */
+	digest: string,
+	/**
+	 *  Bytes actually read. Compared against the scan's recorded size by the
+	 *  caller, this is how a file that changed under the scan shows up.
+	 */
+	bytes: number,
+};
 
 /**
  *  An opaque paging cursor.
@@ -2967,6 +3010,23 @@ export type StoredSnapshot = {
 	allocated: number,
 	/**  The build that wrote it, so an unreadable one has a suspect. */
 	tool_version: string,
+};
+
+/**  A structure digest over a subtree, with what it covered. */
+export type StructureDigest = {
+	/**  Lowercase hex SHA-256 over the canonical encoding. */
+	digest: string,
+	/**
+	 *  How many arena entries were folded in, so the UI can say what it covered
+	 *  rather than presenting a bare number with no scope.
+	 */
+	entries: number,
+	/**
+	 *  True when the walk hit its backstop and stopped early. A digest over a
+	 *  truncated walk is not comparable to one over a whole tree, so the UI has
+	 *  to be able to say so rather than show it as if it were complete.
+	 */
+	truncated: boolean,
 };
 
 /**  What two folders each have, and where they disagree. */

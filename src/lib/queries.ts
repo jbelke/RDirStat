@@ -38,7 +38,9 @@ import {
   categoryTotals,
   children,
   duplicateCandidates,
+  fileDigest,
   nodeDetails,
+  structureDigest,
   scanDiff,
   scanErrors,
   scanStatus,
@@ -50,7 +52,9 @@ import {
   volumes,
   type AncestorRow,
   type ChildPageView,
+  type ContentDigestView,
   type DetailsView,
+  type StructureDigestView,
   type ScanErrorsView,
   type AgeBucketEntryView,
   type AgeBucketView,
@@ -120,6 +124,7 @@ export const queryKeys = {
   children: (generation: number, parent: number, sort: Sort) =>
     ["children", generation, parent, sort.key, sort.direction] as const,
   details: (generation: number, node: number) => ["details", generation, node] as const,
+  structureDigest: (generation: number, node: number) => ["structureDigest", generation, node] as const,
   ancestors: (generation: number, node: number) => ["ancestors", generation, node] as const,
   sizeBands: (generation: number, node: number) => ["sizeBands", generation, node] as const,
   sizeBandEntries: (generation: number, node: number, band: number) =>
@@ -700,5 +705,43 @@ export function useClearTransfers(): UseMutationResult<number, Error, void> {
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: queryKeys.transfers() });
     },
+  });
+}
+
+/**
+ * The structure digest for a node's subtree.
+ *
+ * Enabled on every real selection because it costs nothing: the backend folds
+ * the arena already in memory and reads no file data. The panel decides whether
+ * to *show* it — a file's structure digest is not interesting next to its
+ * content hash.
+ */
+export function useStructureDigest(
+  generation: number,
+  node: number | null,
+): UseQueryResult<StructureDigestView, Error> {
+  const target = node ?? -1;
+  return useQuery({
+    queryKey: queryKeys.structureDigest(generation, target),
+    queryFn: () => structureDigest(generation, target),
+    enabled: generation !== GENERATION_NONE && node !== null && isRealNode(target) && !isVirtualGroup(target),
+  });
+}
+
+/**
+ * SHA-256 of a file's contents, on demand.
+ *
+ * A mutation rather than a query on purpose: this reads the whole file, so it
+ * must run when the user asks and never because a component rendered. React
+ * Query would happily refetch a query on window focus, which for a 40 GB file
+ * is a background disk read nobody requested.
+ */
+export function useFileDigest(): UseMutationResult<
+  ContentDigestView,
+  Error,
+  { generation: number; node: number }
+> {
+  return useMutation({
+    mutationFn: ({ generation, node }: { generation: number; node: number }) => fileDigest(generation, node),
   });
 }
