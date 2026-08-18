@@ -189,7 +189,10 @@ export function DataTable<TData>({
                   <TableHead
                     key={header.id}
                     style={{ width: header.getSize() }}
-                    className={cn("flex items-center gap-1", canSort && "cursor-pointer")}
+                    className="flex items-center gap-1"
+                    // `aria-sort` belongs on the header cell, not on the
+                    // control inside it, so it stays here while the click
+                    // target moves into a real button below.
                     aria-sort={
                       direction === "asc"
                         ? "ascending"
@@ -199,13 +202,24 @@ export function DataTable<TData>({
                             ? "none"
                             : undefined
                     }
-                    onClick={canSort ? header.column.getToggleSortingHandler() : undefined}
                   >
-                    {header.isPlaceholder
-                      ? null
-                      : flexRender(header.column.columnDef.header, header.getContext())}
-                    {direction === "asc" && <ChevronUp aria-hidden className="size-3" />}
-                    {direction === "desc" && <ChevronDown aria-hidden className="size-3" />}
+                    {header.isPlaceholder ? null : canSort ? (
+                      // A `<th onClick>` announced a sortable column to a
+                      // screen reader and then could not be sorted from the
+                      // keyboard: no button, no tabindex, no key handler. A
+                      // real button is the affordance the ARIA already claimed.
+                      <button
+                        type="button"
+                        onClick={header.column.getToggleSortingHandler()}
+                        className="-mx-1 flex cursor-pointer items-center gap-1 rounded px-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                      >
+                        {flexRender(header.column.columnDef.header, header.getContext())}
+                        {direction === "asc" && <ChevronUp aria-hidden className="size-3" />}
+                        {direction === "desc" && <ChevronDown aria-hidden className="size-3" />}
+                      </button>
+                    ) : (
+                      flexRender(header.column.columnDef.header, header.getContext())
+                    )}
                   </TableHead>
                 );
               })}
