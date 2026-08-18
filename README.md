@@ -5,7 +5,7 @@ A native macOS disk-usage and file-inventory app. A Tauri v2 + Rust rewrite of
 over volumes with tens of millions of entries:
 
 1. Where is the selected tree's logical and allocated space concentrated?
-2. What kinds of files account for it, and what changed between saved scans?
+2. What kinds of files account for it, and what changed since the previous scan?
 
 The design volume is a 7.3 TiB APFS disk with **69 million inodes**. A full cold
 scan of it should be a coffee break, not an overnight job, and the app must stay
@@ -17,13 +17,29 @@ differ from "bytes physically reclaimable."
 
 ## Status
 
-In development. The Cargo workspace, Tauri v2 desktop shell, and React 19 +
-Vite + Tailwind v4 frontend are in place. Private local developer material
-under `.settings/` is gitignored and is not part of this repository.
+**v0.1.0 — first release.** Scanning, the virtualized tree, the treemap,
+icicle and sunburst views, the Types/Ages/Diff/Dupes reports, snapshot save and
+restore, folder sync and remote transfers all work and are reachable from the
+UI.
+
+What is *not* in this release, so you do not go looking for it:
+
+- **Move to Trash refuses.** The control is present and explains itself: it
+  needs a confirmation step that shows exactly what would move, and it will not
+  move anything without showing you that first.
+- **No Parquet/DuckDB catalog.** Reports run on the live scanned tree, in
+  memory. There is no durable query store in this build.
+- **The disk image is unsigned** and built for the host architecture only. See
+  [Packaging](#packaging).
+- **Sync cannot be cancelled** once applied.
+
+Private local developer material under `.settings/` is gitignored and is not
+part of this repository.
 
 ## Requirements
 
-- macOS 14+ (required to build or run the app; see [Containers](#containers))
+- macOS 14+ to build or run the app (`bundle.macOS.minimumSystemVersion`
+  and CI agree on 14; see [Containers](#containers))
 - Rust 1.90 (MSRV); the pinned toolchain is in `rust-toolchain.toml` (1.97.1)
 - Node.js ≥ 22.12
 - pnpm 10.30.1 (`packageManager` in `package.json`)
@@ -89,6 +105,35 @@ full flag set.
 ./rush.sh dmg -e staging     # installs alongside it
 ```
 
+### Installing the v0.1.0 image
+
+The image is built for **the architecture of the machine that built it** —
+there is no `--target universal-apple-darwin` in the build, so an arm64 image
+will not launch on an Intel Mac and vice versa. Build it on the machine you
+intend to run it on.
+
+It is also **unsigned**, which is the part that surprises people. macOS
+attaches a quarantine flag to anything that arrives through a browser, AirDrop
+or a file share, and Gatekeeper refuses a quarantined bundle that carries no
+Developer ID. The message it chooses is *"Stellar RDIRSTAT is damaged and can't
+be opened"* — a signing failure wearing a corruption message. The build is not
+damaged.
+
+On the machine that built it, no quarantine flag is set and the app opens
+normally. If you moved the image to another Mac, clear the flag deliberately —
+having first satisfied yourself that you trust the source, because this is
+exactly the check you are switching off:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Stellar RDIRSTAT.app"
+```
+
+The real fix is a Developer ID signature and notarization, tracked as an open
+issue. Until then this image is for local installs, not distribution.
+
+> The `.dmg` carries a click-through licence agreement, so `hdiutil attach`
+> waits for input. In a script, pipe it: `printf 'Y\n' | hdiutil attach ...`.
+
 The disk image is branded end to end: window size and icon positions come from
 `bundle.macOS.dmg` in `src-tauri/tauri.conf.json`, and the backdrop is generated
 alongside the icons.
@@ -144,13 +189,13 @@ and excludes `src-tauri`, which cannot compile off macOS; the real gate is
 | --- | --- |
 | Backend | Rust workspace, arena tree (48-byte node + interned name blob), single-writer builder |
 | Desktop shell | Tauri v2 |
-| Reporting store | Parquet + DuckDB `v1.5.5` |
+| Reporting store | None in this release — reports run on the live in-memory tree |
 | IPC | Arrow IPC bytes for bulk data; JSON only for small DTOs |
 | Typed client | `tauri-specta` generated bindings, verified by test |
 | Frontend | React 19 + TypeScript + Vite |
 | Styling | Tailwind CSS v4 (`@theme`) + shadcn/ui |
 | Tables | TanStack Table v8 + TanStack Virtual v3 |
-| Charts | shadcn `Chart` / Recharts for reports; hand-written canvas for treemap, icicle, and sunburst |
+| Charts | Hand-written: canvas for treemap, icicle and sunburst; plain elements for the report bars |
 
 ## Acceptance targets
 
@@ -163,7 +208,9 @@ and excludes `src-tauri`, which cannot compile off macOS; the real gate is
 | Treemap navigation | p95 input-to-paint < 50 ms |
 | Cancel | UI acknowledges < 100 ms; workers stop p95 < 200 ms |
 
-These are gates, not estimates.
+These are the targets the design is held to. They are measured by hand on a
+quiescent host — `just check` runs no benchmark, so **CI does not enforce
+them**, and none should be read as a verified property of v0.1.0.
 
 ## Repository layout
 
