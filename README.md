@@ -91,15 +91,27 @@ hardware-profile rules that make a result comparable.
 | `skills/` | Project-carried agent skills, indexed by `skills/AGENTS.md`. |
 | `.claude/` | Agent workflow definitions. |
 | `skills-lock.json` | Source and integrity lock for installed skills; currently pins `rust-skills`. |
+| `crates/` | Rust libraries and the supported diagnostic CLI. |
+| `src-tauri/` | Tauri v2 desktop shell and native command boundary. |
+| `src/` | React + TypeScript frontend. |
+| `Justfile`, `scripts/` | Local task surface and repository validators. |
+| `.github/` | macOS CI. |
 
 `.agents/` holds the installer-managed `rust-skills` payload. It is downloaded
 rather than authored here, so it is untracked; `skills/rust-skills` and
 `.claude/skills/rust-skills` are tracked symlinks into it and dangle in a fresh
 clone until the skills are installed. Nothing in the build reads them.
-| `AGENTS.md` | Root STELLAR contract — ownership, local constraints, work guidance. |
 
 ## Building
 
-Nothing to build yet. No `Cargo.toml`, task runner, test suite, or CI exists in
-this repository. When phase 0 lands them, this section names the commands that
-run them — and not before.
+Install the locked frontend dependencies once, then use the task surface:
+
+```bash
+just bootstrap     # pnpm install --frozen-lockfile
+just check         # docs, formatting, lints, tests, frontend build
+just audit         # Rust/JavaScript dependency reports; needs cargo-deny
+just dev           # Tauri development app
+```
+
+`just ci` combines the deterministic gate and dependency reports. GitHub Actions
+runs it on macOS for pushes to `main` and pull requests.
