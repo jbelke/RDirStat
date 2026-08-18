@@ -30,6 +30,10 @@ gitignored. It is not part of the public repository.
 | `src/` | React + TypeScript presentation |
 | `package.json`, `pnpm-lock.yaml` | Frontend commands and exact dependency graph |
 | `Justfile`, `scripts/` | Local quality/build commands and repository validators |
+| `rush.sh` | Environment-aware entry point for running, packaging, and the container profiles |
+| `Dockerfile`, `docker-compose.yml`, `docker/` | Container profiles. They cannot build the app or the `.dmg`; see the Dockerfile header |
+| `.env.*.example` | Tracked per-environment templates. The copies without `.example` are git-ignored |
+| `src-tauri/tauri.*.conf.json` | Per-profile Tauri config merged over the base config |
 | `.github/` | macOS CI workflows |
 
 The project is a git repository on `main`, with a root `.gitignore`. `.agents/`
@@ -66,6 +70,18 @@ with `$steward-stellar-docs` rather than free-writing an `AGENTS.md` from memory
 Run `just check` for the deterministic local gate and `just audit` for dependency
 license/advisory reporting. `just ci` runs both. `just check-docs` validates
 tracked Markdown links, skill manifests, and rejects known stale claims.
+
+`just check-icons` is part of `just check`. It re-renders every brand asset from
+`scripts/generate-icons.mjs` and compares the result against what is committed,
+because a reverted icon is a silent failure: nothing about a successful build
+reports that the app went back to the Tauri v2 template. Regenerate with
+`just icons`, never by editing a PNG. The generator has no image dependencies
+and is byte-reproducible on any platform, `.icns` included.
+
+Packaging is `./rush.sh dmg` and only runs on macOS. An environment name selects
+`.env.<environment>` and `src-tauri/tauri.<profile>.conf.json`; staging carries
+its own bundle identifier so it installs beside a release build rather than
+sharing its settings and snapshot store.
 
 ## Child STELLAR Index
 
