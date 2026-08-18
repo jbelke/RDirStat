@@ -14,6 +14,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "test": "node --test \"src/**/*.test.ts\"",
     "preview": "vite preview",
     "tauri": "tauri"
   },
