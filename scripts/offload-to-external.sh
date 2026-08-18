@@ -2,8 +2,9 @@
 #
 # offload-to-external.sh — move bulky, relocatable data off the internal drive.
 #
-# Dry-run by default. Every move is rsync-verified before the source is removed,
-# and every move is reversible with --revert.
+# Dry-run by default. Every move is copied with `ditto` and then verified — the
+# structure, the sizes, the extended attributes and the ACLs are all compared
+# before the source is removed — and every move is reversible with --revert.
 #
 #   ./scripts/offload-to-external.sh                 # show the plan
 #   ./scripts/offload-to-external.sh --apply
@@ -125,22 +126,99 @@ require_space() {
 
 # ------------------------------------------------------------------- move core
 
-# move_verified SRC DST — copy, prove the copy is complete, then drop the source.
+# manifest_of DIR — a comparable description of a tree, including the metadata a
+# size-and-mtime diff cannot see.
+#
+# One line per entry, sorted, NUL-walked so newlines in names cannot split a
+# record. For each entry it records the kind, the relative path, and then:
+#   file     size, extended-attribute names, ACL
+#   dir      extended-attribute names, ACL
+#   symlink  its target — never followed, so a link is compared as a link
+#
+# com.apple.provenance is filtered out deliberately: macOS applies and reapplies
+# it on its own, so it differs across a faithful copy and would produce false
+# failures. Everything else is compared, including com.apple.ResourceFork, whose
+# presence is how a resource fork shows up here.
+#
+# What this does NOT do is compare file CONTENTS byte for byte. It compares the
+# shape and the metadata. `ditto` reports a non-zero exit if a copy fails, and
+# that is checked separately; this manifest exists to catch the silent case
+# where the copy "succeeded" but did not carry everything.
+manifest_of() {
+  local root="$1"
+  ( cd "$root" 2>/dev/null || return 1
+    find . -mindepth 1 \( -type f -o -type d -o -type l \) -print0 2>/dev/null \
+      | LC_ALL=C sort -z \
+      | while IFS= read -r -d '' p; do
+          if [[ -L "$p" ]]; then
+            printf 'l\t%s\t%s\n' "$p" "$(readlink -- "$p")"
+          else
+            local xa acl kind size
+            xa="$(xattr -- "$p" 2>/dev/null | grep -v '^com\.apple\.provenance$' | LC_ALL=C sort | tr '\n' ',')"
+            acl="$(ls -lde -- "$p" 2>/dev/null | sed -n '2,$p' | tr -d ' ' | tr '\n' ',')"
+            if [[ -d "$p" ]]; then
+              printf 'd\t%s\t%s\t%s\n' "$p" "$xa" "$acl"
+            else
+              size="$(stat -f %z -- "$p" 2>/dev/null)"
+              printf 'f\t%s\t%s\t%s\t%s\n' "$p" "$size" "$xa" "$acl"
+            fi
+          fi
+        done )
+}
+
+# move_verified SRC DST — copy, prove the copy carried everything, then drop the
+# source.
+#
 # A bare `mv` across volumes that is interrupted leaves a partial destination and
-# a deleted source with no way to tell. rsync's own dry-run diff is the proof.
+# a deleted source with no way to tell, so the copy is proved before the source
+# goes away.
+#
+# Two decisions here were paid for once already (nato-b6h.7, nato-b6h.8):
+#
+#   ditto, not rsync. `/usr/bin/rsync` on macOS 15 is openrsync, which rejects
+#   --xattrs and --acls outright, so `rsync -a` silently drops every extended
+#   attribute, ACL and resource fork. A modern rsync can carry them, but only if
+#   the caller passes -aHAX --fileflags, and this script cannot assume which
+#   rsync is on PATH. `ditto` ships with the OS and carries all of it. This is
+#   the same call src-tauri/src/relocate.rs made, for the same reason.
+#
+#   The verification compares metadata, not just size and mtime. The previous
+#   version proved the copy with `rsync -an --delete --itemize-changes`, which
+#   compares size and mtime and is therefore blind to exactly the loss the
+#   previous copy was causing: a destination stripped of every xattr reported as
+#   identical, and the source was then deleted. A verifier that cannot see the
+#   damage it is standing in front of is worse than no verifier, because it is
+#   trusted.
 move_verified() {
   local src="$1" dst="$2"
   mkdir -p "$(dirname "$dst")"
 
   say "  ${DIM}copying...${RESET}"
-  rsync -a --info=stats2 "$src"/ "$dst"/ >/dev/null || { say "  ${RED}rsync failed${RESET}"; return 1; }
-
-  say "  ${DIM}verifying...${RESET}"
-  local diff; diff="$(rsync -an --delete --itemize-changes "$src"/ "$dst"/ 2>/dev/null | head -5)"
-  if [[ -n "$diff" ]]; then
-    say "  ${RED}verification failed — destination differs from source; source left intact${RESET}"
-    printf '%s\n' "$diff" | sed 's/^/    /'
+  if ! ditto --rsrc --extattr --acl -- "$src" "$dst"; then
+    say "  ${RED}copy failed — source left intact${RESET}"
     return 1
+  fi
+
+  say "  ${DIM}verifying (structure, sizes, xattrs, ACLs)...${RESET}"
+  local src_manifest dst_manifest
+  src_manifest="$(manifest_of "$src")" || { say "  ${RED}could not read source to verify${RESET}"; return 1; }
+  dst_manifest="$(manifest_of "$dst")" || { say "  ${RED}could not read destination to verify${RESET}"; return 1; }
+
+  if [[ "$src_manifest" != "$dst_manifest" ]]; then
+    say "  ${RED}verification failed — destination does not match source; source left intact${RESET}"
+    diff <(printf '%s\n' "$src_manifest") <(printf '%s\n' "$dst_manifest") \
+      | head -20 | sed 's/^/    /'
+    return 1
+  fi
+
+  # An empty manifest on both sides means the walk found nothing. That is a
+  # legitimate result for an empty source, but it is also what a silently failed
+  # copy looks like, so say which one it was rather than deleting on an
+  # unexamined match.
+  if [[ -z "$src_manifest" ]]; then
+    say "  ${DIM}source was empty; nothing to verify, nothing removed${RESET}"
+    rmdir "$src" 2>/dev/null || true
+    return 0
   fi
 
   rm -rf -- "$src"
