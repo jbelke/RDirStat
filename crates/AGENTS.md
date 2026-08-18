@@ -15,7 +15,8 @@ still phase-owned implementation surfaces. Nothing here may depend on Tauri.
 | `rdirstat-classify/` | Clean-room byte-oriented categories and contextual tags |
 | `rdirstat-treemap/` | Treemap/icicle/sunburst geometry and bounded Arrow tile output |
 | `rdirstat-cli/` | Supported scanner diagnostics, correctness fixtures, profiling, and import/export commands |
-| `rdirstat-catalog/` | Future phase-6 Parquet + DuckDB boundary; the directory does not exist until that phase |
+| `rdirstat-remote/` | Remote targets and their transfer planning: OpenDAL-backed S3, WebDAV and SFTP backends, Keychain-held credentials, and the missing/differs/present plan |
+| `rdirstat-catalog/` | Future phase-7 Parquet + DuckDB boundary; the directory does not exist until that phase |
 
 ## Local Contracts
 
