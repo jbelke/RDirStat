@@ -53,7 +53,14 @@ services:
       - ./components.json:/app/components.json:ro
       - /app/node_modules
     healthcheck:
-      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:1420/ || exit 1"]
+      # node, not wget: node:*-bookworm-slim ships neither wget nor curl, so a
+      # shell-tool probe here marks the container unhealthy forever. Node 24
+      # has a global fetch, which makes the runtime its own health client.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:1420/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
       interval: 10s
       timeout: 3s
       retries: 10
