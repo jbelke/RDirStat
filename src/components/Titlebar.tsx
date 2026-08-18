@@ -54,11 +54,17 @@ export interface TitlebarProps {
   onOpenCommandPalette?: () => void;
   onOpenSettings?: () => void;
   /**
-   * Rendered at the *start* of the trailing actions, before the Scan button —
-   * this is where the drive switcher goes. Kept as a slot rather than a prop
-   * bundle so the titlebar does not have to know what a volume is.
+   * Rendered **inside the breadcrumb**, between the app name and the scan
+   * root: `RDirStat › [NATO ⌄] › /Volumes/NATO`.
+   *
+   * That position is the point of it. Which drive you are looking at is the
+   * outermost fact about the tree on screen — one level above the scan root —
+   * so the control that changes it belongs where the eye already goes to read
+   * "where am I", not in the corner beside the window buttons. Kept as a slot
+   * rather than a prop bundle so the titlebar does not have to know what a
+   * volume is.
    */
-  leadingActions?: React.ReactNode;
+  driveSelector?: React.ReactNode;
   /** Rendered between the breadcrumb and the trailing actions (e.g. a Scan button). */
   children?: React.ReactNode;
 }
@@ -81,7 +87,7 @@ export function Titlebar({
   onNavigate,
   onOpenCommandPalette,
   onOpenSettings,
-  leadingActions,
+  driveSelector,
   children,
 }: TitlebarProps) {
   const [expanded, setExpanded] = useState(false);
@@ -193,6 +199,28 @@ export function Titlebar({
                   className="size-3.5 shrink-0 text-muted-foreground/60"
                 />
               )}
+              {/* The drive selector sits between the app name and the scan
+                * root, as its own crumb-shaped control.
+                *
+                * It is wrapped in an explicit `data-tauri-drag-region="false"`
+                * even though the surrounding nav is inside the strip: the
+                * per-element opt-out in index.css covers `button`, and that is
+                * enough for a click handler that fires on mouseup, but a Radix
+                * menu trigger opens on POINTERDOWN and the drag region eats
+                * that before the trigger sees it. The menu then never opens
+                * while hover and tooltips keep working perfectly — which reads
+                * exactly like a dead handler. */}
+              {index === 1 && driveSelector !== undefined && (
+                <Fragment>
+                  <span data-tauri-drag-region="false" className="flex shrink-0 items-center">
+                    {driveSelector}
+                  </span>
+                  <ChevronRight
+                    aria-hidden
+                    className="size-3.5 shrink-0 text-muted-foreground/60"
+                  />
+                </Fragment>
+              )}
               {target === null || isLast || onNavigate === undefined ? (
                 <span
                   aria-current={isLast ? "page" : undefined}
@@ -232,7 +260,6 @@ export function Titlebar({
         * Marking the whole actions container means the next control dropped in
         * here inherits the fix instead of rediscovering the bug. */}
       <div data-tauri-drag-region="false" className="flex shrink-0 items-center gap-1">
-        {leadingActions}
         {children}
         {onOpenCommandPalette !== undefined && (
           <Button

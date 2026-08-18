@@ -67,6 +67,7 @@ import {
   scanCancel,
   restoreSnapshot,
   scanStart,
+  scanStatus,
   OPEN_SETTINGS_EVENT,
   type DiffMetricKind,
   type LayoutKind,
@@ -522,11 +523,77 @@ export function AppShell() {
    * not asking for work that would be thrown away rather than about safety.
    */
   const scanning = scanState === "scanning" || scanState === "cancelling" || scanState === "finalizing";
+  /*
+   * Choosing a drive supersedes whatever scan is running.
+   *
+   * The app runs exactly one scan, and the backend refuses to publish a
+   * restored tree while one is in flight — correctly, because the scan is
+   * about to publish over it. The switcher used to answer that by disabling
+   * itself, which made "I want to look at the other drive instead" impossible
+   * to express while the scan you no longer care about kept running: the
+   * control showed a spinner, took no clicks, and the only way through was to
+   * find Cancel in the status strip first.
+   *
+   * So a switch cancels first and then waits for the slot to actually free.
+   * Cancellation is a request, not an instant: `CancelState::Acknowledged`
+   * means the supervisor heard it, and the walk stops between directories. The
+   * poll is on `scan_status` — the supervisor's own answer — rather than on a
+   * timer, because "the scan has stopped" is a state transition and everything
+   * else is a guess.
+   */
+  const switchingRef = useRef(false);
+  const supersedeRunningScan = useCallback(async (): Promise<void> => {
+    if (activeScan === null) return;
+    setCancelling(true);
+    await scanCancel(activeScan);
+    // Bounded: an uninterruptible syscall on a network mount can hold a worker
+    // for a while, and hanging the switcher forever is worse than saying so.
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const status = await scanStatus();
+      if (status.state !== "scanning" && status.state !== "cancelling" && status.state !== "finalizing") {
+        await client.invalidateQueries({ queryKey: queryKeys.scanStatus() });
+        return;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+    throw new Error(
+      "The running scan has not stopped yet — it may be waiting on a slow or unresponsive disk. Try again in a moment.",
+    );
+  }, [activeScan, client]);
+
+  /**
+   * Runs `next` with the scan slot free, serialised against other switches.
+   *
+   * The guard is a ref rather than state because it must not re-render the
+   * shell: two clicks in the menu inside the same tick would otherwise both
+   * pass a state check and race, and the second `scan_start` would come back
+   * `AlreadyScanning` — a confusing error for a button that looks idle.
+   */
+  const switchDrive = useCallback(
+    (next: () => Promise<void>) => {
+      if (switchingRef.current) return;
+      switchingRef.current = true;
+      setActionError(null);
+      void (async () => {
+        try {
+          await supersedeRunningScan();
+          await next();
+        } catch (cause) {
+          setActionError(cause instanceof Error ? cause.message : String(cause));
+        } finally {
+          switchingRef.current = false;
+          setCancelling(false);
+        }
+      })();
+    },
+    [supersedeRunningScan],
+  );
+
   const handleSwitchDrive = useCallback(
     (mountPoint: string) => {
-      void handleScan(mountPoint);
+      switchDrive(() => handleScan(mountPoint));
     },
-    [handleScan],
+    [handleScan, switchDrive],
   );
 
   /*
@@ -534,20 +601,19 @@ export function AppShell() {
    * filesystem, so a drive scanned before switches in about a second.
    *
    * The backend refuses while a scan is running rather than replacing a tree
-   * that scan is about to publish over, so the error is surfaced rather than
-   * swallowed — a switch that silently did nothing would be worse than one
-   * that explains itself.
+   * that scan is about to publish over, so this goes through `switchDrive`,
+   * which stops the running scan and waits for the slot before asking. The
+   * refusal is still surfaced if it happens anyway — a switch that silently
+   * did nothing would be worse than one that explains itself.
    */
   const handleRestoreDrive = useCallback(
     (mountPoint: string, device: number) => {
-      setActionError(null);
-      restoreSnapshot(mountPoint, device)
-        .then(() => client.invalidateQueries({ queryKey: queryKeys.scanStatus() }))
-        .catch((cause: unknown) => {
-          setActionError(cause instanceof Error ? cause.message : String(cause));
-        });
+      switchDrive(async () => {
+        await restoreSnapshot(mountPoint, device);
+        await client.invalidateQueries({ queryKey: queryKeys.scanStatus() });
+      });
     },
-    [client],
+    [client, switchDrive],
   );
 
   return (
@@ -556,7 +622,7 @@ export function AppShell() {
         crumbs={crumbs}
         onNavigate={handleCrumbNavigate}
         onOpenSettings={() => setRoute("storage")}
-        leadingActions={
+        driveSelector={
           generation !== GENERATION_NONE && (
             <DriveSwitcher
               volumes={volumes.data ?? []}
