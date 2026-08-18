@@ -27,7 +27,7 @@
  *   not in a panel someone opens to check free space.
  */
 
-import { Loader, PanelTopOpen, RefreshCw } from "lucide-react";
+import { Loader, PanelTopOpen, RefreshCw, Settings } from "lucide-react";
 import { useEffect, useMemo } from "react";
 
 import { CapacityBar, capacitySegments } from "@/components/CapacityBar";
@@ -35,6 +35,7 @@ import { Button } from "@/components/ui/button";
 import { formatCount, formatPercent, formatSI } from "@/lib/format";
 import type { VolumeRow } from "@/lib/ipc";
 import { useScanStatus, useVolumes } from "@/lib/queries";
+import { OPEN_SETTINGS_EVENT } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 
 /** How often the panel re-reads volumes, in milliseconds. */
@@ -68,6 +69,15 @@ export function TrayPanel() {
           className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
         >
           <RefreshCw aria-hidden className={cn("size-3.5", isFetching && "animate-spin")} />
+        </button>
+        <button
+          type="button"
+          onClick={() => void openSettings()}
+          title="Settings"
+          className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+        >
+          <Settings aria-hidden className="size-3.5" />
+          <span className="sr-only">Settings</span>
         </button>
       </header>
 
@@ -170,6 +180,21 @@ async function openMainWindow(): Promise<void> {
   await main.show();
   await main.unminimize();
   await main.setFocus();
+}
+
+/**
+ * Shows the main window on its settings route.
+ *
+ * Two steps rather than one because they answer different questions: the window
+ * has to exist and be frontmost before a route change is worth anything, and the
+ * route itself belongs to the shell. Emitting after showing also means a missed
+ * event degrades to "the window opened where you left it" rather than to a
+ * window that never appeared.
+ */
+async function openSettings(): Promise<void> {
+  await openMainWindow();
+  const { emitTo } = await import("@tauri-apps/api/event");
+  await emitTo("main", OPEN_SETTINGS_EVENT);
 }
 
 interface DiskSummary {

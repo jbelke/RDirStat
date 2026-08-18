@@ -379,6 +379,29 @@ export async function scanStart(root: string, options: ScanOptions = defaultScan
   return num(await unwrap("scan_start", commands.scanStart(root, options)));
 }
 
+/**
+ * Asks the main window to show its settings.
+ *
+ * The menu-bar panel is a second webview with its own React tree, so it cannot
+ * call the shell's router. It shows the window and emits this instead, which
+ * keeps every route change owned by the shell that draws the routes — a tray
+ * that navigated directly would be a second, weaker copy of that logic.
+ */
+export const OPEN_SETTINGS_EVENT = "rdirstat://open-settings";
+
+/**
+ * Directory completions for a partially typed path.
+ *
+ * Never rejects. The backend returns an empty list for a path that does not
+ * exist, one it cannot read, and one naming a file — because every one of
+ * those is a normal intermediate state while someone is still typing, not a
+ * failure worth interrupting them over. The error that *does* mean something
+ * arrives from `scanStart`.
+ */
+export async function completePath(prefix: string): Promise<string[]> {
+  return commands.completePath(prefix);
+}
+
 export async function scanCancel(scanId: number): Promise<CancelState> {
   return unwrap("scan_cancel", commands.scanCancel(toWireU64(scanId)));
 }

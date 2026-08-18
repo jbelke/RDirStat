@@ -38,21 +38,9 @@
  * whose topology `diskutil` could not report still appears, in a group of its
  * own, rather than being dropped or silently merged into someone else's disk.
  *
- * ---------------------------------------------------------------------------
- * KNOWN GAP — "Scan a folder…" is not an NSOpenPanel
- * ---------------------------------------------------------------------------
- * docs/05 wants the secondary action to open a native folder picker, because a
- * folder pick is macOS's explicit-consent path and often avoids needing a broad
- * Full Disk Access grant. That needs `@tauri-apps/plugin-dialog`, which is not
- * in this project's dependency set yet.
- *
- * Rather than ship a dead button, the action expands a path field that feeds
- * the same `scan_start`. It works, and it is honestly labelled as the fallback
- * it is. Swapping in `open({ directory: true })` is a three-line change here
- * once the plugin lands.
  */
 
-import { ChevronDown, ChevronRight, FolderOpen, HardDrive, Loader, RefreshCw, ShieldAlert } from "lucide-react";
+import { ChevronDown, ChevronRight, HardDrive, Loader, RefreshCw, ShieldAlert } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { CapacityBar, capacitySegments } from "@/components/CapacityBar";
@@ -169,8 +157,6 @@ function byUsageThenName(a: VolumeRow, b: VolumeRow): number {
 export function VolumePicker({ onScan, busy = false }: VolumePickerProps) {
   const { data, error, isLoading, refetch, isFetching } = useVolumes();
   const [preflight, setPreflight] = useState<string | null>(null);
-  const [folderPath, setFolderPath] = useState("");
-  const [folderOpen, setFolderOpen] = useState(false);
 
   const disks = useMemo(() => groupVolumes(data ?? []), [data]);
 
@@ -235,43 +221,6 @@ export function VolumePicker({ onScan, busy = false }: VolumePickerProps) {
           <p className="py-6 text-center text-sm text-muted-foreground">No volumes reported.</p>
         )}
 
-        <div className="flex flex-col items-center gap-3 border-t border-border/60 pt-6">
-          <Button variant="outline" onClick={() => setFolderOpen((open) => !open)}>
-            <FolderOpen aria-hidden />
-            Scan a folder…
-          </Button>
-          {folderOpen && (
-            <form
-              className="flex w-full max-w-xl items-center gap-2"
-              onSubmit={(event) => {
-                event.preventDefault();
-                const trimmed = folderPath.trim();
-                if (trimmed.length > 0) onScan(trimmed);
-              }}
-            >
-              <input
-                value={folderPath}
-                onChange={(event) => setFolderPath(event.currentTarget.value)}
-                placeholder="/Users/you/Movies"
-                aria-label="Folder to scan"
-                spellCheck={false}
-                autoComplete="off"
-                className="h-9 flex-1 rounded-md border border-input bg-transparent px-3 font-mono text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              />
-              <Button type="submit" disabled={busy || folderPath.trim().length === 0}>
-                Scan
-              </Button>
-            </form>
-          )}
-          {folderOpen && (
-            <p className="max-w-xl text-center text-xs text-muted-foreground">
-              A native folder picker is the intended path here — it is macOS&rsquo;s explicit-consent
-              flow and often avoids needing Full Disk Access. It requires
-              <code className="mx-1 font-mono">@tauri-apps/plugin-dialog</code>, which this build does
-              not bundle yet.
-            </p>
-          )}
-        </div>
       </div>
     </div>
   );

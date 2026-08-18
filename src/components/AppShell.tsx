@@ -50,13 +50,13 @@ import { DiffRoute } from "@/components/DiffRoute";
 import { DupesRoute } from "@/components/DupesRoute";
 import { SizeBands } from "@/components/SizeBands";
 import { TypesRoute } from "@/components/TypesRoute";
+import { ScanBar } from "@/components/ScanBar";
 import { ScanProgressStrip, useScanProgress } from "@/components/ScanProgressStrip";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { Titlebar, type Crumb } from "@/components/Titlebar";
 import { TreeTable } from "@/components/TreeTable";
 import { VolumePicker } from "@/components/VolumePicker";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
 import { formatSI } from "@/lib/format";
 import { categoryOf } from "@/lib/categories";
 import {
@@ -66,6 +66,7 @@ import {
   scanCancel,
   restoreSnapshot,
   scanStart,
+  OPEN_SETTINGS_EVENT,
   type DiffMetricKind,
   type LayoutKind,
   type RelocateReportView,
@@ -258,6 +259,28 @@ export function AppShell() {
     },
     [client],
   );
+
+  // The menu-bar panel is a separate webview and cannot set this window's route
+  // directly. It shows the window and then asks, which keeps navigation owned by
+  // the shell that renders it rather than split across two webviews.
+  useEffect(() => {
+    let stop: (() => void) | undefined;
+    let live = true;
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) => listen(OPEN_SETTINGS_EVENT, () => setRoute("storage")))
+      .then((unlisten) => {
+        if (live) stop = unlisten;
+        else unlisten();
+      })
+      .catch(() => {
+        // No event bridge outside the Tauri host (a browser dev server). The
+        // titlebar's own settings control still works; only the tray's does not.
+      });
+    return () => {
+      live = false;
+      stop?.();
+    };
+  }, []);
 
   const handleCancel = useCallback(async () => {
     if (activeScan === null) return;
@@ -501,11 +524,7 @@ export function AppShell() {
           )
         }
       >
-        {generation !== GENERATION_NONE && (
-          <Button variant="ghost" size="sm" onClick={() => setRoute("volumes")}>
-            Scan…
-          </Button>
-        )}
+        <ScanBar onScan={(root) => void handleScan(root)} busy={scanning || starting} />
       </Titlebar>
 
       <div className="flex min-h-0 flex-1">

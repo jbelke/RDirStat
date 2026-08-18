@@ -84,6 +84,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::restore_snapshot,
             commands::ancestors,
             commands::path_of,
+            commands::complete_path,
             commands::volumes,
             commands::trash_preview,
             commands::move_to_trash,

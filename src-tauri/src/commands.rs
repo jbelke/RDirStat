@@ -79,6 +79,102 @@ fn validate_root(raw: &Path) -> Result<PathBuf, StartError> {
     std::fs::canonicalize(raw).map_err(|error| StartError::Internal(error.to_string()))
 }
 
+/// The most completions [`complete_path`] will return.
+///
+/// A directory with forty thousand children must not push forty thousand
+/// strings across IPC to draw a menu that shows eight of them. This is a
+/// *menu*, not a listing, and nothing tells the user how many were left out —
+/// typing one more character is the disclosure, and a count would only invite
+/// them to widen a prefix that is already too wide.
+const MAX_PATH_COMPLETIONS: usize = 12;
+
+/// Directory completions for a partially typed path.
+///
+/// Backs the scan bar's autocomplete. Deliberately **infallible**: a path that
+/// does not exist, an unreadable directory, and a prefix naming a file all
+/// yield an empty list rather than an error. A completion request is a
+/// keystroke, not an action — raising `EACCES` for every character typed
+/// through `/Library` would be noise, and the permission error that *means*
+/// something still arrives from [`scan_start`].
+///
+/// Only directories are offered, because only a directory can be a scan root.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn complete_path(prefix: String) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || complete_path_blocking(&prefix))
+        .await
+        .unwrap_or_default()
+}
+
+fn complete_path_blocking(prefix: &str) -> Vec<String> {
+    let expanded = expand_tilde(prefix);
+
+    // Split into the directory to read and the fragment to match against its
+    // children. A trailing separator means "show me what is inside this", so
+    // `/Users/` offers the children of `/Users` while `/Users` offers `/Users`
+    // itself from the children of `/`.
+    let Some(cut) = expanded.rfind('/') else {
+        // No separator at all. Completing a bare word would mean guessing a
+        // parent directory the user never named, and the likeliest guess —
+        // the process's working directory — is meaningless in a GUI.
+        return Vec::new();
+    };
+    let (dir, fragment) = (&expanded[..=cut], &expanded[cut + 1..]);
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let wanted = fragment.to_lowercase();
+    let mut matches: Vec<String> = entries
+        .flatten()
+        .filter(|entry| {
+            // `metadata` follows the link, which is what the user means here:
+            // a symlink to a directory is a directory you can name as a root.
+            // The scan still refuses to *descend* through symlinks — offering
+            // one as a starting point is not the same as following it.
+            entry.metadata().is_ok_and(|meta| meta.is_dir())
+        })
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // Dot-directories appear only once the user has typed a dot, the
+            // same bargain a shell makes: `/Volumes/` should not open with
+            // `.Spotlight-V100` sitting above the volume the user wants.
+            if name.starts_with('.') && !fragment.starts_with('.') {
+                return None;
+            }
+            name.to_lowercase()
+                .starts_with(&wanted)
+                .then(|| format!("{dir}{name}"))
+        })
+        .collect();
+
+    // Case-insensitively, so `/Volumes/n` does not sort `NATO` away from
+    // `nato-scratch`. macOS is case-insensitive by default and the ordering
+    // should not contradict the matching.
+    matches.sort_by_key(|path| path.to_lowercase());
+    matches.truncate(MAX_PATH_COMPLETIONS);
+    matches
+}
+
+/// Expands a leading `~`, which users type and no syscall accepts.
+fn expand_tilde(raw: &str) -> String {
+    let Some(rest) = raw.strip_prefix('~') else {
+        return raw.to_owned();
+    };
+    // `~other` names another user's home and resolving it needs the password
+    // database. Leaving it alone yields no completions, which is honest;
+    // guessing `/Users/other` would be wrong on any machine with a network
+    // directory service.
+    if !rest.is_empty() && !rest.starts_with('/') {
+        return raw.to_owned();
+    }
+    match std::env::var_os("HOME") {
+        Some(home) => format!("{}{rest}", home.to_string_lossy()),
+        None => raw.to_owned(),
+    }
+}
+
 /// Starts a scan and returns immediately. Results arrive as events plus a
 /// `scan_status` transition.
 ///
@@ -1176,6 +1272,99 @@ pub(crate) async fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // complete_path
+    // -----------------------------------------------------------------------
+
+    /// Builds a fixture whose shape exercises every filter at once.
+    fn completion_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["Movies", "movies-backup", "Music", "Documents", ".hidden"] {
+            std::fs::create_dir(dir.path().join(name)).expect("mkdir");
+        }
+        std::fs::write(dir.path().join("Moviefile.txt"), b"x").expect("write");
+        dir
+    }
+
+    fn complete(dir: &tempfile::TempDir, fragment: &str) -> Vec<String> {
+        let prefix = format!("{}/{fragment}", dir.path().display());
+        complete_path_blocking(&prefix)
+            .into_iter()
+            .filter_map(|path| {
+                std::path::Path::new(&path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn completion_matches_a_prefix_case_insensitively() {
+        let dir = completion_fixture();
+        // Lowercase "mov" must still reach "Movies": macOS is case-insensitive
+        // by default, so matching that is not would contradict the filesystem.
+        assert_eq!(complete(&dir, "mov"), vec!["Movies", "movies-backup"]);
+    }
+
+    #[test]
+    fn completion_offers_directories_only() {
+        let dir = completion_fixture();
+        // `Moviefile.txt` shares the prefix and is a file. Only a directory can
+        // be a scan root, so offering it would be offering a dead end.
+        assert!(!complete(&dir, "Movie").contains(&"Moviefile.txt".to_owned()));
+    }
+
+    #[test]
+    fn completion_hides_dot_directories_until_a_dot_is_typed() {
+        let dir = completion_fixture();
+        assert!(!complete(&dir, "").contains(&".hidden".to_owned()));
+        assert_eq!(complete(&dir, "."), vec![".hidden"]);
+    }
+
+    #[test]
+    fn a_trailing_separator_lists_the_directory_itself() {
+        let dir = completion_fixture();
+        // "" after the separator is the "show me what is in here" case, and it
+        // must not collapse to "match everything anywhere".
+        let all = complete(&dir, "");
+        assert!(all.contains(&"Music".to_owned()), "{all:?}");
+        assert!(all.contains(&"Documents".to_owned()), "{all:?}");
+    }
+
+    #[test]
+    fn completion_is_capped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for index in 0..(MAX_PATH_COMPLETIONS * 3) {
+            std::fs::create_dir(dir.path().join(format!("d{index:04}"))).expect("mkdir");
+        }
+        let prefix = format!("{}/d", dir.path().display());
+        assert_eq!(complete_path_blocking(&prefix).len(), MAX_PATH_COMPLETIONS);
+    }
+
+    #[test]
+    fn an_unreadable_or_absent_directory_yields_no_completions_rather_than_an_error() {
+        // The whole point of the infallible signature: a keystroke mid-path
+        // names a directory that does not exist yet, and that is not an error.
+        assert!(complete_path_blocking("/nonexistent-abcxyz/foo").is_empty());
+        assert!(complete_path_blocking("").is_empty());
+        // No separator: nothing to anchor the listing against.
+        assert!(complete_path_blocking("Movies").is_empty());
+    }
+
+    #[test]
+    fn a_bare_tilde_expands_but_another_users_home_does_not() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let home = home.to_string_lossy().into_owned();
+        assert_eq!(expand_tilde("~/Movies"), format!("{home}/Movies"));
+        assert_eq!(expand_tilde("~"), home);
+        // `~other` needs the password database; guessing /Users/other is wrong
+        // on any machine with a directory service, so it is left verbatim.
+        assert_eq!(expand_tilde("~other/x"), "~other/x");
+        assert_eq!(expand_tilde("/already/absolute"), "/already/absolute");
+    }
 
     #[test]
     fn a_missing_root_is_named_before_a_slot_is_claimed() {

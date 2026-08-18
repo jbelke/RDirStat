@@ -258,6 +258,19 @@ export const commands = {
 	 */
 	pathOf: (generation: TreeGeneration, item: NodeId) => typedError<DisplayPath, QueryError>(__TAURI_INVOKE("path_of", { generation, item })),
 	/**
+	 *  Directory completions for a partially typed path.
+	 * 
+	 *  Backs the scan bar's autocomplete. Deliberately **infallible**: a path that
+	 *  does not exist, an unreadable directory, and a prefix naming a file all
+	 *  yield an empty list rather than an error. A completion request is a
+	 *  keystroke, not an action — raising `EACCES` for every character typed
+	 *  through `/Library` would be noise, and the permission error that *means*
+	 *  something still arrives from [`scan_start`].
+	 * 
+	 *  Only directories are offered, because only a directory can be a scan root.
+	 */
+	completePath: (prefix: string) => __TAURI_INVOKE<string[]>("complete_path", { prefix }),
+	/**
 	 *  Mounted local volumes, for the launch screen.
 	 * 
 	 *  # Errors
