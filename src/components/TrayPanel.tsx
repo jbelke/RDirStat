@@ -27,13 +27,14 @@
  *   not in a panel someone opens to check free space.
  */
 
-import { Loader, PanelTopOpen, RefreshCw, Settings } from "lucide-react";
+import { HardDrive, Loader, PanelTopOpen, RefreshCw, Settings } from "lucide-react";
 import { useEffect, useMemo } from "react";
 
 import { CapacityBar, capacitySegments } from "@/components/CapacityBar";
 import { Button } from "@/components/ui/button";
+import { groupVolumes } from "@/lib/disks";
+import type { ContainerGroup } from "@/lib/disks";
 import { formatCount, formatPercent, formatSI } from "@/lib/format";
-import type { VolumeRow } from "@/lib/ipc";
 import { useScanStatus, useVolumes } from "@/lib/queries";
 import { OPEN_SETTINGS_EVENT } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
@@ -50,7 +51,7 @@ export function TrayPanel() {
     return () => window.clearInterval(timer);
   }, [refetch]);
 
-  const disks = useMemo(() => summarizeDisks(volumes ?? []), [volumes]);
+  const disks = useMemo(() => groupVolumes(volumes ?? []), [volumes]);
   const summary = status.data?.summary ?? null;
   const scanState = status.data?.state ?? "idle";
 
@@ -89,31 +90,53 @@ export function TrayPanel() {
             Reading volumes…
           </p>
         )}
-        <ul className="flex flex-col gap-3">
-          {disks.map((disk) => {
-            const segments = capacitySegments(disk.totalBytes, disk.availableBytes, null);
-            return (
-              <li key={disk.id} className="flex flex-col gap-1">
-                <div className="flex items-baseline gap-2 text-xs">
-                  <span className="min-w-0 flex-1 truncate">{disk.label}</span>
-                  <span className="rds-numeric shrink-0 tabular-nums">
-                    {formatPercent(segments.used, segments.total)}
-                  </span>
-                  <span className="rds-numeric shrink-0 text-muted-foreground">
-                    {formatSI(segments.available)} free
-                  </span>
-                </div>
-                <CapacityBar
-                  total={disk.totalBytes}
-                  available={disk.availableBytes}
-                  importantAvailable={null}
+        <ul className="flex flex-col gap-2.5">
+          {disks.map((disk) => (
+            // One border per physical disk, volumes inside it. The panel used
+            // to draw one flat row per container, so a multi-container disk
+            // appeared as several disks that happened to share a name.
+            <li key={disk.id} className="overflow-hidden rounded-lg border border-border/60">
+              <div className="flex items-baseline gap-1.5 bg-muted/40 px-2.5 py-1.5">
+                <HardDrive
+                  aria-hidden
+                  className="size-3 shrink-0 translate-y-px text-muted-foreground"
                 />
-                <div className="truncate text-[10px] text-muted-foreground">
-                  {disk.volumeNames.join(" · ")}
-                </div>
-              </li>
-            );
-          })}
+                <span className="min-w-0 flex-1 truncate text-xs font-medium">{disk.label}</span>
+                {disk.sizeBytes !== null && (
+                  <span className="rds-numeric shrink-0 text-[10px] text-muted-foreground">
+                    {formatSI(disk.sizeBytes)}
+                  </span>
+                )}
+              </div>
+              <div className="flex flex-col divide-y divide-border/40 border-t border-border/60">
+                {disk.containers.map((container) => {
+                  const segments = capacitySegments(
+                    container.totalBytes,
+                    container.availableBytes,
+                    container.importantAvailableBytes,
+                  );
+                  return (
+                    <div key={container.id} className="flex flex-col gap-1 px-2.5 py-2">
+                      <div className="flex items-baseline gap-2 text-xs">
+                        <span className="min-w-0 flex-1 truncate">{containerTitle(container)}</span>
+                        <span className="rds-numeric shrink-0 tabular-nums">
+                          {formatPercent(segments.used, segments.total)}
+                        </span>
+                        <span className="rds-numeric shrink-0 text-muted-foreground">
+                          {formatSI(segments.available)} free
+                        </span>
+                      </div>
+                      <CapacityBar
+                        total={container.totalBytes}
+                        available={container.availableBytes}
+                        importantAvailable={container.importantAvailableBytes}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </li>
+          ))}
         </ul>
 
         <h2 className="mb-1 mt-4 text-[10px] uppercase tracking-wide text-muted-foreground">
@@ -197,49 +220,19 @@ async function openSettings(): Promise<void> {
   await emitTo("main", OPEN_SETTINGS_EVENT);
 }
 
-interface DiskSummary {
-  readonly id: string;
-  readonly label: string;
-  readonly totalBytes: number;
-  readonly availableBytes: number;
-  readonly volumeNames: readonly string[];
-}
-
 /**
- * One row per **container**, not per volume.
+ * What one capacity bar covers, named by its volumes.
  *
- * The panel is four inches tall; listing `Preboot`, `VM` and `Update` as three
- * more 995 GB bars would fill it with the same number three times. Capacity is
- * a container property (see `VolumePicker`), so the container is the row, and
- * the volume names ride along underneath as context.
+ * Capacity is a container property (see `@/lib/disks`), so the bar is per
+ * container and this line says whose data shares it. User volumes are worth
+ * their names; the macOS-owned ones (`Preboot`, `VM`, `Update`, …) are not —
+ * in a four-inch panel they are counted, not listed.
  */
-function summarizeDisks(volumes: readonly VolumeRow[]): DiskSummary[] {
-  const containers = new Map<string, VolumeRow[]>();
-  for (const volume of volumes) {
-    const key = volume.containerId ?? volume.mountPoint;
-    const bucket = containers.get(key);
-    if (bucket === undefined) containers.set(key, [volume]);
-    else bucket.push(volume);
-  }
-
-  return [...containers]
-    .map(([id, members]) => {
-      const total = Math.max(...members.map((volume) => volume.totalBytes));
-      const owner = members.find((volume) => volume.totalBytes === total) ?? members[0];
-      const named = [...members].sort((a, b) => b.usedBytes - a.usedBytes);
-      return {
-        id,
-        label: owner?.diskName ?? named[0]?.name ?? id,
-        totalBytes: total,
-        availableBytes: owner?.availableBytes ?? 0,
-        volumeNames: named.map((volume) => volume.name),
-        hasRoot: members.some((volume) => volume.isRootVolume),
-      };
-    })
-    .sort((a, b) => {
-      if (a.hasRoot !== b.hasRoot) return a.hasRoot ? -1 : 1;
-      return b.totalBytes - a.totalBytes;
-    });
+function containerTitle(container: ContainerGroup): string {
+  const user = container.volumes.filter((volume) => !volume.isSystem).map((volume) => volume.name);
+  const system = container.volumes.length - user.length;
+  if (system === 0) return user.join(" · ");
+  return [...user, `${system} system volume${system === 1 ? "" : "s"}`].join(" · ");
 }
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
