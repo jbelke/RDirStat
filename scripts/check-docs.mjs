@@ -33,6 +33,7 @@ const markdownFiles = [
   path.join(root, "AGENTS.md"),
   path.join(root, "CLAUDE.md"),
   path.join(root, "README.md"),
+  path.join(root, "CHANGELOG.md"),
   path.join(root, "LICENSING.md"),
   path.join(root, "NOTICE"),
   ...markdownFilesUnder(path.join(root, "crates")),
