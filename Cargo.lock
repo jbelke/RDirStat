@@ -4258,6 +4258,7 @@ dependencies = [
  "anyhow",
  "crossbeam-channel",
  "rdirstat-classify",
+ "rdirstat-copy",
  "rdirstat-core",
  "rdirstat-remote",
  "rdirstat-scan",
@@ -4331,6 +4332,13 @@ dependencies = [
 [[package]]
 name = "rdirstat-copy"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+]
 
 [[package]]
 name = "rdirstat-core"

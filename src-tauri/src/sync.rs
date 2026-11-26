@@ -46,7 +46,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::hash::BuildHasher;
-use std::io::{self, Read as _};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -55,8 +55,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::token::{self, ItemIdentity};
 
-/// Chunk size for the content comparison.
-const COMPARE_CHUNK: usize = 256 * 1024;
+use rdirstat_copy::contents_differ;
 
 /// Ceiling on entries a plan will enumerate.
 ///
@@ -320,49 +319,6 @@ fn filesystem_facts(path: &Path) -> (u64, String) {
 
 fn carries_macos_metadata(kind: &str) -> bool {
     kind == "apfs" || kind.starts_with("hfs")
-}
-
-/// Compares two files byte for byte.
-///
-/// Streaming rather than hashing because both sides are local: reading both
-/// and comparing costs the same I/O a hash-both-sides scheme would, has no
-/// collision to argue about, and needs no hashing crate.
-fn contents_differ(a: &Path, b: &Path) -> io::Result<bool> {
-    let mut left = fs::File::open(a)?;
-    let mut right = fs::File::open(b)?;
-    let mut buffer_a = vec![0_u8; COMPARE_CHUNK];
-    let mut buffer_b = vec![0_u8; COMPARE_CHUNK];
-    loop {
-        let read_a = read_full(&mut left, &mut buffer_a)?;
-        let read_b = read_full(&mut right, &mut buffer_b)?;
-        if read_a != read_b {
-            return Ok(true);
-        }
-        if read_a == 0 {
-            return Ok(false);
-        }
-        if buffer_a[..read_a] != buffer_b[..read_b] {
-            return Ok(true);
-        }
-    }
-}
-
-/// Fills `buffer` unless EOF comes first.
-///
-/// `Read::read` may return short at any time, and comparing two short reads of
-/// different lengths from identical files would be a false difference — which
-/// in a sync means copying a file that did not need copying.
-fn read_full(file: &mut fs::File, buffer: &mut [u8]) -> io::Result<usize> {
-    let mut filled = 0;
-    while filled < buffer.len() {
-        match file.read(&mut buffer[filled..]) {
-            Ok(0) => break,
-            Ok(count) => filled += count,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(filled)
 }
 
 /// Walks the source and decides what the destination is missing.
@@ -956,25 +912,7 @@ pub(crate) fn diff(request: DiffRequest<'_>, cap: usize) -> Result<SyncDiff, Syn
 /// serve — a relative path containing a newline, and reporting per-file
 /// failures after a batch copy has failed as a whole.
 fn copy_one(source: &Path, destination: &Path) -> Result<(), String> {
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let output = Command::new("/usr/bin/ditto")
-        .arg("--rsrc")
-        .arg("--extattr")
-        .arg("--acl")
-        .arg(source)
-        .arg(destination)
-        .output()
-        .map_err(|error| format!("could not run ditto: {error}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(format!(
-        "ditto exited {}: {}",
-        output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stderr).trim()
-    ))
+    rdirstat_copy::ditto(source, destination).map_err(|error| error.to_string())
 }
 
 /// A private scratch directory that removes itself.
@@ -1137,24 +1075,7 @@ fn copy_planned(source: &Path, destination: &Path, entries: &[PlannedCopy]) -> R
         ));
     }
 
-    let copied = Command::new("/usr/bin/ditto")
-        .arg("--bom")
-        .arg(&bom)
-        .arg("--rsrc")
-        .arg("--extattr")
-        .arg("--acl")
-        .arg(source)
-        .arg(destination)
-        .output()
-        .map_err(|error| format!("could not run ditto: {error}"))?;
-    if copied.status.success() {
-        return Ok(());
-    }
-    Err(format!(
-        "ditto exited {}: {}",
-        copied.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&copied.stderr).trim()
-    ))
+    rdirstat_copy::ditto_bom(source, destination, &bom).map_err(|error| error.to_string())
 }
 
 /// Runs a planned sync.
@@ -1514,7 +1435,7 @@ mod tests {
         // means copying something that did not need copying.
         let source = scratch();
         let destination = scratch();
-        let payload: Vec<u8> = (0..(COMPARE_CHUNK * 2 + 517))
+        let payload: Vec<u8> = (0..(rdirstat_copy::COMPARE_CHUNK * 2 + 517))
             .map(|i| u8::try_from(i % 251).expect("a value mod 251 fits in a u8"))
             .collect();
         write(source.path(), "big.bin", &payload);

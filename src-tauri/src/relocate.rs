@@ -64,25 +64,18 @@
 //! updates every reference at once, including ones in binaries and databases
 //! that no rewriter could find.
 
-use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::fs::{self, Metadata};
+use std::fs;
 use std::hash::BuildHasher;
-use std::io::{self, Read as _};
-use std::os::unix::fs::FileTypeExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+use rdirstat_copy::CopyError;
 use rdirstat_core::{ActionError, CompletedScan, ConfirmationToken, DisplayPath, NodeId, Operation, TreeGeneration};
 use serde::{Deserialize, Serialize};
 
 use crate::fsident;
 use crate::token::{self, ItemIdentity};
-
-/// Chunk size for the verification compare. Large enough that the syscall
-/// overhead disappears against the read, small enough to stay off the stack
-/// and out of the way of the page cache.
-const COMPARE_CHUNK: usize = 256 * 1024;
 
 /// Directories that must never be relocated, matched as path prefixes.
 ///
@@ -765,292 +758,29 @@ impl RiskTier {
 // Verification
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default)]
-struct VerifyTally {
-    files: u64,
-    bytes: u64,
-    special: u64,
+// The compare itself — contents, sizes, types, symlink targets, then extended
+// attribute names — lives in `rdirstat_copy::compare_tree`, the one copier
+// Relocate, Sync and Backup share. These two adapters are all that is left
+// here: they turn its errors into the IPC error this module reports.
+
+/// `ditto` could not run or exited non-zero.
+fn copy_failed(error: &CopyError) -> RelocateError {
+    RelocateError::CopyFailed(error.to_string())
 }
 
-/// Compares two trees and returns what was checked.
-///
-/// Every regular file is read in full on both sides and compared byte-for-byte.
-/// Symlinks are compared by target, not by what they point at — a symlink is
-/// its target string, and following it would compare the same file to itself.
-/// Sockets, FIFOs and device nodes are counted and skipped: no copy can carry
-/// them, and their presence is what downgrades disposal to
-/// [`SourceDisposal::Keep`].
-fn verify_tree(source: &Path, destination: &Path, tally: &mut VerifyTally) -> Result<(), RelocateError> {
-    let source_meta = fs::symlink_metadata(source).map_err(|error| verify_error(source, &error))?;
-    let destination_meta = fs::symlink_metadata(destination).map_err(|error| verify_error(destination, &error))?;
-
-    let source_type = source_meta.file_type();
-    let destination_type = destination_meta.file_type();
-
-    if source_type.is_symlink() {
-        if !destination_type.is_symlink() {
-            return Err(mismatch(destination, "the source is a symlink and the copy is not"));
-        }
-        let a = fs::read_link(source).map_err(|error| verify_error(source, &error))?;
-        let b = fs::read_link(destination).map_err(|error| verify_error(destination, &error))?;
-        if a != b {
-            return Err(mismatch(destination, "symlink target differs"));
-        }
-        tally.files = tally.files.saturating_add(1);
-        return Ok(());
-    }
-
-    if source_type.is_dir() {
-        if !destination_type.is_dir() {
-            return Err(mismatch(destination, "the source is a directory and the copy is not"));
-        }
-        return verify_directory(source, destination, tally);
-    }
-
-    if source_type.is_file() {
-        if !destination_type.is_file() {
-            return Err(mismatch(
-                destination,
-                "the source is a regular file and the copy is not",
-            ));
-        }
-        if source_meta.len() != destination_meta.len() {
-            return Err(mismatch(
-                destination,
-                format!("size differs: {} vs {}", source_meta.len(), destination_meta.len()),
-            ));
-        }
-        compare_contents(source, destination)?;
-        tally.files = tally.files.saturating_add(1);
-        tally.bytes = tally.bytes.saturating_add(source_meta.len());
-        return Ok(());
-    }
-
-    // Socket, FIFO, block or character device.
-    if is_special(&source_meta) {
-        tally.special = tally.special.saturating_add(1);
-        return Ok(());
-    }
-
-    Err(mismatch(source, "unrecognized file type"))
-}
-
-fn verify_directory(source: &Path, destination: &Path, tally: &mut VerifyTally) -> Result<(), RelocateError> {
-    let mut source_names = read_names(source)?;
-    let mut destination_names = read_names(destination)?;
-    source_names.sort_unstable();
-    destination_names.sort_unstable();
-
-    // Compare the name sets before recursing, so "the copy is missing a file"
-    // is reported as exactly that rather than as a confusing failure ten levels
-    // down.
-    if source_names != destination_names {
-        let missing: Vec<&PathBuf> = source_names
-            .iter()
-            .filter(|name| !destination_names.contains(name))
-            .take(3)
-            .collect();
-        let extra: Vec<&PathBuf> = destination_names
-            .iter()
-            .filter(|name| !source_names.contains(name))
-            .take(3)
-            .collect();
-        return Err(mismatch(
-            destination,
-            format!(
-                "directory contents differ ({} entries in the source, {} in the copy; missing {missing:?}, unexpected {extra:?})",
-                source_names.len(),
-                destination_names.len(),
-            ),
-        ));
-    }
-
-    for name in source_names {
-        verify_tree(&source.join(&name), &destination.join(&name), tally)?;
-    }
-    Ok(())
-}
-
-fn read_names(directory: &Path) -> Result<Vec<PathBuf>, RelocateError> {
-    let mut names = Vec::new();
-    for entry in fs::read_dir(directory).map_err(|error| verify_error(directory, &error))? {
-        let entry = entry.map_err(|error| verify_error(directory, &error))?;
-        names.push(PathBuf::from(entry.file_name()));
-    }
-    Ok(names)
-}
-
-/// Streams both files and compares them block by block.
-fn compare_contents(source: &Path, destination: &Path) -> Result<(), RelocateError> {
-    let mut a = fs::File::open(source).map_err(|error| verify_error(source, &error))?;
-    let mut b = fs::File::open(destination).map_err(|error| verify_error(destination, &error))?;
-    let mut buffer_a = vec![0_u8; COMPARE_CHUNK];
-    let mut buffer_b = vec![0_u8; COMPARE_CHUNK];
-    let mut offset = 0_u64;
-
-    loop {
-        let read_a = read_full(&mut a, &mut buffer_a).map_err(|error| verify_error(source, &error))?;
-        let read_b = read_full(&mut b, &mut buffer_b).map_err(|error| verify_error(destination, &error))?;
-        if read_a != read_b {
-            return Err(mismatch(destination, format!("length differs near byte {offset}")));
-        }
-        if read_a == 0 {
-            return Ok(());
-        }
-        if buffer_a[..read_a] != buffer_b[..read_b] {
-            return Err(mismatch(destination, format!("contents differ near byte {offset}")));
-        }
-        offset = offset.saturating_add(read_a as u64);
-    }
-}
-
-/// Fills `buffer` unless EOF is reached first.
-///
-/// `Read::read` is permitted to return a short read at any time; comparing two
-/// short reads of *different* lengths from two files that are actually
-/// identical would be a false mismatch, so both sides are filled to the same
-/// boundary before being compared.
-fn read_full(file: &mut fs::File, buffer: &mut [u8]) -> io::Result<usize> {
-    let mut filled = 0;
-    while filled < buffer.len() {
-        match file.read(&mut buffer[filled..]) {
-            Ok(0) => break,
-            Ok(count) => filled += count,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(filled)
-}
-
-fn is_special(metadata: &Metadata) -> bool {
-    let file_type = metadata.file_type();
-    file_type.is_socket() || file_type.is_fifo() || file_type.is_block_device() || file_type.is_char_device()
-}
-
-/// An extended attribute macOS applies and reapplies on its own.
-///
-/// It tracks which process wrote a file and is regenerated at the destination,
-/// so it differs across a copy that carried everything the user cares about.
-/// Comparing it would fail every faithful relocation.
-const SELF_MANAGED_XATTR: &str = ": com.apple.provenance";
-
-/// Every extended attribute in a tree, as a sorted, comparable list.
-///
-/// # Why this shells out
-///
-/// `listxattr(2)` is the right call and needs `unsafe extern` FFI. The
-/// workspace denies `unsafe_code` outside `rdirstat-scan::sys::bulk`, and this
-/// crate is not that exception — the same reasoning, and the same remedy, as
-/// [`crate::volumes`]. Replace this with a `listxattr` binding the moment a
-/// crate is allowed to own one.
-///
-/// It is ONE process for the whole tree, not one per file. That distinction is
-/// the difference between a verification that costs a process spawn per file
-/// and one that costs two for the entire relocation.
-///
-/// `xattr -r` reports NAMES, not values, and that is deliberate rather than
-/// lazy: `xattr -l` renders a binary value as empty text, so it would report
-/// two different resource forks as identical, and there is no flag that reports
-/// a value's length. Names are what can actually be compared, and wholesale
-/// loss — every attribute gone because the copy went through a tool that cannot
-/// carry them — is the failure this has actually seen (nato-b6h.7, nato-b6h.8).
-/// A truncated attribute value would not be caught; that is stated here rather
-/// than implied by silence.
-fn extended_attributes(root: &Path) -> Result<BTreeSet<String>, RelocateError> {
-    let output = Command::new("/usr/bin/xattr")
-        // `-s` acts on a symlink itself instead of following it. Two reasons,
-        // and the first is a hard requirement:
-        //
-        //   Without it, `xattr` exits 1 on a DANGLING symlink ("No such file"),
-        //   which would fail verification for any tree containing one — and
-        //   this repository's own `node_modules` holds 1,527 of them.
-        //   `node_modules`, Homebrew's `opt` and DerivedData are exactly the
-        //   trees a user reaches for this feature to offload.
-        //
-        //   It is also the correct comparison. Following a symlink reports its
-        //   TARGET's attributes against the link's own path, so a link and its
-        //   target both report the target's — and `verify_tree` already states
-        //   the rule this restores: a symlink is compared as a symlink.
-        .arg("-rs")
-        .arg(".")
-        // From inside the tree, so every line is relative and the two sides are
-        // comparable without string surgery on absolute paths.
-        .current_dir(root)
-        .output()
-        .map_err(|error| verify_error(root, &error))?;
-    if !output.status.success() {
-        return Err(mismatch(
-            root,
-            format!(
-                "could not read extended attributes: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        ));
-    }
-
-    // A set, not a list: `xattr` walks in directory order, which is not the same
-    // on the source and on a freshly written copy, and comparing order would
-    // report a loss that did not happen. A set also makes the subset test in
-    // `verify_extended_attributes` linear rather than quadratic, which matters
-    // at the hundreds of thousands of entries this is pointed at.
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| !line.is_empty() && !line.ends_with(SELF_MANAGED_XATTR))
-        .map(str::to_owned)
-        .collect())
-}
-
-/// Proves the copy carried the extended attributes, not just the bytes.
-///
-/// [`verify_tree`] compares contents, sizes, types and symlink targets, and is
-/// blind to every attribute hanging off them. That gap is not academic: it is
-/// exactly the shape of the two defects this project has already paid for, in
-/// which a copy stripped of every xattr passed a size-and-mtime check and the
-/// source was then deleted on the strength of it. Resource forks ride here too,
-/// as `com.apple.ResourceFork`.
-///
-/// Runs BEFORE the source is disposed of, so a failure leaves the original
-/// untouched — the same fail-closed ordering as the content compare.
-fn verify_extended_attributes(source: &Path, destination: &Path) -> Result<(), RelocateError> {
-    let expected = extended_attributes(source)?;
-    let actual = extended_attributes(destination)?;
-
-    // A SUBSET test, not equality: only LOSS is a failure.
-    //
-    // The destination legitimately gains attributes that the source never had.
-    // `com.apple.macl` is the one that would have bitten every real user:
-    // macOS mints it via TCC when a sandboxed app writes through a path the
-    // user chose in a file picker, which is exactly what this app's Browse
-    // button produces. On this machine 374 Desktop files carry one. Under an
-    // equality test that gain would fail the relocation AFTER the copy, leaving
-    // a duplicate on disk and an incomprehensible error — and no temporary
-    // directory fixture would ever have shown it.
-    let missing: Vec<&String> = expected.difference(&actual).take(3).collect();
-    if missing.is_empty() {
-        return Ok(());
-    }
-    Err(mismatch(
-        destination,
-        format!(
-            "the copy is missing {} of the source's {} extended attributes, including {missing:?}",
-            expected.difference(&actual).count(),
-            expected.len(),
-        ),
-    ))
-}
-
-fn mismatch(path: &Path, reason: impl Into<String>) -> RelocateError {
-    RelocateError::VerifyFailed {
-        path: display(path),
-        reason: reason.into(),
-    }
-}
-
-fn verify_error(path: &Path, error: &io::Error) -> RelocateError {
-    RelocateError::VerifyFailed {
-        path: display(path),
-        reason: error.to_string(),
+/// The copy did not match, or a side could not be read. Either way the source
+/// has not been touched.
+fn verify_failed(error: CopyError) -> RelocateError {
+    match error {
+        CopyError::Mismatch { path, reason } => RelocateError::VerifyFailed {
+            path: display(&path),
+            reason,
+        },
+        CopyError::Io { path, source } => RelocateError::VerifyFailed {
+            path: display(&path),
+            reason: source.to_string(),
+        },
+        other => RelocateError::Internal(other.to_string()),
     }
 }
 
@@ -1114,32 +844,6 @@ fn trash_path(path: &Path) -> Result<(), RelocateError> {
             reason: error.to_string(),
         })
     })
-}
-
-/// Runs `ditto` to copy `source` onto `destination`.
-fn ditto(source: &Path, destination: &Path) -> Result<(), RelocateError> {
-    // `--rsrc --extattr --acl` are the metadata-preserving flags. Modern ditto
-    // implies them for an APFS-to-APFS copy, but stating them means the
-    // behaviour does not change under us on a different destination filesystem,
-    // and it documents at the call site what this copy is promising to keep.
-    let output = Command::new("/usr/bin/ditto")
-        .arg("--rsrc")
-        .arg("--extattr")
-        .arg("--acl")
-        .arg(source)
-        .arg(destination)
-        .output()
-        .map_err(|error| RelocateError::CopyFailed(format!("could not run ditto: {error}")))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(RelocateError::CopyFailed(format!(
-        "ditto exited {}: {}",
-        output.status.code().unwrap_or(-1),
-        stderr.trim()
-    )))
 }
 
 /// Executes a planned relocation.
@@ -1229,18 +933,17 @@ pub(crate) fn apply<S: BuildHasher>(
                 reason: "it appeared between the plan and the confirmation".to_owned(),
             });
         }
-        ditto(&source, &destination)?;
+        rdirstat_copy::ditto(&source, &destination).map_err(|error| copy_failed(&error))?;
     }
 
     // 2. Verify. Nothing destructive has happened yet, and nothing will if this
     //    fails — the partial copy is left on disk and named in the error so the
     //    user can inspect or remove it themselves.
-    let mut tally = VerifyTally::default();
-    verify_tree(&source, &destination, &mut tally)?;
-    // Contents are proved; now prove the metadata hanging off them. A copy that
-    // matches byte for byte and has lost every extended attribute is not the
-    // same file, and this is the only thing in the codebase that can tell.
-    verify_extended_attributes(&source, &destination)?;
+    //
+    //    Contents first, then the metadata hanging off them: a copy that
+    //    matches byte for byte and has lost every extended attribute is not
+    //    the same file, and `compare_tree` checks both.
+    let tally = rdirstat_copy::compare_tree(&source, &destination).map_err(verify_failed)?;
     report.files_verified = tally.files;
     report.bytes_verified = tally.bytes;
     report.special_files = tally.special;
@@ -1324,6 +1027,27 @@ mod tests {
     use crate::state::CancelToken;
 
     const NOW: i64 = 1_800_000_000_000;
+
+    use rdirstat_copy::{COMPARE_CHUNK, VerifyTally};
+
+    // Thin shims over rdirstat-copy with this module's error type, so the
+    // tests below keep asserting the user-visible `RelocateError` shapes.
+    fn ditto(source: &Path, destination: &Path) -> Result<(), RelocateError> {
+        rdirstat_copy::ditto(source, destination).map_err(|error| copy_failed(&error))
+    }
+
+    fn verify_tree(source: &Path, destination: &Path, tally: &mut VerifyTally) -> Result<(), RelocateError> {
+        *tally = rdirstat_copy::compare_contents_tree(source, destination).map_err(verify_failed)?;
+        Ok(())
+    }
+
+    fn verify_extended_attributes(source: &Path, destination: &Path) -> Result<(), RelocateError> {
+        rdirstat_copy::compare_xattr_names(source, destination).map_err(verify_failed)
+    }
+
+    fn compare_contents(source: &Path, destination: &Path) -> Result<(), RelocateError> {
+        rdirstat_copy::compare_files(source, destination).map_err(verify_failed)
+    }
 
     /// Builds a small tree carrying the three kinds of metadata a plain content
     /// compare cannot see: an ordinary xattr, a Finder-style one, and a

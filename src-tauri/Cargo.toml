@@ -98,6 +98,10 @@ specta-typescript = "=0.0.12"
 # `BinaryResponse`. Re-add it in the same change that makes src-tauri build a
 # batch of its own (phase 6 `report` is the likely one).
 
+# --- the one copier: `ditto`, the streaming compare and the xattr check that
+# Relocate and Sync both verify with (.settings/docs/11-ORGANIZE.md, Amendment A).
+rdirstat-copy = { workspace = true }
+
 # --- macOS actions: NSFileManager trashItem, never fs::remove_file ---
 trash = { workspace = true }
 sha2 = { workspace = true }
