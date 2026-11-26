@@ -40,6 +40,7 @@ mod plan;
 mod profile;
 mod recommend;
 mod rollup;
+mod service;
 mod status;
 #[cfg(test)]
 mod tests;
@@ -50,12 +51,14 @@ use std::process::ExitCode;
 use anyhow::{Context as _, Result, bail};
 use rdirstat_organize::DiskFacts;
 
-use crate::cli::{BackupApplyArgs, BackupCommand, BackupDestArgs, BackupPlanArgs, BackupStatusArgs};
+use crate::cli::{
+    BackupApplyArgs, BackupCommand, BackupControlArgs, BackupDestArgs, BackupPlanArgs, BackupServeArgs,
+    BackupStatusArgs, BackupSubmitArgs, ControlAction,
+};
 
-#[cfg(test)]
 pub(crate) use apply::ApplyReport;
+pub(crate) use apply::{ApplyHooks, Gate, ItemResult, Outcome, apply_with};
 pub(crate) use apply::{ApplyRequest, apply};
-#[cfg(test)]
 pub(crate) use plan::PlanOutcome;
 pub(crate) use plan::{PlanRequest, build_plan};
 pub(crate) use recommend::DEFAULT_LIMIT as RECOMMEND_LIMIT;
@@ -102,7 +105,167 @@ pub(crate) fn run(command: &BackupCommand) -> Result<ExitCode> {
         BackupCommand::Index(args) => run_index(args),
         BackupCommand::Status(args) => run_status(args),
         BackupCommand::Recommend(args) => profile::run_recommend(args),
+        BackupCommand::Serve(args) => run_serve(args),
+        BackupCommand::Jobs(args) => run_jobs(args),
+        BackupCommand::Submit(args) => run_submit(args),
+        BackupCommand::Control(args) => run_control(args),
     }
+}
+
+/// How long a CLI call to the service may take.
+const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn run_serve(args: &BackupServeArgs) -> Result<ExitCode> {
+    let dest = std::fs::canonicalize(&args.dest).with_context(|| format!("cannot resolve {}", args.dest.display()))?;
+    if args.detach {
+        return detach(&dest, args.catalog.as_deref());
+    }
+    let running = service::start(service::ServeConfig {
+        dest,
+        probe: std::sync::Arc::new(SystemProbe),
+        default_catalog: Some(catalog_dir(args.catalog.as_deref())?),
+        app_catalog: catalog_dir(None).ok(),
+        signals: true,
+        on_item: None,
+    })?;
+    eprintln!(
+        "rdirstat: backup service pid {} listening on {}",
+        running.service.health().pid,
+        running.socket.display()
+    );
+    running.join()?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Re-runs this binary as `backup serve` in a new session, logging to the
+/// drive, and waits for it to answer `/v1/health`.
+fn detach(dest: &Path, catalog: Option<&Path>) -> Result<ExitCode> {
+    let run = rdirstat_jobs::run_dir(dest);
+    std::fs::create_dir_all(&run).with_context(|| format!("cannot create {}", run.display()))?;
+    let log_path = run.join(rdirstat_jobs::SERVE_LOG);
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("cannot open {}", log_path.display()))?;
+    let exe = std::env::current_exe().context("cannot find this binary")?;
+    let mut command = std::process::Command::new(exe);
+    command.arg("backup").arg("serve").arg("--dest").arg(dest);
+    if let Some(catalog) = catalog {
+        command.arg("--catalog").arg(catalog);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    service::new_session(&mut command);
+    let mut child = command.spawn().context("cannot start the backup service")?;
+    let socket = rdirstat_jobs::socket_path(dest);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if let Ok(health) = service::client::call::<rdirstat_jobs::Health>(
+            &socket,
+            "GET",
+            "/v1/health",
+            None,
+            std::time::Duration::from_secs(2),
+        ) && health.pid == child.id()
+        {
+            print(&format!(
+                "Backup service pid {} on {}\nSocket: {}\nLog: {}\n",
+                health.pid,
+                dest.display(),
+                socket.display(),
+                log_path.display()
+            ))?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        if let Some(status) = child.try_wait()? {
+            bail!("the backup service exited ({status}); see {}", log_path.display());
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "the backup service (pid {}) did not answer within 20 s; see {}",
+                child.id(),
+                log_path.display()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn run_jobs(args: &BackupDestArgs) -> Result<ExitCode> {
+    let dest = std::fs::canonicalize(&args.dest).with_context(|| format!("cannot resolve {}", args.dest.display()))?;
+    let socket = rdirstat_jobs::socket_path(&dest);
+    let (list, source) =
+        match service::client::call::<rdirstat_jobs::JobList>(&socket, "GET", "/v1/jobs", None, CALL_TIMEOUT) {
+            Ok(list) => (list, "service"),
+            Err(service::client::CallError::Unreachable(_)) => (service::read_jobs(&dest)?, "drive"),
+            Err(error) => return Err(error.into()),
+        };
+    let text = if args.json {
+        let mut text = serde_json::to_string_pretty(&serde_json::json!({ "source": source, "jobs": list.jobs }))?;
+        text.push('\n');
+        text
+    } else {
+        service::jobs_text(&dest, &list, source)
+    };
+    print(&text)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_submit(args: &BackupSubmitArgs) -> Result<ExitCode> {
+    let dest = std::fs::canonicalize(&args.dest).with_context(|| format!("cannot resolve {}", args.dest.display()))?;
+    let body = std::fs::read(&args.job).with_context(|| format!("cannot read {}", args.job.display()))?;
+    serde_json::from_slice::<rdirstat_jobs::NewJob>(&body)
+        .with_context(|| format!("{} is not a job", args.job.display()))?;
+    let summary: rdirstat_jobs::JobSummary = service::client::call(
+        &rdirstat_jobs::socket_path(&dest),
+        "POST",
+        "/v1/jobs",
+        Some(&body),
+        CALL_TIMEOUT,
+    )?;
+    if args.json {
+        print(&format!("{}\n", serde_json::to_string_pretty(&summary)?))?;
+    } else {
+        print(&format!(
+            "Queued job {} ({} sources)\n",
+            summary.spec.id,
+            summary.spec.sources.len()
+        ))?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_control(args: &BackupControlArgs) -> Result<ExitCode> {
+    let dest = std::fs::canonicalize(&args.dest).with_context(|| format!("cannot resolve {}", args.dest.display()))?;
+    let socket = rdirstat_jobs::socket_path(&dest);
+    if args.action == ControlAction::Shutdown {
+        let health: rdirstat_jobs::Health = service::client::call(&socket, "POST", "/v1/shutdown", None, CALL_TIMEOUT)?;
+        print(&format!(
+            "Backup service pid {} is finishing the current item and stopping\n",
+            health.pid
+        ))?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    let Some(job) = args.job.as_deref() else {
+        bail!("name the job");
+    };
+    let verb = match args.action {
+        ControlAction::Pause => "pause",
+        ControlAction::Resume => "resume",
+        ControlAction::Cancel | ControlAction::Shutdown => "cancel",
+    };
+    let summary: rdirstat_jobs::JobSummary =
+        service::client::call(&socket, "POST", &format!("/v1/jobs/{job}/{verb}"), None, CALL_TIMEOUT)?;
+    print(&format!(
+        "Job {}: {:?}, control {}\n",
+        summary.spec.id,
+        summary.state.phase,
+        summary.control.word()
+    ))?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// The run id a plan's scan entries are written under:

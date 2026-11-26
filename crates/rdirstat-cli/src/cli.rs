@@ -58,6 +58,85 @@ pub(crate) enum BackupCommand {
     /// defer, and skip, largest first, with the skip rule and reason. Writes
     /// nothing and applies nothing.
     Recommend(BackupRecommendArgs),
+    /// Run the backup service for one destination drive: hold its lock, run
+    /// jobs (plan + apply rounds until everything lands, waiting for a
+    /// dropped drive), and answer the /v1 API on
+    /// `<dest>/.rdirstat/run/api.sock`. Never deletes anything on the drive.
+    Serve(BackupServeArgs),
+    /// List the drive's jobs and flag unfinished ones. Asks the service when
+    /// one runs, else reads `<dest>/.rdirstat/jobs` directly.
+    Jobs(BackupDestArgs),
+    /// Hand the service a job (a `NewJob` JSON file) to queue.
+    Submit(BackupSubmitArgs),
+    /// Pause, resume or cancel a job, or shut the service down. Takes effect
+    /// between items: the item being copied always finishes.
+    Control(BackupControlArgs),
+}
+
+/// `rdirstat backup serve` options.
+#[derive(Debug, Args)]
+pub(crate) struct BackupServeArgs {
+    /// Destination root (the backup volume's mount point).
+    #[arg(long, value_name = "DIR")]
+    pub(crate) dest: PathBuf,
+
+    /// Primary catalog for jobs that name none. Default: the app data dir's
+    /// `catalog`.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) catalog: Option<PathBuf>,
+
+    /// Start the service in a new session (`setsid`) with stdout and stderr
+    /// appended to `<dest>/.rdirstat/run/serve.log`, wait until it answers,
+    /// print its pid, and return.
+    #[arg(long)]
+    pub(crate) detach: bool,
+}
+
+/// `rdirstat backup submit` options.
+#[derive(Debug, Args)]
+pub(crate) struct BackupSubmitArgs {
+    /// Destination root whose service gets the job.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) dest: PathBuf,
+
+    /// A JSON file holding the job (`sources`, optional `id`, `rules`,
+    /// `floor`, `max_rounds`, ...).
+    #[arg(long, value_name = "FILE")]
+    pub(crate) job: PathBuf,
+
+    /// Print the service's JSON answer.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+/// What `backup control` asks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ControlAction {
+    /// Hold the job between items.
+    Pause,
+    /// Continue a paused job, or re-queue a stopped, cancelled, incomplete
+    /// or failed one.
+    Resume,
+    /// Stop the job between items.
+    Cancel,
+    /// Finish the current item, record the job as stopped, and exit.
+    Shutdown,
+}
+
+/// `rdirstat backup control` options.
+#[derive(Debug, Args)]
+pub(crate) struct BackupControlArgs {
+    /// Destination root whose service to ask.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) dest: PathBuf,
+
+    /// What to do.
+    #[arg(value_enum)]
+    pub(crate) action: ControlAction,
+
+    /// The job (not for `shutdown`).
+    #[arg(value_name = "JOB_ID", required_if_eq_any = [("action", "pause"), ("action", "resume"), ("action", "cancel")])]
+    pub(crate) job: Option<String>,
 }
 
 /// `rdirstat backup recommend` options.

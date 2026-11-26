@@ -87,7 +87,7 @@ impl Outcome {
         Outcome::Failed,
     ];
 
-    const fn key(self) -> &'static str {
+    pub(crate) const fn key(self) -> &'static str {
         match self {
             Outcome::Copied => "copied",
             Outcome::Cloned => "cloned",
@@ -169,6 +169,61 @@ impl ApplyReport {
 /// source, or an unreadable catalog.
 /// Per-item problems are not errors; they are [`Outcome`]s in the report.
 pub(crate) fn apply(request: &ApplyRequest, probe: &dyn DiskProbe) -> Result<ApplyReport> {
+    apply_with(request, probe, &mut NoHooks)
+}
+
+/// What [`ApplyHooks::gate`] says about the next item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Gate {
+    /// Land it.
+    Go,
+    /// Wait in [`ApplyHooks::hold`] first. Buffered receipts are written
+    /// before the wait, so a long pause never holds landed items unproven.
+    Hold,
+    /// Stop before it. The rest are reported not attempted with this reason
+    /// and the run ends as if a volume had gone away (catalog flushed,
+    /// mirrored, index rebuilt).
+    Stop(String),
+}
+
+/// Lets a caller (the backup service's job runner) see each item's result
+/// and stop or hold the run between items. The item being landed always
+/// finishes.
+pub(crate) trait ApplyHooks {
+    /// Asked before each item.
+    fn gate(&mut self, item: &PlanItem) -> Gate;
+    /// Called after [`Gate::Hold`]; blocks until the run may go on, and
+    /// answers [`Gate::Go`] or [`Gate::Stop`].
+    fn hold(&mut self) -> Gate;
+    /// Called after each attempted item, `index` from 0.
+    fn item_done(&mut self, index: usize, total: usize, result: &ItemResult);
+}
+
+/// Hooks that never stop and see nothing: plain `backup apply`.
+struct NoHooks;
+
+impl ApplyHooks for NoHooks {
+    fn gate(&mut self, _item: &PlanItem) -> Gate {
+        Gate::Go
+    }
+
+    fn hold(&mut self) -> Gate {
+        Gate::Go
+    }
+
+    fn item_done(&mut self, _index: usize, _total: usize, _result: &ItemResult) {}
+}
+
+/// [`apply`], reporting to and gated by `hooks`.
+///
+/// # Errors
+///
+/// As [`apply`].
+pub(crate) fn apply_with(
+    request: &ApplyRequest,
+    probe: &dyn DiskProbe,
+    hooks: &mut dyn ApplyHooks,
+) -> Result<ApplyReport> {
     let bytes = std::fs::read(&request.plan).with_context(|| format!("cannot read {}", request.plan.display()))?;
     let plan: PlanFile =
         serde_json::from_slice(&bytes).with_context(|| format!("{} is not a plan file", request.plan.display()))?;
@@ -234,7 +289,15 @@ pub(crate) fn apply(request: &ApplyRequest, probe: &dyn DiskProbe) -> Result<App
     let mounts = Mounts::capture(&[&plan.source_root, &plan.dest_root])?;
     let mut writer = ReceiptWriter::new(&catalog, &run_id, &plan_id);
     writer.write_plan_rows(&plan_rows(&plan, &plan_id));
-    let (results, stopped) = land_all(&plan, &mirror_root, &mounts, &mut landed, &mut writer, request.progress);
+    let (results, stopped) = land_all(
+        &plan,
+        &mirror_root,
+        &mounts,
+        &mut landed,
+        &mut writer,
+        request.progress,
+        hooks,
+    );
 
     // The drive's copy of the catalog and its index are written only to the
     // planned drive: back at its path with its volume UUID, or not at all.
@@ -280,6 +343,7 @@ fn land_all(
     landed: &mut Landed,
     writer: &mut ReceiptWriter<'_>,
     progress: bool,
+    hooks: &mut dyn ApplyHooks,
 ) -> (Vec<ItemResult>, Option<String>) {
     let never = AtomicBool::new(false);
     let mut results = Vec::with_capacity(plan.items.len());
@@ -293,7 +357,16 @@ fn land_all(
         // later item would then try to create its parent directories from
         // that point up, and fail (`/Volumes` is root's: EACCES) or, worse,
         // succeed on the boot disk. Stop instead, naming why.
-        if let Err(reason) = mounts.check() {
+        let mut gate = hooks.gate(item);
+        if gate == Gate::Hold {
+            writer.flush();
+            gate = hooks.hold();
+        }
+        let check = match gate {
+            Gate::Stop(reason) => Err(reason),
+            Gate::Go | Gate::Hold => mounts.check(),
+        };
+        if let Err(reason) = check {
             results.extend(
                 plan.items[index..]
                     .iter()
@@ -306,6 +379,7 @@ fn land_all(
             eprintln!("[{}/{total}] {}", index + 1, item.relative.display());
         }
         let result = land_item(plan, mirror_root, item, landed, writer, &never);
+        hooks.item_done(index, total, &result);
         results.push(result);
         writer.maybe_flush();
     }

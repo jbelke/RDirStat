@@ -24,7 +24,8 @@
 //! disagreement, `3` a `backup apply` that ran but left items not landed
 //! (changed since the scan, an occupied destination path, or a failed verify).
 
-#![forbid(unsafe_code)]
+// `unsafe_code` is denied workspace-wide, not forbidden here: `backup::service::sys`
+// lowers it for four audited libc calls (hostname, kill 0, kern.boottime, setsid).
 
 mod backup;
 mod cli;

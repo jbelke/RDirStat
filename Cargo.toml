@@ -67,6 +67,7 @@ rdirstat-remote   = { path = "crates/rdirstat-remote" }
 rdirstat-catalog  = { path = "crates/rdirstat-catalog" }
 rdirstat-copy     = { path = "crates/rdirstat-copy" }
 rdirstat-organize = { path = "crates/rdirstat-organize" }
+rdirstat-jobs     = { path = "crates/rdirstat-jobs" }
 # Phase 6 only. Cargo refuses to load a path dependency whose manifest is
 # missing, so this stays commented until `crates/rdirstat-catalog/` exists. The
 # `crates/*` member glob picks the crate up automatically once it does.
@@ -156,6 +157,14 @@ sha2 = "0.10.9"
 # The macOS Keychain. Already in the tree via native-tls; named here so the one
 # module that stores a credential declares it rather than borrowing it.
 security-framework = "3.7.0"
+
+# --- backup service API (rdirstat-cli `backup serve`) ---
+# HTTP/1.1 over a Unix socket. hyper is the HTTP implementation reqwest
+# (via opendal) already links, so serving with it adds no crate to the tree;
+# the six routes are matched by hand rather than pulling in a router.
+hyper          = { version = "1.11.0", default-features = false }
+hyper-util     = { version = "0.1.20", default-features = false }
+http-body-util = "0.1.5"
 
 # --- macOS actions ---
 trash = "5.2.6"
