@@ -23,6 +23,10 @@
 //! name a reader picks up. Readers only open files whose names start with
 //! `<kind>-` and end in `.parquet`.
 //!
+//! - `members-<run>-<seq>.parquet` — one row per file a directory roll-up
+//!   landed (receipt schema, method `copy`), written by [`write_members`],
+//!   read back by [`visit_members`]. The roll-up itself has one receipt with
+//!   method `rollup`; its files are counted from these rows.
 //! - `plans-<run>-<seq>.parquet` — what a Backup plan chose and skipped,
 //!   one row per item, written by [`write_plan_rows`].
 //!
@@ -66,7 +70,10 @@ pub use crate::index::{
     visit_entries, write_index,
 };
 pub use crate::plans::{PLAN_STATUS_PLANNED, PLAN_STATUS_SKIPPED, PlanRow, read_plan_rows, write_plan_rows};
-pub use crate::rows::{HashRow, ReceiptRow, read_hashes, read_receipts, write_hashes, write_receipts};
+pub use crate::rows::{
+    HashRow, METHOD_ROLLUP, ReceiptRow, ReceiptView, read_hashes, read_receipts, visit_members, write_hashes,
+    write_members, write_receipts,
+};
 
 /// Rows per Arrow record batch while writing `entries`.
 ///

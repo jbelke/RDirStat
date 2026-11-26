@@ -137,6 +137,12 @@ pub struct PlanItem {
     pub ino: u64,
     /// Modification time at scan time, nanoseconds.
     pub mtime_ns: i128,
+    /// Present exactly when `kind` is [`ItemKind::Dir`]: the item is a
+    /// directory roll-up, and these are the facts apply re-checks before and
+    /// after landing it. Absent from file and package rows, so plans written
+    /// before roll-ups existed read, and token, exactly as they did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollup: Option<Rollup>,
 }
 
 impl PlanItem {
@@ -150,8 +156,50 @@ impl PlanItem {
             dev: item.dev,
             ino: item.ino,
             mtime_ns: item.mtime_ns,
+            rollup: None,
         }
     }
+}
+
+/// Which entries of a roll-up directory the item lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RollupScope {
+    /// The whole subtree. Planned only for a directory with no skip-rule
+    /// path, no individually planned item, no unreadable or excluded
+    /// directory, no mount point or firmlink, and no socket, FIFO or device
+    /// anywhere below it, so `ditto <dir>` copies exactly what the plan
+    /// describes and nothing a rule left out.
+    Tree,
+    /// Only the directory's own regular files and symlinks, minus
+    /// [`Rollup::exclude`]. Planned for a directory that cannot be a
+    /// [`RollupScope::Tree`] (something below it is skipped or planned on its
+    /// own) so its loose files still land; subdirectories are separate items.
+    Files,
+}
+
+/// The facts of a directory roll-up item.
+///
+/// `files` and the item's `logical` are counted the same way at plan time
+/// (from the scan) and at apply time (from a walk): every regular-file and
+/// symlink *path* in scope counts once in `files`; `logical` sums `st_size`
+/// of the regular files only, each path counted (a hard link counts per
+/// name, because `ditto` writes each name). `newest_mtime_s` is the largest
+/// whole-second mtime of any entry in scope, directories included, so an
+/// edit, create, rename or delete anywhere in scope is seen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rollup {
+    /// Subtree or loose files.
+    pub scope: RollupScope,
+    /// Regular files and symlinks in scope.
+    pub files: u64,
+    /// Newest mtime in scope, whole seconds since the epoch.
+    pub newest_mtime_s: i64,
+    /// [`RollupScope::Files`] only: names of the directory's own files and
+    /// symlinks that are *not* in this item (planned on their own, skipped by
+    /// a rule, or changed since the scan). Sorted; always valid UTF-8.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
 }
 
 /// A candidate over the floor that a rule left out.

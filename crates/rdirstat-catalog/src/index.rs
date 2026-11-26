@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::catalog::dest_catalog_dir;
 use crate::entries::{ENTRIES, ENTRY_SCHEMA, extension};
 use crate::plans::{PLAN_SCHEMA, PLANS};
-use crate::rows::{Columns, RECEIPT_SCHEMA, ReceiptRow, read_receipts};
+use crate::rows::{Columns, MEMBERS, METHOD_ROLLUP, RECEIPT_SCHEMA, ReceiptRow, read_receipts, visit_members};
 use crate::store::{list_parts, part_seq, read_batches};
 use crate::{CatalogError, ENTRIES_BATCH_ROWS};
 
@@ -163,8 +163,11 @@ pub fn visit_entries(
 /// The index rows the parts in `catalog_dir` describe, sorted by
 /// `dest_path`.
 ///
-/// One row per destination path; when two receipts name the same path (a
-/// re-landed copy), the later `verified_at_ms` wins. `dup_count` counts the
+/// One row per destination file: every `copy`/`clone` receipt, and every
+/// `members` row a directory roll-up wrote. A `rollup` receipt names a
+/// directory, not a file, so it is not a row itself; its files are. When two
+/// rows name the same path (a re-landed copy), the later `verified_at_ms`
+/// wins. `dup_count` counts the
 /// distinct `(source_label, source_path)` pairs per `sha256`. `category` is
 /// looked up in the scan entries of the receipt's source label.
 ///
@@ -173,14 +176,18 @@ pub fn visit_entries(
 /// A part that cannot be read.
 pub fn build_index(catalog_dir: &Path) -> Result<Vec<IndexRow>, CatalogError> {
     let mut by_dest: HashMap<String, ReceiptRow> = HashMap::new();
+    let mut keep = |receipt: ReceiptRow| match by_dest.get(&receipt.dest_path) {
+        Some(kept) if kept.verified_at_ms > receipt.verified_at_ms => {}
+        _ => {
+            by_dest.insert(receipt.dest_path.clone(), receipt);
+        }
+    };
     for receipt in read_receipts(catalog_dir)? {
-        match by_dest.get(&receipt.dest_path) {
-            Some(kept) if kept.verified_at_ms > receipt.verified_at_ms => {}
-            _ => {
-                by_dest.insert(receipt.dest_path.clone(), receipt);
-            }
+        if receipt.method != METHOD_ROLLUP {
+            keep(receipt);
         }
     }
+    visit_members(catalog_dir, |member| keep(member.to_owned_row()))?;
 
     let mut sources: HashMap<&str, HashSet<(&str, &str)>> = HashMap::new();
     for receipt in by_dest.values() {
@@ -422,7 +429,7 @@ fn parts_view(name: &str, catalog_dir: &Path, kind: &str, schema: &Schema) -> Re
 }
 
 /// The DuckDB init script for `dest_mount`: views `files` (the index),
-/// `receipts`, `entries`, `plans`, `skipped`, and `dupes`. Paths are
+/// `receipts`, `members` (the files of directory roll-ups), `entries`, `plans`, `skipped`, and `dupes`. Paths are
 /// absolute, so the script works from any directory; it is regenerated on
 /// every rebuild, so a drive mounted elsewhere is fixed by running
 /// `rdirstat backup index` again.
@@ -448,6 +455,7 @@ pub fn index_sql(dest_mount: &Path) -> Result<String, CatalogError> {
         quote(&dest_mount.join(INDEX_FILE).to_string_lossy())
     );
     sql.push_str(&parts_view("receipts", &catalog, "receipts", &RECEIPT_SCHEMA)?);
+    sql.push_str(&parts_view("members", &catalog, MEMBERS, &RECEIPT_SCHEMA)?);
     sql.push_str(&parts_view("entries", &catalog, ENTRIES, &ENTRY_SCHEMA)?);
     sql.push_str(&parts_view("plans", &catalog, PLANS, &PLAN_SCHEMA)?);
     sql.push_str(

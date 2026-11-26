@@ -10,24 +10,27 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use rdirstat_catalog::{
-    Catalog, CatalogError, HashRow, IndexSummary, PLAN_STATUS_PLANNED, PLAN_STATUS_SKIPPED, PlanRow, ReceiptRow,
-    read_receipts, rebuild_index,
+    Catalog, CatalogError, HashRow, IndexSummary, METHOD_ROLLUP, PLAN_STATUS_PLANNED, PLAN_STATUS_SKIPPED, PlanRow,
+    ReceiptRow, read_receipts, rebuild_index,
 };
 use rdirstat_copy::{Method, land, partial_path, sha256_file, sha256_hex};
 use rdirstat_core::format_iec;
 use rdirstat_organize::{
-    BACKUPS_DIR, INTENT_BACKUP, ItemKind, PLAN_SCHEMA_VERSION, PlanFile, PlanItem, judge_backup_pair, mirror_path,
-    plan_token, validate_label,
+    BACKUPS_DIR, INTENT_BACKUP, ItemKind, PLAN_SCHEMA_VERSION, PlanFile, PlanItem, Rollup, RollupScope,
+    judge_backup_pair, mirror_path, plan_token, validate_label,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 use super::plan::tree_logical;
+use super::rollup::{self, RollupOutcome};
 use super::{DiskProbe, now_ms};
 
 /// Receipts buffered before a part file is written.
 const FLUSH_ROWS: usize = 256;
+/// Roll-up member rows buffered before a part file is written.
+const FLUSH_MEMBERS: usize = 65_536;
 /// Longest a landed item waits for its receipt to reach disk.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -112,6 +115,9 @@ pub(crate) struct ItemResult {
     pub(crate) detail: Option<String>,
     /// A partial copy left on disk.
     pub(crate) partial: Option<String>,
+    /// For a directory roll-up: the files in its scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) files: Option<u64>,
 }
 
 /// The whole run.
@@ -295,6 +301,10 @@ struct Landed {
     sizes: HashSet<u64>,
     /// Destination path → the receipt that put it there.
     by_dest: HashMap<String, ReceiptRow>,
+    /// Destination files landed by directory roll-ups (and by file
+    /// receipts), keyed compactly: the merge of a roll-up looks every file
+    /// up here before it reads one.
+    files: rollup::Landed,
 }
 
 impl Landed {
@@ -310,13 +320,20 @@ impl Landed {
             }
             None => Vec::new(),
         };
+        let files = rollup::Landed::load(catalog.mirror(), &rows)
+            .with_context(|| format!("reading roll-up members in {}", catalog.primary().display()))?;
         let mut landed = Landed {
             by_content: HashMap::new(),
             sizes: HashSet::new(),
             by_dest: HashMap::new(),
+            files,
         };
         for row in rows {
-            landed.add(row);
+            if row.method == METHOD_ROLLUP {
+                landed.by_dest.insert(row.dest_path.clone(), row);
+            } else {
+                landed.add(row);
+            }
         }
         Ok(landed)
     }
@@ -347,6 +364,8 @@ struct ReceiptWriter<'a> {
     plan_id: &'a str,
     receipts: Vec<ReceiptRow>,
     hashes: Vec<HashRow>,
+    /// Files landed by directory roll-ups, written before their receipts.
+    members: Vec<ReceiptRow>,
     last_flush: Instant,
     receipts_written: usize,
     parts_written: usize,
@@ -361,6 +380,7 @@ impl<'a> ReceiptWriter<'a> {
             plan_id,
             receipts: Vec::new(),
             hashes: Vec::new(),
+            members: Vec::new(),
             last_flush: Instant::now(),
             receipts_written: 0,
             parts_written: 0,
@@ -378,7 +398,10 @@ impl<'a> ReceiptWriter<'a> {
     }
 
     fn maybe_flush(&mut self) {
-        if self.receipts.len() >= FLUSH_ROWS || self.last_flush.elapsed() >= FLUSH_INTERVAL {
+        if self.receipts.len() >= FLUSH_ROWS
+            || self.members.len() >= FLUSH_MEMBERS
+            || self.last_flush.elapsed() >= FLUSH_INTERVAL
+        {
             self.flush();
         }
     }
@@ -397,6 +420,16 @@ impl<'a> ReceiptWriter<'a> {
                 Ok(_) | Err(CatalogError::Mirror { .. }) => self.parts_written += 1,
                 Err(error) => {
                     self.error = Some(format!("writing hashes: {error}"));
+                    return;
+                }
+            }
+        }
+        if !self.members.is_empty() {
+            let rows = std::mem::take(&mut self.members);
+            match self.catalog.write_members(&rows, self.run_id) {
+                Ok(_) | Err(CatalogError::Mirror { .. }) => self.parts_written += 1,
+                Err(error) => {
+                    self.error = Some(format!("writing {} roll-up members: {error}", rows.len()));
                     return;
                 }
             }
@@ -448,6 +481,7 @@ fn land_item(
         bytes: item.logical,
         detail: None,
         partial: None,
+        files: item.rollup.as_ref().map(|r| r.files),
     };
     let dest = match destination_of(plan, mirror_root, item) {
         Ok(dest) => dest,
@@ -457,6 +491,10 @@ fn land_item(
         }
     };
     result.dest = dest.to_string_lossy().into_owned();
+    if let Some(rollup) = &item.rollup {
+        land_rollup_item(plan, item, rollup, &dest, landed, writer, cancel, &mut result);
+        return result;
+    }
 
     if let Err(reason) = unchanged(item) {
         result.outcome = Outcome::ChangedSinceScan;
@@ -539,6 +577,83 @@ fn land_item(
     result
 }
 
+/// Lands a directory roll-up and queues its member rows and receipt.
+#[allow(clippy::too_many_arguments, reason = "the same per-item state land_item threads")]
+fn land_rollup_item(
+    plan: &PlanFile,
+    item: &PlanItem,
+    rollup: &Rollup,
+    dest: &Path,
+    landed: &mut Landed,
+    writer: &mut ReceiptWriter<'_>,
+    cancel: &AtomicBool,
+    result: &mut ItemResult,
+) {
+    let context = rollup::RowContext {
+        run_id: writer.run_id,
+        source_label: &plan.source_label,
+    };
+    let existing = landed.by_dest.get(&result.dest).cloned();
+    match rollup::land_rollup(item, rollup, dest, &landed.files, &context, existing.as_ref(), cancel) {
+        RollupOutcome::Landed {
+            copied,
+            adopted,
+            already,
+            members,
+            receipt,
+        } => {
+            // Adopted files were already there; only a file this run wrote
+            // makes the item "copied".
+            result.outcome = if copied > 0 {
+                Outcome::Copied
+            } else {
+                Outcome::AlreadyLanded
+            };
+            if adopted > 0 || already > 0 {
+                result.detail = Some(format!(
+                    "{copied} copied, {adopted} already there and verified, {already} already receipted"
+                ));
+            }
+            for member in &members {
+                landed.files.record(member);
+            }
+            writer.members.extend(members);
+            if let Some(receipt) = receipt {
+                landed.by_dest.insert(receipt.dest_path.clone(), receipt.clone());
+                writer.receipts.push(receipt);
+            }
+        }
+        RollupOutcome::ChangedSinceScan(reason) => {
+            result.outcome = Outcome::ChangedSinceScan;
+            result.detail = Some(reason);
+        }
+        RollupOutcome::ChangedDuringCopy(reason) => {
+            result.outcome = Outcome::ChangedDuringCopy;
+            result.detail = Some(reason);
+            result.partial = Some(result.dest.clone());
+        }
+        RollupOutcome::Incomplete {
+            failed,
+            detail,
+            partial,
+            members,
+            ..
+        } => {
+            result.outcome = if failed > 0 {
+                Outcome::Failed
+            } else {
+                Outcome::DestinationOccupied
+            };
+            result.detail = Some(detail);
+            result.partial = partial.map(|path| path.to_string_lossy().into_owned());
+            for member in &members {
+                landed.files.record(member);
+            }
+            writer.members.extend(members);
+        }
+    }
+}
+
 /// Queues the receipt (and, for a file, the hash row) of a verified item and
 /// makes it a clone source for the rest of the run.
 fn record(
@@ -588,8 +703,11 @@ fn record(
 /// and that nothing on the way to it on the destination is a symlink that
 /// could carry the write somewhere else.
 fn destination_of(plan: &PlanFile, mirror_root: &Path, item: &PlanItem) -> Result<PathBuf, String> {
-    if !matches!(item.kind, ItemKind::File | ItemKind::Package) {
-        return Err(format!("a {:?} item is never planned", item.kind));
+    match (item.kind, &item.rollup) {
+        (ItemKind::File | ItemKind::Package, None) | (ItemKind::Dir, Some(_)) => {}
+        (ItemKind::Dir, None) => return Err("a directory item without roll-up facts is never planned".into()),
+        (_, Some(_)) => return Err("roll-up facts on an item that is not a directory".into()),
+        (kind, None) => return Err(format!("a {kind:?} item is never planned")),
     }
     if item.relative.components().any(|c| !matches!(c, Component::Normal(_))) {
         return Err("the relative path is not a plain relative path".into());
@@ -597,12 +715,21 @@ fn destination_of(plan: &PlanFile, mirror_root: &Path, item: &PlanItem) -> Resul
     if item.absolute != plan.source_root.join(&item.relative) {
         return Err("the absolute path is not the source root plus the relative path".into());
     }
-    let dest = mirror_path(&plan.dest_root, &plan.source_label, &item.relative).map_err(|error| error.to_string())?;
+    // The volume root's own files: a files roll-up whose mirror directory
+    // is the mirror root itself.
+    let root_files =
+        item.relative.as_os_str().is_empty() && item.rollup.as_ref().is_some_and(|r| r.scope == RollupScope::Files);
+    let dest = if root_files {
+        validate_label(&plan.source_label).map_err(|error| error.to_string())?;
+        mirror_root.to_path_buf()
+    } else {
+        mirror_path(&plan.dest_root, &plan.source_label, &item.relative).map_err(|error| error.to_string())?
+    };
     let mut walk = plan.dest_root.clone();
     let below = dest.strip_prefix(&plan.dest_root).map_err(|error| error.to_string())?;
     let mut components = below.components().peekable();
     while let Some(component) = components.next() {
-        if components.peek().is_none() {
+        if components.peek().is_none() && !root_files {
             break;
         }
         walk.push(component);
@@ -757,6 +884,17 @@ pub(crate) fn text(report: &ApplyReport) -> String {
         if count > 0 {
             let _ = writeln!(out, "  {:<21} {count:>7}  {}", outcome.key(), format_iec(bytes));
         }
+    }
+    let rollups: Vec<&ItemResult> = report.results.iter().filter(|r| r.files.is_some()).collect();
+    if !rollups.is_empty() {
+        let landed: Vec<&&ItemResult> = rollups.iter().filter(|r| r.outcome.landed()).collect();
+        let _ = writeln!(
+            out,
+            "  roll-ups              {:>7}  {} files landed in {} of them",
+            rollups.len(),
+            landed.iter().filter_map(|r| r.files).sum::<u64>(),
+            landed.len()
+        );
     }
     let _ = writeln!(
         out,

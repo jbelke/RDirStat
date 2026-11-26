@@ -131,6 +131,12 @@ pub(crate) struct BackupPlanArgs {
     /// When to draw the scan progress line on stderr (walks only).
     #[arg(long, value_enum, default_value_t = ProgressWhen::Auto)]
     pub(crate) progress: ProgressWhen,
+
+    /// Plan only files and packages at or over the floor, one item each, as
+    /// before directory roll-ups existed. By default everything else that no
+    /// rule skips is covered by directory roll-up items.
+    #[arg(long)]
+    pub(crate) no_rollup: bool,
 }
 
 /// `rdirstat backup apply` options.

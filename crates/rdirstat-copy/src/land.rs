@@ -77,6 +77,11 @@ pub fn land(
     };
     let method = if cloned {
         Method::Clone
+    } else if std::fs::symlink_metadata(source).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        // `ditto` follows a symlink named as its source and would copy the
+        // target; a symlink lands as a symlink with the same target.
+        copy_symlink(source, destination).map_err(|error| partial_or(destination, error))?;
+        Method::Copy
     } else {
         ditto(source, destination).map_err(|error| partial_or(destination, error))?;
         Method::Copy
@@ -94,6 +99,15 @@ pub fn land(
     };
     let tally = verified.map_err(|error| partial(destination, error))?;
     Ok(Landed { method, tally })
+}
+
+/// Creates `destination` as a symlink with `source`'s target (and its
+/// parent directories). `symlink(2)` refuses an existing path, so nothing is
+/// replaced.
+fn copy_symlink(source: &Path, destination: &Path) -> Result<(), CopyError> {
+    let target = std::fs::read_link(source).map_err(|error| CopyError::io(source, error))?;
+    crate::ditto::create_parent(destination)?;
+    std::os::unix::fs::symlink(&target, destination).map_err(|error| CopyError::io(destination, error))
 }
 
 /// `existing` is a regular file whose bytes equal `source`'s. Anything
@@ -209,6 +223,22 @@ mod tests {
         let error = land(&source, &destination, None, &never()).expect_err("refused");
         assert!(matches!(error, CopyError::AlreadyExists { .. }), "got {error:?}");
         assert_eq!(std::fs::read(&destination).expect("read"), b"keep");
+    }
+
+    #[test]
+    fn a_symlink_lands_as_a_symlink_not_as_its_target() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        std::fs::write(scratch.path().join("target.bin"), b"payload").expect("write");
+        let source = scratch.path().join("link");
+        std::os::unix::fs::symlink("target.bin", &source).expect("symlink");
+        let destination = scratch.path().join("out/sub/link");
+        let landed = land(&source, &destination, None, &never()).expect("lands");
+        assert_eq!(landed.method, Method::Copy);
+        assert_eq!(landed.tally.files, 1);
+        assert_eq!(
+            std::fs::read_link(&destination).expect("still a link"),
+            Path::new("target.bin")
+        );
     }
 
     #[test]

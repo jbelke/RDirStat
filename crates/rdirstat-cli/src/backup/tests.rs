@@ -54,13 +54,17 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with(build_source)
+    }
+
+    fn with(build: fn(&Path)) -> Self {
         let src = tempfile::tempdir().expect("tempdir");
         let dst = tempfile::tempdir().expect("tempdir");
         let cat = tempfile::tempdir().expect("tempdir");
         let source_root = std::fs::canonicalize(src.path()).expect("canonical");
         let dest_root = std::fs::canonicalize(dst.path()).expect("canonical");
         let catalog = std::fs::canonicalize(cat.path()).expect("canonical");
-        build_source(&source_root);
+        build(&source_root);
         Self {
             plan_path: catalog.join("plan.json"),
             _dirs: vec![src, dst, cat],
@@ -91,6 +95,7 @@ impl Fixture {
             catalog: self.catalog.clone(),
             app_catalog: None,
             progress: false,
+            rollup: true,
         }
     }
 
@@ -574,7 +579,22 @@ fn receipts_for_another_drive_at_the_same_path_are_not_trusted() {
     let again = fx.apply(&planned.token).expect("re-apply");
     assert!(!again.complete());
     assert!(
-        again.results.iter().all(|r| r.outcome == Outcome::DestinationOccupied),
+        again
+            .results
+            .iter()
+            .filter(|r| r.files.is_none())
+            .all(|r| r.outcome == Outcome::DestinationOccupied),
+        "{}",
+        apply::text(&again)
+    );
+    // A roll-up's files are not taken on a receipt either: each was compared
+    // with its source before it was adopted.
+    assert!(
+        again
+            .results
+            .iter()
+            .filter(|r| r.files.is_some())
+            .all(|r| r.outcome == Outcome::AlreadyLanded && r.detail.as_deref().is_some_and(|d| d.contains("verified"))),
         "{}",
         apply::text(&again)
     );
@@ -673,11 +693,19 @@ fn apply_leaves_an_index_and_status_reads_it_from_parquet_alone() {
     let report = fx.apply(&planned.token).expect("apply");
     assert!(report.complete(), "{}", apply::text(&report));
     let index = report.index.as_ref().expect("index rebuilt by apply");
-    assert_eq!(index.rows, planned.plan.items.len());
+    // One row per landed file: each individual item, and each file of each
+    // roll-up (the volume root's notes.txt and link-to-big here).
+    let files: u64 = planned
+        .plan
+        .items
+        .iter()
+        .map(|item| item.rollup.as_ref().map_or(1, |r| r.files))
+        .sum();
+    assert_eq!(index.rows as u64, files);
     assert!(apply::text(&report).contains("Index: "));
 
     let rows = rdirstat_catalog::read_index(&fx.dest.join("index.parquet")).expect("index");
-    assert_eq!(rows.len(), planned.plan.items.len());
+    assert_eq!(rows.len() as u64, files);
     let dupe = rows
         .iter()
         .find(|r| r.dest_path.ends_with("dupe-b.bin"))
@@ -704,7 +732,7 @@ fn apply_leaves_an_index_and_status_reads_it_from_parquet_alone() {
     let report = status::status(&fx.dest, None).expect("status");
     assert_eq!(report.sources.len(), 1);
     let source = &report.sources[0];
-    assert_eq!(source.backed_up.items, planned.plan.items.len() as u64);
+    assert_eq!(source.backed_up.items, files);
     assert!(source.cloned.items >= 1, "{source:?}");
     assert_eq!(source.pending.items, 0);
     assert!(source.skipped.items >= 1, "node_modules skipped: {source:?}");
@@ -772,4 +800,391 @@ fn sizes_parse() {
     assert!(parse_size("MiB").is_err());
     assert!(parse_size("10 parsecs").is_err());
     assert!(parse_size("99999999999TiB").is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Directory roll-ups (rds-fkk.11)
+// ---------------------------------------------------------------------------
+
+/// Nested small files, a project with skipped `node_modules` and `target`
+/// subtrees, and one large file.
+fn build_tree(root: &Path) {
+    for i in 0..5_u8 {
+        put(
+            root,
+            &format!("Users/a/Documents/notes/n{i}.txt"),
+            &bytes(i, 100 + usize::from(i)),
+        );
+        put(
+            root,
+            &format!("Users/a/Documents/notes/deep/d{i}.txt"),
+            &bytes(i + 10, 50),
+        );
+    }
+    put(root, "Users/a/Documents/letter.txt", &bytes(20, 300));
+    std::os::unix::fs::symlink("letter.txt", root.join("Users/a/Documents/latest")).expect("symlink");
+    put(root, "Users/a/src/app/README.md", &bytes(21, 80));
+    put(root, "Users/a/src/app/src/main.rs", &bytes(22, 400));
+    put(root, "Users/a/src/app/src/lib/mod.rs", &bytes(23, 200));
+    put(root, "Users/a/src/app/node_modules/pkg/index.js", &bytes(24, 900));
+    put(root, "Users/a/src/app/target/debug/app", &bytes(25, 5000));
+    put(root, "Users/a/Movies/big.mov", &bytes(26, 64 * 1024));
+}
+
+/// Every regular file and symlink under `root`, relative.
+fn files_under(root: &Path) -> Vec<PathBuf> {
+    fingerprint(root)
+        .into_iter()
+        .filter(|(_, v)| v.0 != 'd')
+        .map(|(path, _)| path.strip_prefix(root).expect("under root").to_path_buf())
+        .collect()
+}
+
+fn rollup_items(plan: &PlanFile) -> Vec<(String, rdirstat_organize::RollupScope, u64)> {
+    plan.items
+        .iter()
+        .filter_map(|item| {
+            item.rollup
+                .as_ref()
+                .map(|r| (item.relative.to_string_lossy().into_owned(), r.scope, r.files))
+        })
+        .collect()
+}
+
+fn coverage_total(outcome: &PlanOutcome) -> u64 {
+    let c = outcome.rollups.as_ref().expect("roll-ups on").coverage;
+    c.individual.files + c.rolled_up.files + c.landed.files + c.skipped.files + c.not_covered.files
+}
+
+#[test]
+fn rollups_cover_every_small_file_and_never_a_skipped_one() {
+    use rdirstat_organize::RollupScope::{Files, Tree};
+
+    let fx = Fixture::with(build_tree);
+    let before = fingerprint(&fx.source);
+    let planned = fx.plan();
+
+    let rollups = rollup_items(&planned.plan);
+    // The highest clean directory is one tree item; a directory that holds a
+    // skipped subtree is split: its loose files are a files item, its clean
+    // subdirectory a tree item.
+    for expected in [
+        ("Users/a/Documents".to_owned(), Tree, 12),
+        ("Users/a/src/app".to_owned(), Files, 1),
+        ("Users/a/src/app/src".to_owned(), Tree, 2),
+    ] {
+        assert!(rollups.contains(&expected), "{expected:?} in {rollups:?}");
+    }
+    assert!(
+        !rollups
+            .iter()
+            .any(|(r, _, _)| r.contains("node_modules") || r.contains("target")),
+        "{rollups:?}"
+    );
+    assert!(
+        !rollups.iter().any(|(r, _, _)| r == "Users/a/Documents/notes"),
+        "only the highest directory: {rollups:?}"
+    );
+    let app = planned
+        .plan
+        .items
+        .iter()
+        .find(|i| i.relative == Path::new("Users/a/src/app"))
+        .and_then(|i| i.rollup.as_ref())
+        .expect("files roll-up");
+    assert!(
+        app.exclude.is_empty(),
+        "skipped subtrees are directories, not loose files"
+    );
+    assert!(
+        planned
+            .plan
+            .items
+            .iter()
+            .any(|i| i.relative == Path::new("Users/a/Movies/big.mov"))
+    );
+
+    // Nothing silently dropped: every file is somewhere.
+    let all = files_under(&fx.source).len() as u64;
+    assert_eq!(coverage_total(&planned), all);
+    let summary = planned.rollups.as_ref().expect("roll-ups");
+    assert_eq!(summary.coverage.skipped.files, 2, "node_modules and target");
+    assert_eq!(summary.coverage.not_covered.files, 0);
+    assert_eq!(planned.not_considered, 0);
+    let text = plan::text(&planned, 5);
+    assert!(text.contains("roll-ups ") && text.contains("whole trees"), "{text}");
+    assert!(!text.contains("not ranked"), "{text}");
+    let doc = plan::json(&planned, 5);
+    assert_eq!(doc["rollups"]["items"], summary.planned_items);
+    assert_eq!(doc["rollups"]["files"], summary.planned.files);
+
+    let report = fx.apply(&planned.token).expect("apply");
+    assert!(report.complete(), "{}", apply::text(&report));
+    assert_eq!(before, fingerprint(&fx.source), "the source is unmodified");
+
+    // Everything but the skipped subtrees is on the drive, byte for byte.
+    let mirror_root = fx.mirror("");
+    let mut landed = files_under(&mirror_root);
+    landed.sort();
+    let mut expected: Vec<PathBuf> = files_under(&fx.source)
+        .into_iter()
+        .filter(|p| {
+            let p = p.to_string_lossy();
+            !p.contains("node_modules") && !p.contains("/target/")
+        })
+        .collect();
+    expected.sort();
+    assert_eq!(landed, expected);
+    assert!(!fx.mirror("Users/a/src/app/node_modules").exists());
+    assert!(!fx.mirror("Users/a/src/app/target").exists());
+    assert_eq!(
+        std::fs::read_link(fx.mirror("Users/a/Documents/latest")).expect("link kept"),
+        Path::new("letter.txt")
+    );
+
+    // One receipt per roll-up, one member row per file; the index and status
+    // count files.
+    let (_, mirror) = fx.receipts();
+    let rollup_receipts = mirror.iter().filter(|r| r.method == "rollup").count();
+    assert_eq!(rollup_receipts, rollups.len());
+    let rolled_files: u64 = rollups.iter().map(|(_, _, n)| n).sum();
+    let mut members = 0_u64;
+    rdirstat_catalog::visit_members(&fx.dest.join(".rdirstat/catalog"), |_| members += 1).expect("members");
+    assert_eq!(members, rolled_files);
+    let index = report.index.as_ref().expect("index");
+    assert_eq!(index.rows as u64, expected.len() as u64);
+    let status = status::status(&fx.dest, None).expect("status");
+    let source = &status.sources[0];
+    assert_eq!(source.backed_up.items, expected.len() as u64);
+    assert_eq!(source.pending.items, 0, "{source:?}");
+    assert_eq!(source.not_backed_up.map(|t| t.items), Some(0), "{source:?}");
+
+    // Re-applying copies and receipts nothing.
+    let again = fx.apply(&planned.token).expect("re-apply");
+    assert!(again.complete(), "{}", apply::text(&again));
+    assert!(again.results.iter().all(|r| r.outcome == Outcome::AlreadyLanded));
+    assert_eq!(again.receipts_written, 0);
+
+    // A new plan finds everything on the drive and plans nothing.
+    let replanned = fx.plan();
+    assert!(replanned.plan.items.is_empty(), "{:?}", rollup_items(&replanned.plan));
+    let c = replanned.rollups.as_ref().expect("roll-ups").coverage;
+    assert_eq!(c.landed.files, expected.len() as u64);
+    assert_eq!(coverage_total(&replanned), all);
+    assert_eq!(before, fingerprint(&fx.source), "still unmodified");
+}
+
+#[test]
+#[allow(clippy::too_many_lines, reason = "one scenario across two waves")]
+fn a_partly_landed_directory_is_merged_without_overwriting_anything() {
+    let fx = Fixture::with(build_tree);
+
+    // Wave 1, without roll-ups: only big.mov, one item.
+    let mut first = fx.request();
+    first.rollup = false;
+    first.floor = 32 * 1024;
+    let wave1 = build_plan(&first, &fx.probe()).expect("plan");
+    assert_eq!(wave1.plan.items.len(), 1);
+    assert!(fx.apply(&wave1.token).expect("apply").complete());
+    let landed_ino = std::fs::symlink_metadata(fx.mirror("Users/a/Movies/big.mov"))
+        .expect("landed")
+        .ino();
+
+    // A new file beside the landed one.
+    put(&fx.source, "Users/a/Movies/clip.mov", &bytes(27, 700));
+    let before = fingerprint(&fx.source);
+
+    // Leftovers on the drive: an exact copy with no receipt (a crashed run),
+    // and a different file where a source file belongs.
+    put(
+        &fx.dest,
+        "Backups/mac-data/Users/a/Documents/notes/n0.txt",
+        &bytes(0, 100),
+    );
+    put(
+        &fx.dest,
+        "Backups/mac-data/Users/a/Documents/notes/n1.txt",
+        b"not the source",
+    );
+    let occupied = fx.mirror("Users/a/Documents/notes/n1.txt");
+    let occupied_before = (
+        std::fs::read(&occupied).expect("read"),
+        std::fs::symlink_metadata(&occupied).expect("lstat").ino(),
+    );
+
+    // Wave 2: everything is under the floor, so all of it rolls up.
+    let mut second = fx.request();
+    second.floor = 1 << 30;
+    let wave2 = build_plan(&second, &fx.probe()).expect("plan");
+    let summary = wave2.rollups.as_ref().expect("roll-ups");
+    assert_eq!(
+        summary.landed_candidates.files, 0,
+        "big.mov is under this floor, not a candidate"
+    );
+    let rollups = rollup_items(&wave2.plan);
+    assert!(
+        rollups.iter().any(|(r, _, _)| r == "Users/a/Movies"),
+        "a directory with a landed file still rolls up: {rollups:?}"
+    );
+
+    let report = fx.apply(&wave2.token).expect("apply");
+    assert!(!report.complete(), "one file is occupied");
+    assert_eq!(before, fingerprint(&fx.source), "the source is unmodified");
+
+    // The landed file is the same inode: never re-copied or overwritten.
+    assert_eq!(
+        std::fs::symlink_metadata(fx.mirror("Users/a/Movies/big.mov"))
+            .expect("still there")
+            .ino(),
+        landed_ino
+    );
+    let movies = report
+        .results
+        .iter()
+        .find(|r| r.relative == "Users/a/Movies")
+        .expect("movies");
+    assert_eq!(movies.outcome, Outcome::Copied, "{movies:?}");
+    assert!(
+        movies
+            .detail
+            .as_deref()
+            .is_some_and(|d| d.contains("1 already receipted")),
+        "{movies:?}"
+    );
+    assert_eq!(
+        std::fs::read(fx.mirror("Users/a/Movies/clip.mov")).expect("landed"),
+        bytes(27, 700)
+    );
+
+    // The different file is left alone and reported; the rest of the
+    // directory landed around it, and the exact leftover was adopted.
+    assert_eq!(
+        (
+            std::fs::read(&occupied).expect("read"),
+            std::fs::symlink_metadata(&occupied).expect("lstat").ino()
+        ),
+        occupied_before
+    );
+    let documents = report
+        .results
+        .iter()
+        .find(|r| r.relative == "Users/a/Documents")
+        .expect("documents");
+    assert_eq!(documents.outcome, Outcome::DestinationOccupied, "{documents:?}");
+    assert!(
+        documents.detail.as_deref().is_some_and(|d| d.contains("n1.txt")),
+        "{documents:?}"
+    );
+    for i in 2..5 {
+        assert_eq!(
+            std::fs::read(fx.mirror(&format!("Users/a/Documents/notes/n{i}.txt"))).expect("landed"),
+            bytes(i, 100 + usize::from(i))
+        );
+    }
+    let (_, mirror) = fx.receipts();
+    assert!(
+        !mirror
+            .iter()
+            .any(|r| r.method == "rollup" && r.dest_path.ends_with("Users/a/Documents")),
+        "no roll-up receipt for an incomplete directory"
+    );
+    let mut member_paths = Vec::new();
+    rdirstat_catalog::visit_members(&fx.dest.join(".rdirstat/catalog"), |m| {
+        member_paths.push(m.dest_path.to_owned());
+    })
+    .expect("members");
+    assert!(
+        member_paths.iter().any(|p| p.ends_with("notes/n0.txt")),
+        "adopted copy recorded"
+    );
+    assert!(
+        !member_paths.iter().any(|p| p.ends_with("notes/n1.txt")),
+        "occupied path not recorded"
+    );
+    assert!(
+        !member_paths.iter().any(|p| p.ends_with("big.mov")),
+        "already receipted, not recorded again"
+    );
+    assert!(member_paths.iter().any(|p| p.ends_with("clip.mov")));
+}
+
+#[test]
+fn a_file_changed_after_the_plan_skips_its_rollup_and_copies_nothing_of_it() {
+    let fx = Fixture::with(build_tree);
+    let planned = fx.plan();
+    // Same size, new bytes and mtime, deep inside a tree roll-up.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    put(&fx.source, "Users/a/Documents/notes/deep/d3.txt", &bytes(99, 50));
+    let before = fingerprint(&fx.source);
+
+    let report = fx.apply(&planned.token).expect("apply");
+    assert!(!report.complete());
+    let documents = report
+        .results
+        .iter()
+        .find(|r| r.relative == "Users/a/Documents")
+        .expect("documents");
+    assert_eq!(documents.outcome, Outcome::ChangedSinceScan, "{documents:?}");
+    assert!(
+        !fx.mirror("Users/a/Documents").exists(),
+        "never copied in its new state"
+    );
+    assert!(
+        fx.mirror("Users/a/src/app/src/main.rs").exists(),
+        "other roll-ups still land"
+    );
+    let (_, mirror) = fx.receipts();
+    assert!(!mirror.iter().any(|r| r.dest_path.contains("Users/a/Documents")));
+    assert_eq!(before, fingerprint(&fx.source), "the source is unmodified");
+}
+
+#[test]
+fn a_new_file_after_the_plan_is_a_change_not_a_silent_extra() {
+    let fx = Fixture::with(build_tree);
+    let planned = fx.plan();
+    put(&fx.source, "Users/a/src/app/src/new.rs", b"fn main() {}");
+    let report = fx.apply(&planned.token).expect("apply");
+    let src = report
+        .results
+        .iter()
+        .find(|r| r.relative == "Users/a/src/app/src")
+        .expect("src");
+    assert_eq!(src.outcome, Outcome::ChangedSinceScan, "{src:?}");
+    assert!(!fx.mirror("Users/a/src/app/src").exists());
+}
+
+#[test]
+fn rollup_rows_are_bound_by_the_token() {
+    let fx = Fixture::with(build_tree);
+    let planned = fx.plan();
+    let mut plan: PlanFile = serde_json::from_slice(&std::fs::read(&fx.plan_path).expect("read")).expect("parse");
+    let row = plan
+        .items
+        .iter_mut()
+        .find_map(|i| i.rollup.as_mut())
+        .expect("a roll-up row");
+    row.files += 1;
+    std::fs::write(&fx.plan_path, serde_json::to_vec(&plan).expect("encode")).expect("write");
+    let error = fx.apply(&planned.token).expect_err("refused");
+    assert!(error.to_string().contains("token"), "{error:#}");
+    assert!(!fx.dest.join("Backups").exists());
+}
+
+#[test]
+fn no_rollup_plans_exactly_as_before() {
+    let fx = Fixture::with(build_tree);
+    let mut request = fx.request();
+    request.rollup = false;
+    let planned = build_plan(&request, &fx.probe()).expect("plan");
+    assert!(planned.rollups.is_none());
+    assert!(
+        planned
+            .plan
+            .items
+            .iter()
+            .all(|i| i.rollup.is_none() && i.kind != rdirstat_organize::ItemKind::Dir)
+    );
+    assert_eq!(planned.plan.items.len(), 1, "only big.mov is over the floor");
+    let json = std::fs::read_to_string(&fx.plan_path).expect("plan file");
+    assert!(!json.contains("\"rollup\""), "no roll-up keys in the plan file");
 }

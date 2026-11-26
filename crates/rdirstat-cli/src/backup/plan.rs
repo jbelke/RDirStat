@@ -9,7 +9,7 @@
 //! docs of `backup`). The source is walked or `lstat`ed, never opened for
 //! writing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::os::unix::fs::MetadataExt as _;
@@ -17,12 +17,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use rdirstat_core::{CompletedScan, Kind, NodeId, ScanOptions, flags, format_iec};
+use rdirstat_organize::fit::codes;
 use rdirstat_organize::{
-    DEFAULT_CAP, DEFAULT_RESERVE_PRESSURE, DiskFacts, FitInput, INTENT_BACKUP, ItemKind, PLAN_SCHEMA_VERSION, PlanFile,
-    PlanItem, Rules, ScanItem, SkippedItem, Warning, fit, judge_backup_pair, plan_token, validate_label,
+    DEFAULT_CAP, DEFAULT_RESERVE_PRESSURE, DiskFacts, FitInput, FitPlan, INTENT_BACKUP, ItemKind, PLAN_SCHEMA_VERSION,
+    PlanFile, PlanItem, RULE_NON_UTF8, RollupScope, Rules, ScanItem, SkippedItem, Warning, fit, judge_backup_pair,
+    plan_token, validate_label,
 };
 use serde_json::{Value, json};
 
+use super::rollup::{self, Count, Coverage, LandedKeys, RollupInput};
 use super::{DiskProbe, now_ms};
 
 /// Rule id for a candidate whose `lstat` at plan time disagrees with the scan
@@ -49,6 +52,30 @@ pub(crate) struct PlanRequest {
     /// plan or catalog may be written. `None` allows no such place.
     pub(crate) app_catalog: Option<PathBuf>,
     pub(crate) progress: bool,
+    /// Cover what is not planned on its own with directory roll-ups
+    /// (see [`super::rollup`]). Off, the plan is what it was before
+    /// roll-ups: files under the floor or past the cap are only counted.
+    pub(crate) rollup: bool,
+}
+
+/// What the roll-up pass added to a plan.
+#[derive(Debug, Default)]
+pub(crate) struct RollupSummary {
+    /// Roll-up items in the plan: count, files, logical bytes.
+    pub(crate) planned_items: u64,
+    pub(crate) planned: Count,
+    /// Of those, whole-tree roll-ups.
+    pub(crate) planned_trees: u64,
+    /// Roll-ups that did not fit under the destination reserve.
+    pub(crate) deferred_items: u64,
+    pub(crate) deferred: Count,
+    /// Where every file of the scan went.
+    pub(crate) coverage: Coverage,
+    /// Files the drive's catalog already holds that were not planned on
+    /// their own.
+    pub(crate) landed_candidates: Count,
+    /// Receipt and member keys read from the drive's catalog.
+    pub(crate) landed_keys: usize,
 }
 
 /// A written plan and the facts the report prints beside it.
@@ -72,6 +99,8 @@ pub(crate) struct PlanOutcome {
     /// A failure here does not void the plan; status just cannot see the
     /// source's unplanned files.
     pub(crate) entries: std::result::Result<PathBuf, String>,
+    /// `None` when roll-ups were off.
+    pub(crate) rollups: Option<RollupSummary>,
 }
 
 /// Builds the plan, writes the plan file, and returns it with its token.
@@ -81,6 +110,10 @@ pub(crate) struct PlanOutcome {
 /// A bad label, an unreadable source or snapshot, a refused source/destination
 /// pair (same filesystem, same physical disk, or an unknown `disk_id`), or a
 /// failure writing the plan file.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the plan's steps in order: judge the pair, scan, fit, roll up, write; each is already a helper"
+)]
 pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result<PlanOutcome> {
     validate_label(&request.label)?;
     let dest = canonical_dir(&request.dest)?;
@@ -127,8 +160,16 @@ pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result
         );
     };
 
-    let (items, changed) = candidates(&scan, &source, &base, request.floor, &request.rules);
-    let fitted = fit(&FitInput {
+    // The drive's own catalog, read only, so files already on it are not
+    // planned again. Only with roll-ups; without them a plan is unchanged.
+    let landed = if request.rollup {
+        LandedKeys::load(&rdirstat_catalog::dest_catalog_dir(&dest), &request.label)
+            .context("reading the destination's catalog")?
+    } else {
+        LandedKeys::default()
+    };
+    let (items, changed, landed_candidates) = candidates(&scan, &source, &base, request.floor, &request.rules, &landed);
+    let mut fitted = fit(&FitInput {
         items: &items,
         rules: &request.rules,
         floor_allocated: request.floor,
@@ -136,6 +177,28 @@ pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result
         reserve_pressure: DEFAULT_RESERVE_PRESSURE,
         cap: DEFAULT_CAP,
     });
+
+    let mut changed = changed;
+    let rollups = if request.rollup {
+        let summary = add_rollups(
+            &RollupContext {
+                scan: &scan,
+                source: &source,
+                base: &base,
+                rules: &request.rules,
+                landed: &landed,
+            },
+            &mut fitted,
+            &mut changed,
+        );
+        Some(RollupSummary {
+            landed_candidates,
+            landed_keys: landed.len(),
+            ..summary
+        })
+    } else {
+        None
+    };
 
     let changed_bytes: u64 = changed.iter().map(|item| item.allocated).sum();
     let changed_count = changed.len() as u64;
@@ -172,15 +235,99 @@ pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result
         total_logical: fitted.total_logical,
         total_allocated: fitted.total_allocated,
         deferred: fitted.deferred,
-        not_considered: fitted.not_considered,
-        not_considered_bytes: fitted.not_considered_bytes,
+        not_considered: rollups
+            .as_ref()
+            .map_or(fitted.not_considered, |r| r.coverage.not_covered.files),
+        not_considered_bytes: rollups
+            .as_ref()
+            .map_or(fitted.not_considered_bytes, |r| r.coverage.not_covered.bytes),
         skipped_bytes: fitted.skipped_bytes.saturating_add(changed_bytes),
         budget_logical: fitted.budget_logical,
         warnings: fitted.warnings,
         dest: dest_facts,
         entries,
         plan,
+        rollups,
     })
+}
+
+/// The scan facts [`add_rollups`] reads.
+struct RollupContext<'a> {
+    scan: &'a CompletedScan,
+    source: &'a Path,
+    base: &'a Path,
+    rules: &'a Rules,
+    landed: &'a LandedKeys,
+}
+
+/// Adds roll-up items to a fitted plan: everything not planned or deferred
+/// on its own, not skipped, and not already on the drive. Roll-ups take the
+/// budget left after the individual items, largest first; one that does not
+/// fit is deferred. Directories that changed since the scan join `changed`.
+fn add_rollups(context: &RollupContext<'_>, fitted: &mut FitPlan, changed: &mut Vec<SkippedItem>) -> RollupSummary {
+    let individual: HashSet<PathBuf> = fitted
+        .items
+        .iter()
+        .chain(&fitted.deferred)
+        .map(|item| item.relative.clone())
+        .collect();
+    let other_skips: HashSet<PathBuf> = changed
+        .iter()
+        .map(|item| item.relative.clone())
+        .chain(
+            fitted
+                .skipped
+                .iter()
+                .filter(|item| item.rule_id == RULE_NON_UTF8)
+                .map(|item| item.relative.clone()),
+        )
+        .collect();
+    let mut found = rollup::candidates(&RollupInput {
+        scan: context.scan,
+        source: context.source,
+        base: context.base,
+        rules: context.rules,
+        individual: &individual,
+        other_skips: &other_skips,
+        landed: context.landed,
+    });
+    changed.append(&mut found.changed);
+
+    let budget_known = !fitted
+        .warnings
+        .iter()
+        .any(|w| w.code == codes::DEST_OVER_RESERVE || w.code == codes::DEST_CAPACITY_UNKNOWN);
+    let mut remaining = fitted.budget_logical.saturating_sub(fitted.total_logical);
+    found
+        .items
+        .sort_by(|a, b| b.logical.cmp(&a.logical).then_with(|| a.relative.cmp(&b.relative)));
+    let mut summary = RollupSummary {
+        coverage: found.coverage,
+        ..RollupSummary::default()
+    };
+    for item in found.items {
+        let files = item.rollup.as_ref().map_or(0, |r| r.files);
+        if budget_known && item.logical <= remaining {
+            remaining -= item.logical;
+            fitted.total_logical += item.logical;
+            fitted.total_allocated += item.allocated;
+            summary.planned_items += 1;
+            summary.planned.files += files;
+            summary.planned.bytes += item.logical;
+            if item.rollup.as_ref().is_some_and(|r| r.scope == RollupScope::Tree) {
+                summary.planned_trees += 1;
+            }
+            fitted.items.push(item);
+        } else {
+            summary.deferred_items += 1;
+            summary.deferred.files += files;
+            summary.deferred.bytes += item.logical;
+            fitted.deferred.push(item);
+        }
+    }
+    // Past the cap is no longer "plan another wave": roll-ups cover it.
+    fitted.warnings.retain(|w| w.code != codes::CANDIDATES_TRUNCATED);
+    summary
 }
 
 /// Writes the scan's entries, then a manifest, to the primary catalog under
@@ -257,12 +404,14 @@ fn candidates(
     base: &Path,
     floor: u64,
     rules: &Rules,
-) -> (Vec<ScanItem>, Vec<SkippedItem>) {
+    landed: &LandedKeys,
+) -> (Vec<ScanItem>, Vec<SkippedItem>, Count) {
     use std::os::unix::ffi::OsStrExt as _;
 
     let tree = &scan.tree;
     let mut items = Vec::new();
     let mut changed = Vec::new();
+    let mut already = Count::default();
     let mut stack: Vec<(NodeId, PathBuf)> = vec![(scan.root, base.to_path_buf())];
     while let Some((directory, relative_dir)) = stack.pop() {
         for id in tree.children(directory) {
@@ -300,6 +449,14 @@ fn candidates(
                 items.push(item);
                 continue;
             }
+            // Already on the drive (by path, size, whole-second mtime): not
+            // ranked again. A roll-up of its directory still covers it, and
+            // apply checks it by inode before trusting the drive's copy.
+            if kind == ItemKind::File && landed.contains(&item.absolute, node.size, node.mtime) {
+                already.files += 1;
+                already.bytes += node.size;
+                continue;
+            }
             match restat(&item, node.mtime) {
                 Some((dev, ino, mtime_ns, logical)) => {
                     item.dev = dev;
@@ -317,7 +474,7 @@ fn candidates(
             }
         }
     }
-    (items, changed)
+    (items, changed, already)
 }
 
 /// `(dev, ino, mtime_ns, logical)` now, or `None` if the item no longer is
@@ -424,6 +581,69 @@ fn entries_line(outcome: &PlanOutcome) -> String {
     }
 }
 
+/// The "not ranked" line: with roll-ups, only files no roll-up can cover.
+fn not_ranked_line(out: &mut String, outcome: &PlanOutcome) {
+    if outcome.not_considered > 0 {
+        if outcome.rollups.is_some() {
+            let _ = writeln!(
+                out,
+                "  not ranked {} files ({}): no roll-up can cover them (a name that is not UTF-8)",
+                outcome.not_considered,
+                format_iec(outcome.not_considered_bytes)
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "  not ranked {} items ({}) past the review cap",
+                outcome.not_considered,
+                format_iec(outcome.not_considered_bytes)
+            );
+        }
+    }
+}
+
+/// The roll-up and coverage lines of the plan report.
+fn rollup_lines(out: &mut String, rollups: &RollupSummary) {
+    let _ = writeln!(
+        out,
+        "  roll-ups {} directories ({} whole trees), {} files, {} logical",
+        rollups.planned_items,
+        rollups.planned_trees,
+        rollups.planned.files,
+        format_iec(rollups.planned.bytes)
+    );
+    if rollups.deferred_items > 0 {
+        let _ = writeln!(
+            out,
+            "  roll-ups deferred {} directories, {} files, {} logical",
+            rollups.deferred_items,
+            rollups.deferred.files,
+            format_iec(rollups.deferred.bytes)
+        );
+    }
+    let c = &rollups.coverage;
+    let _ = writeln!(
+        out,
+        "  files    {} on their own, {} in roll-ups, {} already on the drive, {} skipped, {} not covered",
+        c.individual.files, c.rolled_up.files, c.landed.files, c.skipped.files, c.not_covered.files
+    );
+    if rollups.landed_candidates.files > 0 {
+        let _ = writeln!(
+            out,
+            "  already on the drive, not ranked again: {} files ({})",
+            rollups.landed_candidates.files,
+            format_iec(rollups.landed_candidates.bytes)
+        );
+    }
+    if c.unreadable_dirs > 0 {
+        let _ = writeln!(
+            out,
+            "  unreadable {} directories: their contents are unknown and not planned",
+            c.unreadable_dirs
+        );
+    }
+}
+
 /// The plan report as text.
 pub(crate) fn text(outcome: &PlanOutcome, top: usize) -> String {
     let plan = &outcome.plan;
@@ -466,20 +686,16 @@ pub(crate) fn text(outcome: &PlanOutcome, top: usize) -> String {
         outcome.deferred.len(),
         format_iec(deferred_bytes)
     );
-    if outcome.not_considered > 0 {
-        let _ = writeln!(
-            out,
-            "  not ranked {} items ({}) past the review cap",
-            outcome.not_considered,
-            format_iec(outcome.not_considered_bytes)
-        );
-    }
+    not_ranked_line(&mut out, outcome);
     let _ = writeln!(
         out,
         "  skipped {} items ({})",
         plan.skipped_count,
         format_iec(outcome.skipped_bytes)
     );
+    if let Some(rollups) = &outcome.rollups {
+        rollup_lines(&mut out, rollups);
+    }
 
     let _ = writeln!(out);
     let _ = writeln!(out, "Largest items:");
@@ -577,6 +793,18 @@ pub(crate) fn json(outcome: &PlanOutcome, top: usize) -> Value {
             "skipped_allocated": outcome.skipped_bytes,
             "budget_logical": outcome.budget_logical,
         },
+        "rollups": outcome.rollups.as_ref().map(|r| json!({
+            "items": r.planned_items,
+            "tree_items": r.planned_trees,
+            "files": r.planned.files,
+            "logical": r.planned.bytes,
+            "deferred_items": r.deferred_items,
+            "deferred_files": r.deferred.files,
+            "deferred_logical": r.deferred.bytes,
+            "coverage": r.coverage,
+            "already_landed_candidates": r.landed_candidates,
+            "drive_catalog_keys": r.landed_keys,
+        })),
         "top_items": top_items,
         "skipped_by_rule": skipped,
         "warnings": outcome.warnings,

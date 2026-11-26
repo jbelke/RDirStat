@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use rdirstat_catalog::{
-    IndexRow, PLAN_STATUS_PLANNED, PLAN_STATUS_SKIPPED, PlanRow, build_index, dest_catalog_dir, read_plan_rows,
-    visit_entries,
+    IndexRow, METHOD_ROLLUP, PLAN_STATUS_PLANNED, PLAN_STATUS_SKIPPED, PlanRow, build_index, dest_catalog_dir,
+    read_plan_rows, read_receipts, visit_entries,
 };
 use rdirstat_core::format_iec;
 use serde::Serialize;
@@ -83,6 +83,14 @@ pub(crate) fn status(dest: &Path, only: Option<&str>) -> Result<StatusReport> {
         );
     }
     let index = build_index(&catalog).with_context(|| format!("reading receipts in {}", catalog.display()))?;
+    // A directory roll-up's files are index rows; the roll-up itself is one
+    // `rollup` receipt naming the directory, which is what its plan row names.
+    let rollups: Vec<(String, String)> = read_receipts(&catalog)
+        .with_context(|| format!("reading receipts in {}", catalog.display()))?
+        .into_iter()
+        .filter(|r| r.method == METHOD_ROLLUP)
+        .map(|r| (r.source_label, r.source_path))
+        .collect();
     let plans = read_plan_rows(&catalog).with_context(|| format!("reading plans in {}", catalog.display()))?;
 
     let labels: BTreeSet<&str> = index
@@ -95,7 +103,7 @@ pub(crate) fn status(dest: &Path, only: Option<&str>) -> Result<StatusReport> {
         if only.is_some_and(|wanted| wanted != label) {
             continue;
         }
-        sources.push(source_status(&catalog, label, &index, &plans)?);
+        sources.push(source_status(&catalog, label, &index, &rollups, &plans)?);
     }
     if let Some(wanted) = only
         && sources.is_empty()
@@ -110,7 +118,13 @@ pub(crate) fn status(dest: &Path, only: Option<&str>) -> Result<StatusReport> {
     })
 }
 
-fn source_status(catalog: &Path, label: &str, index: &[IndexRow], plans: &[PlanRow]) -> Result<SourceStatus> {
+fn source_status(
+    catalog: &Path,
+    label: &str,
+    index: &[IndexRow],
+    rollups: &[(String, String)],
+    plans: &[PlanRow],
+) -> Result<SourceStatus> {
     let mine: Vec<&IndexRow> = index.iter().filter(|r| r.source_label == label).collect();
     let mut backed_up = Tally::default();
     let mut cloned = Tally::default();
@@ -121,6 +135,13 @@ fn source_status(catalog: &Path, label: &str, index: &[IndexRow], plans: &[PlanR
         }
     }
     let landed: HashSet<&str> = mine.iter().map(|r| r.source_path.as_str()).collect();
+    let mut planned_landed = landed.clone();
+    planned_landed.extend(
+        rollups
+            .iter()
+            .filter(|(source_label, _)| source_label == label)
+            .map(|(_, path)| path.as_str()),
+    );
 
     let last_plan = plans
         .iter()
@@ -155,7 +176,9 @@ fn source_status(catalog: &Path, label: &str, index: &[IndexRow], plans: &[PlanR
             continue;
         }
         match row.status.as_str() {
-            PLAN_STATUS_PLANNED if !landed.contains(row.source_path.as_str()) => status.pending.add(row.logical),
+            PLAN_STATUS_PLANNED if !planned_landed.contains(row.source_path.as_str()) => {
+                status.pending.add(row.logical);
+            }
             PLAN_STATUS_SKIPPED => {
                 status.skipped.add(row.allocated);
                 skipped_paths.insert(row.source_path.as_str());

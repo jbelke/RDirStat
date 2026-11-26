@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::plans::{PlanRow, write_plan_rows};
-use crate::rows::{Columns, HashRow, ReceiptRow, write_hashes, write_receipts};
+use crate::rows::{Columns, HashRow, ReceiptRow, write_hashes, write_members, write_receipts};
 use crate::store::{list_parts, mirror_part, part_seq, read_batches, validate_run_id, write_part};
 use crate::{CatalogError, write_entries};
 
@@ -23,7 +23,7 @@ use crate::{CatalogError, write_entries};
 const MANIFEST: &str = "manifest";
 
 /// Part kinds a manifest inventories, in the order it lists them.
-const INVENTORIED: [&str; 4] = ["entries", "hashes", "plans", "receipts"];
+const INVENTORIED: [&str; 5] = ["entries", "hashes", "members", "plans", "receipts"];
 
 /// Where a destination drive keeps its own copy of the catalog, relative to
 /// its mount point (docs/11-ORGANIZE.md, Amendment A).
@@ -40,7 +40,7 @@ pub fn dest_catalog_dir(dest_mount: &Path) -> PathBuf {
 pub struct ManifestRow {
     /// The run that wrote the part.
     pub run_id: String,
-    /// `entries`, `hashes`, `plans`, or `receipts`.
+    /// `entries`, `hashes`, `members`, `plans`, or `receipts`.
     pub kind: String,
     /// The part's file name, e.g. `hashes-run1-0000.parquet`.
     pub file_name: String,
@@ -154,6 +154,15 @@ impl Catalog {
         self.mirrored(write_hashes(rows, &self.primary, run_id)?)
     }
 
+    /// [`write_members`] to the primary, then mirror.
+    ///
+    /// # Errors
+    ///
+    /// As [`write_members`], or [`CatalogError::Mirror`].
+    pub fn write_members(&self, rows: &[ReceiptRow], run_id: &str) -> Result<Written, CatalogError> {
+        self.mirrored(write_members(rows, &self.primary, run_id)?)
+    }
+
     /// [`write_receipts`] to the primary, then mirror.
     ///
     /// # Errors
@@ -187,7 +196,7 @@ impl Catalog {
     }
 
     /// Writes `manifest-<run_id>-<seq>.parquet`: one row per `entries`,
-    /// `hashes`, `plans`, and `receipts` part of `run_id` in the primary, with its row
+    /// `hashes`, `members`, `plans`, and `receipts` part of `run_id` in the primary, with its row
     /// count, size, and SHA-256, then mirrors it. Call it once a run has
     /// written its last part; a mirror can then be checked against it.
     ///

@@ -37,6 +37,7 @@
 
 mod apply;
 mod plan;
+mod rollup;
 mod status;
 #[cfg(test)]
 mod tests;
@@ -184,6 +185,7 @@ fn run_plan(args: &BackupPlanArgs) -> Result<ExitCode> {
         catalog,
         app_catalog: catalog_dir(None).ok(),
         progress: crate::wants_progress(args.progress),
+        rollup: !args.no_rollup,
     };
     let outcome = build_plan(&request, &SystemProbe)?;
     let text = if args.json {

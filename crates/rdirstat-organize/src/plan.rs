@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::fit::{ItemKind, PlanItem, SkippedItem};
+use crate::fit::{ItemKind, PlanItem, RollupScope, SkippedItem};
 use crate::rules::hex;
 
 /// Version of the [`PlanFile`] layout and of the token encoding.
@@ -104,6 +104,21 @@ pub fn plan_token(plan: &PlanFile) -> String {
         h.update(item.dev.to_le_bytes());
         h.update(item.ino.to_le_bytes());
         h.update(item.mtime_ns.to_le_bytes());
+        // Roll-up facts are hashed only when present, so a plan with no
+        // roll-ups keeps the token it had before they existed.
+        if let Some(rollup) = &item.rollup {
+            h.update(b"rollup\0");
+            h.update([match rollup.scope {
+                RollupScope::Tree => 1,
+                RollupScope::Files => 2,
+            }]);
+            h.update(rollup.files.to_le_bytes());
+            h.update(rollup.newest_mtime_s.to_le_bytes());
+            h.update((rollup.exclude.len() as u64).to_le_bytes());
+            for name in &rollup.exclude {
+                bytes(&mut h, name.as_bytes());
+            }
+        }
     }
     hex(&h.finalize())
 }
@@ -158,6 +173,7 @@ mod tests {
                     dev: 16_777_234,
                     ino: 42,
                     mtime_ns: -1_i128 << 70,
+                    rollup: None,
                 },
                 PlanItem {
                     relative: "Users/josh/Pictures/P.photoslibrary".into(),
@@ -168,6 +184,7 @@ mod tests {
                     dev: 16_777_234,
                     ino: 43,
                     mtime_ns: 1_700_000_000_000_000_000,
+                    rollup: None,
                 },
             ],
             skipped_count: 1,
@@ -223,6 +240,54 @@ mod tests {
             mutate(&mut p);
             assert_ne!(plan_token(&p), base, "{what}");
         }
+    }
+
+    type RollupMutation = Box<dyn Fn(&mut crate::fit::Rollup)>;
+
+    #[test]
+    fn a_token_without_rollups_is_unchanged_and_rollup_facts_are_bound() {
+        // Pinned: the token of a plan with no roll-up rows must not move, or
+        // plans made before roll-ups existed would stop applying.
+        assert_eq!(
+            plan_token(&sample()),
+            "4ff6f9c6498973b3a99d7558c71df78a14585fa5e26856e97efe48fbbb6572a5"
+        );
+        let mut p = sample();
+        p.items.push(PlanItem {
+            relative: "Users/josh/src".into(),
+            absolute: "/System/Volumes/Data/Users/josh/src".into(),
+            kind: ItemKind::Dir,
+            logical: 10,
+            allocated: 4096,
+            dev: 1,
+            ino: 2,
+            mtime_ns: 3,
+            rollup: Some(crate::fit::Rollup {
+                scope: RollupScope::Files,
+                files: 4,
+                newest_mtime_s: 5,
+                exclude: vec!["big.mov".into()],
+            }),
+        });
+        let base = plan_token(&p);
+        let mutations: Vec<(&str, RollupMutation)> = vec![
+            ("scope", Box::new(|r| r.scope = RollupScope::Tree)),
+            ("files", Box::new(|r| r.files += 1)),
+            ("newest", Box::new(|r| r.newest_mtime_s += 1)),
+            ("exclude", Box::new(|r| r.exclude.push("x".into()))),
+            ("exclude name", Box::new(|r| r.exclude[0].push('x'))),
+        ];
+        for (what, mutate) in mutations {
+            let mut q = p.clone();
+            if let Some(rollup) = q.items[2].rollup.as_mut() {
+                mutate(rollup);
+            }
+            assert_ne!(plan_token(&q), base, "{what}");
+        }
+        let json = serde_json::to_string(&p).unwrap_or_else(|e| unreachable!("{e}"));
+        let back: PlanFile = serde_json::from_str(&json).unwrap_or_else(|e| unreachable!("{e}"));
+        assert_eq!(plan_token(&back), base);
+        assert_eq!(json.matches("\"rollup\"").count(), 1, "file rows carry no rollup key");
     }
 
     #[test]

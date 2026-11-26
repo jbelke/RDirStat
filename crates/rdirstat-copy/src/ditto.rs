@@ -17,7 +17,7 @@ const DITTO: &str = "/usr/bin/ditto";
 /// a different destination filesystem, and it documents what the copy keeps.
 const PRESERVE: [&str; 3] = ["--rsrc", "--extattr", "--acl"];
 
-fn create_parent(destination: &Path) -> Result<(), CopyError> {
+pub(crate) fn create_parent(destination: &Path) -> Result<(), CopyError> {
     if let Some(parent) = destination.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|error| CopyError::io(parent, error))?;
     }

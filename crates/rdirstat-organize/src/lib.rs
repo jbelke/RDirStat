@@ -24,7 +24,7 @@ pub mod rules;
 
 pub use fit::{
     DEFAULT_CAP, DEFAULT_FLOOR_ALLOCATED, DEFAULT_RESERVE_PRESSURE, FitInput, FitPlan, ItemKind, PlanItem,
-    RULE_NON_UTF8, ScanItem, SkippedItem, Warning, fit,
+    RULE_NON_UTF8, Rollup, RollupScope, ScanItem, SkippedItem, Warning, fit,
 };
 pub use layout::{BACKUPS_DIR, LayoutError, mirror_path, validate_label};
 pub use pair::{DiskFacts, PairRefusal, judge_backup_pair};
