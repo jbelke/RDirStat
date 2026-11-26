@@ -64,6 +64,9 @@ rdirstat-scan     = { path = "crates/rdirstat-scan" }
 rdirstat-classify = { path = "crates/rdirstat-classify" }
 rdirstat-treemap  = { path = "crates/rdirstat-treemap" }
 rdirstat-remote   = { path = "crates/rdirstat-remote" }
+rdirstat-catalog  = { path = "crates/rdirstat-catalog" }
+rdirstat-copy     = { path = "crates/rdirstat-copy" }
+rdirstat-organize = { path = "crates/rdirstat-organize" }
 # Phase 6 only. Cargo refuses to load a path dependency whose manifest is
 # missing, so this stays commented until `crates/rdirstat-catalog/` exists. The
 # `crates/*` member glob picks the crate up automatically once it does.
@@ -88,6 +91,9 @@ tracing-chrome     = "0.7.2"
 
 # --- wire formats ---
 arrow        = "59.2.0"
+parquet      = { version = "59.2.0", default-features = false, features = ["arrow", "zstd"] }
+globset      = "0.4.22"
+toml         = "1.2.3"
 serde        = { version = "1.0.229", features = ["derive"] }
 serde_json   = "1.0.145"
 specta       = { version = "=2.0.0-rc.25", features = ["derive"] }

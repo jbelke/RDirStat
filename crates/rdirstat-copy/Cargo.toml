@@ -1,0 +1,15 @@
+[package]
+name = "rdirstat-copy"
+description = "The one copier: ditto, streaming compare, SHA-256, APFS clonefile, and identity re-stat. No Tauri."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

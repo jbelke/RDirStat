@@ -4221,6 +4221,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rdirstat-catalog"
+version = "0.1.0"
+
+[[package]]
 name = "rdirstat-classify"
 version = "0.1.0"
 dependencies = [
@@ -4255,6 +4259,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rdirstat-copy"
+version = "0.1.0"
+
+[[package]]
 name = "rdirstat-core"
 version = "0.1.0"
 dependencies = [
@@ -4264,6 +4272,10 @@ dependencies = [
  "specta",
  "thiserror 2.0.20",
 ]
+
+[[package]]
+name = "rdirstat-organize"
+version = "0.1.0"
 
 [[package]]
 name = "rdirstat-remote"

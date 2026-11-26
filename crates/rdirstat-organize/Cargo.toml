@@ -1,0 +1,15 @@
+[package]
+name = "rdirstat-organize"
+description = "Pure planning for backup, migrate, and organize: largest-first fit, disk identity, skip rules, mirror layout, plan tokens."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
