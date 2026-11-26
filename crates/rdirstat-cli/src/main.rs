@@ -11,6 +11,8 @@
 //! rdirstat scan <path> --stats --format json
 //! rdirstat scan <path> --quantity logical --top-down
 //! rdirstat verify <path>
+//! rdirstat backup plan --source <dir> --label <name> --dest <mount>
+//! rdirstat backup apply --plan <file> --token <hex>
 //! ```
 //!
 //! `verify` is the one to run first. It scans, shells out to `du -skx`, and
@@ -18,10 +20,13 @@
 //! hard-link double counting, dot-entry accounting, and device-boundary
 //! crossing in a single command.
 //!
-//! Exit codes: `0` success, `1` failure, `2` a `verify` disagreement.
+//! Exit codes: `0` success, `1` failure or refusal, `2` a `verify`
+//! disagreement, `3` a `backup apply` that ran but left items not landed
+//! (changed since the scan, an occupied destination path, or a failed verify).
 
 #![forbid(unsafe_code)]
 
+mod backup;
 mod cli;
 mod engine;
 mod exclude;
@@ -60,6 +65,7 @@ fn run(arguments: &Cli) -> Result<ExitCode> {
     match &arguments.command {
         Command::Scan(args) => run_scan(args),
         Command::Verify(args) => run_verify(args),
+        Command::Backup(command) => backup::run(command),
     }
 }
 

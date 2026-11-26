@@ -24,10 +24,8 @@ path = "src/main.rs"
 
 [features]
 default = []
-# Phase 7. Bundled DuckDB materially increases the build surface, so scanner
-# iteration must never compile it by accident. Re-enable together with the
-# `rdirstat-catalog` line in the root [workspace.dependencies] table:
-#   catalog = ["dep:rdirstat-catalog"]
+# `rdirstat-catalog` is a plain dependency: it writes Parquet with arrow and
+# parquet only. DuckDB is never linked; it reads the part files in place.
 
 [dependencies]
 rdirstat-core     = { workspace = true }
@@ -40,7 +38,11 @@ rdirstat-core     = { workspace = true }
 # rdirstat-scan     = { workspace = true }
 # rdirstat-classify = { workspace = true }
 # rdirstat-treemap  = { workspace = true }
-# rdirstat-catalog  = { workspace = true, optional = true }   # phase 6
+# `backup plan` / `backup apply` (.settings/docs/11-ORGANIZE.md, Amendment A).
+rdirstat-catalog   = { workspace = true }
+rdirstat-copy      = { workspace = true }
+rdirstat-organize  = { workspace = true }
+sha2               = { workspace = true }
 anyhow             = { workspace = true }
 clap               = { workspace = true }
 crossbeam-channel  = { workspace = true }

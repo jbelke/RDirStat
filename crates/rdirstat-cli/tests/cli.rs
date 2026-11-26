@@ -351,3 +351,68 @@ fn the_help_text_documents_the_pdu_comparable_flags() {
         assert!(text.contains(flag), "`scan --help` documents {flag}");
     }
 }
+
+#[test]
+fn backup_plan_refuses_a_destination_on_the_source_disk_and_writes_nothing() {
+    let source = tempfile::tempdir().expect("tempdir");
+    let dest = tempfile::tempdir().expect("tempdir");
+    let catalog = tempfile::tempdir().expect("tempdir");
+    write(&source.path().join("big.bin"), &vec![7_u8; 65_536]);
+    let plan = catalog.path().join("plan.json");
+
+    let output = run(&[
+        "backup",
+        "plan",
+        "--source",
+        &source.path().to_string_lossy(),
+        "--label",
+        "tmp-source",
+        "--dest",
+        &dest.path().to_string_lossy(),
+        "--floor",
+        "1KiB",
+        "--out",
+        &plan.to_string_lossy(),
+        "--catalog",
+        &catalog.path().to_string_lossy(),
+        "--progress",
+        "never",
+    ]);
+    assert_eq!(output.status.code(), Some(1), "refused: {output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("refusing"), "names the refusal: {stderr}");
+    assert!(!plan.exists(), "no plan file for a refused pair");
+    assert_eq!(
+        fs::read_dir(dest.path()).expect("readdir").count(),
+        0,
+        "destination untouched"
+    );
+    assert_eq!(
+        fs::read(source.path().join("big.bin")).expect("read"),
+        vec![7_u8; 65_536]
+    );
+}
+
+#[test]
+fn backup_apply_refuses_a_plan_it_cannot_read_and_a_bad_floor_is_a_usage_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = dir.path().join("plan.json");
+    write(&plan, b"{\"not\": \"a plan\"}");
+    let output = run(&[
+        "backup",
+        "apply",
+        "--plan",
+        &plan.to_string_lossy(),
+        "--token",
+        "00",
+        "--catalog",
+        &dir.path().to_string_lossy(),
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not a plan file"));
+
+    let usage = run(&[
+        "backup", "plan", "--source", "/tmp", "--label", "x", "--dest", "/tmp", "--floor", "ten",
+    ]);
+    assert_eq!(usage.status.code(), Some(2), "clap usage error: {usage:?}");
+}

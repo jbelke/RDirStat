@@ -32,6 +32,90 @@ pub(crate) enum Command {
     Scan(Box<ScanArgs>),
     /// Scan a directory tree and diff the allocated total against `du -sk`.
     Verify(Box<VerifyArgs>),
+    /// Plan and apply a Backup onto another physical disk. Backup only: the
+    /// source is opened read-only and is never renamed, trashed, or linked.
+    #[command(subcommand)]
+    Backup(BackupCommand),
+}
+
+/// `rdirstat backup …`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum BackupCommand {
+    /// Choose what one Backup wave copies, write the plan file, print its token.
+    /// Writes nothing on the destination.
+    Plan(Box<BackupPlanArgs>),
+    /// Copy a plan's items to the destination and record a receipt for each
+    /// item that verified. Refuses unless `--token` matches the plan file.
+    Apply(Box<BackupApplyArgs>),
+}
+
+/// `rdirstat backup plan` options.
+#[derive(Debug, Args)]
+pub(crate) struct BackupPlanArgs {
+    /// Source volume root. Plan paths, and the mirror layout, are relative to
+    /// it. With `--snapshot` it defaults to the snapshot's scan root.
+    #[arg(long, value_name = "DIR", required_unless_present = "snapshot")]
+    pub(crate) source: Option<PathBuf>,
+
+    /// Name of this source under `<dest>/Backups/`, e.g. `mac-data`.
+    #[arg(long, value_name = "LABEL")]
+    pub(crate) label: String,
+
+    /// Destination root (the backup volume's mount point).
+    #[arg(long, value_name = "DIR")]
+    pub(crate) dest: PathBuf,
+
+    /// Smallest allocated size a candidate may have: `100MiB`, `1GiB`, `5000`.
+    #[arg(long, value_name = "SIZE", default_value = "100MiB", value_parser = crate::backup::parse_size)]
+    pub(crate) floor: u64,
+
+    /// Plan from this `.rdstat` snapshot instead of walking the source.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) snapshot: Option<PathBuf>,
+
+    /// Skip/include rules file. Default: the built-in Backup rules.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) rules: Option<PathBuf>,
+
+    /// Where to write the plan file. Default: `<catalog>/plans/<label>-<ms>.json`.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) out: Option<PathBuf>,
+
+    /// Primary catalog directory. Default: the app data dir's `catalog`.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) catalog: Option<PathBuf>,
+
+    /// Largest planned items to print.
+    #[arg(long, value_name = "N", default_value_t = 20)]
+    pub(crate) top: usize,
+
+    /// Print one JSON document instead of text.
+    #[arg(long)]
+    pub(crate) json: bool,
+
+    /// When to draw the scan progress line on stderr (walks only).
+    #[arg(long, value_enum, default_value_t = ProgressWhen::Auto)]
+    pub(crate) progress: ProgressWhen,
+}
+
+/// `rdirstat backup apply` options.
+#[derive(Debug, Args)]
+pub(crate) struct BackupApplyArgs {
+    /// The plan file `backup plan` wrote.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) plan: PathBuf,
+
+    /// The token `backup plan` printed for this plan file.
+    #[arg(long, value_name = "HEX")]
+    pub(crate) token: String,
+
+    /// Primary catalog directory. Default: the app data dir's `catalog`.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) catalog: Option<PathBuf>,
+
+    /// Print one JSON document instead of text.
+    #[arg(long)]
+    pub(crate) json: bool,
 }
 
 /// Which byte quantity the output is about.
