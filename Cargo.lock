@@ -4271,6 +4271,7 @@ dependencies = [
  "rdirstat-copy",
  "rdirstat-core",
  "rdirstat-jobs",
+ "rdirstat-organize",
  "rdirstat-remote",
  "rdirstat-scan",
  "rdirstat-treemap",
@@ -4391,6 +4392,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "specta",
  "thiserror 2.0.20",
  "toml 1.2.3+spec-1.1.0",
 ]

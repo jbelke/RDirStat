@@ -124,6 +124,9 @@ tokio = { workspace = true, features = ["fs", "sync", "time", "io-util", "net"] 
 # `specta` feature exports them to TypeScript). hyper is already in the tree
 # through reqwest and the CLI's server; the client adds only its features.
 rdirstat-jobs  = { workspace = true, features = ["specta"] }
+# Backup profiles and the recommendation's schema: a pure crate (TOML and
+# validation, no filesystem); `specta` exports its types.
+rdirstat-organize = { workspace = true, features = ["specta"] }
 hyper          = { workspace = true, features = ["client", "http1"] }
 hyper-util     = { workspace = true, features = ["tokio"] }
 http-body-util = { workspace = true }

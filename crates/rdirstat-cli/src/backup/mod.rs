@@ -105,6 +105,7 @@ pub(crate) fn run(command: &BackupCommand) -> Result<ExitCode> {
         BackupCommand::Index(args) => run_index(args),
         BackupCommand::Status(args) => run_status(args),
         BackupCommand::Recommend(args) => profile::run_recommend(args),
+        BackupCommand::CheckProfile(args) => profile::run_check(args),
         BackupCommand::Serve(args) => run_serve(args),
         BackupCommand::Jobs(args) => run_jobs(args),
         BackupCommand::Submit(args) => run_submit(args),

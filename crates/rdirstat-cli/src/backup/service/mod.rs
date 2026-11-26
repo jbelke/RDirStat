@@ -228,6 +228,7 @@ impl Service {
             uptime_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
             active_job: self.active_job(),
             stopping: self.shutdown.load(Ordering::SeqCst),
+            features: vec![rdirstat_jobs::FEATURE_JOB_INCLUDES.to_owned()],
         }
     }
 
@@ -311,8 +312,42 @@ impl Service {
         if new.sources.is_empty() {
             return Err(ApiFailure::new(400, "a job needs at least one source"));
         }
+        if let Some(cap) = new.review_cap
+            && (cap == 0 || cap > rdirstat_organize::profile::MAX_REVIEW_CAP)
+        {
+            return Err(ApiFailure::new(
+                400,
+                format!(
+                    "review_cap {cap} must be between 1 and {}",
+                    rdirstat_organize::profile::MAX_REVIEW_CAP
+                ),
+            ));
+        }
+        let mut sources = new.sources;
+        for source in &mut sources {
+            let mut includes = Vec::with_capacity(source.include.len());
+            for include in &source.include {
+                let relative = if include.is_absolute() {
+                    None
+                } else {
+                    rdirstat_organize::profile::include_relative(&source.root, include)
+                };
+                let Some(relative) = relative else {
+                    return Err(ApiFailure::new(
+                        400,
+                        format!(
+                            "include {} of {:?} is not a relative path under its root",
+                            include.display(),
+                            source.label
+                        ),
+                    ));
+                };
+                includes.push(relative);
+            }
+            source.include = includes;
+        }
         let mut labels = std::collections::HashSet::new();
-        for source in &new.sources {
+        for source in &sources {
             rdirstat_organize::validate_label(&source.label)
                 .map_err(|error| ApiFailure::new(400, format!("label {:?}: {error}", source.label)))?;
             if !labels.insert(source.label.as_str()) {
@@ -337,10 +372,11 @@ impl Service {
             id,
             created_at_ms,
             dest: self.dest.clone(),
-            sources: new.sources,
+            sources,
             rules: new.rules,
             floor: new.floor.unwrap_or(DEFAULT_FLOOR),
             max_rounds: new.max_rounds.unwrap_or(DEFAULT_MAX_ROUNDS).max(1),
+            review_cap: new.review_cap,
             rollup: new.rollup.unwrap_or(true),
             catalog: new.catalog,
             mount_poll_ms: new.mount_poll_ms.unwrap_or(DEFAULT_MOUNT_POLL_MS).max(1),

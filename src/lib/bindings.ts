@@ -697,6 +697,19 @@ export const commands = {
 	 */
 	transfersClear: () => typedError<number, RemoteConfigError>(__TAURI_INVOKE("transfers_clear")),
 	/**
+	 *  Every mounted drive with backup records: its service (running, stale,
+	 *  not answering, stopped), its jobs and unfinished ones, its profiles.
+	 * 
+	 *  Only `/Volumes/*` roots that hold a `.rdirstat` directory are listed; a
+	 *  drive that has never been backed up to is not.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`BackupError::Internal`] when a background task fails. A drive that
+	 *  cannot be described is logged and left out.
+	 */
+	backupServices: () => typedError<BackupDrive[], BackupError>(__TAURI_INVOKE("backup_services")),
+	/**
 	 *  Starts the backup service for a drive, or returns the one already
 	 *  running there.
 	 * 
@@ -709,11 +722,157 @@ export const commands = {
 	 *  another schema runs there, the drive holds a job newer than this app, or
 	 *  the runner could not be installed or started.
 	 */
-	backupStartService: (dest: string) => typedError<Health, BackupError>(__TAURI_INVOKE("backup_start_service", { dest })),
+	backupStartService: (dest: string) => typedError<BackupHealth, BackupError>(__TAURI_INVOKE("backup_start_service", { dest })),
+	/**
+	 *  The drive's jobs: live from its service, or from its files when no
+	 *  service answers (`source` says which).
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`BackupError::NotMounted`] / [`BackupError::Invalid`] for a bad
+	 *  destination; the service's refusal otherwise.
+	 */
+	backupJobs: (dest: string) => typedError<BackupJobs, BackupError>(__TAURI_INVOKE("backup_jobs", { dest })),
+	/**
+	 *  Queues a job made from profile `profile` on the drive, starting the
+	 *  drive's service first when none runs, and starts forwarding the job's
+	 *  events (`backup:events`).
+	 * 
+	 *  The profile is resolved by the sidecar (`backup check-profile`) first, so
+	 *  a source on the destination disk or a missing include is refused here,
+	 *  not one round into the job.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`BackupError::Invalid`] for a profile that does not load or resolve;
+	 *  [`BackupError::Incompatible`] when the profile narrows a source with
+	 *  `include` and the running service is too old to honour it; whatever
+	 *  starting the service or the service itself reports otherwise.
+	 */
+	backupSubmitJob: (dest: string, profile: string, options: SubmitOptions) => typedError<BackupJobSummary, BackupError>(__TAURI_INVOKE("backup_submit_job", { dest, profile, options })),
+	/**
+	 *  Pauses, resumes or cancels a job, or shuts the drive's service down.
+	 *  Takes effect between items: the item being copied always finishes.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`BackupError::Invalid`] for a job action without a valid job id;
+	 *  [`BackupError::Unreachable`] when no service runs; the service's refusal
+	 *  (`api`, e.g. 409 for pausing a finished job) otherwise.
+	 */
+	backupControl: (dest: string, action: BackupAction, job: string | null) => typedError<ControlOutcome, BackupError>(__TAURI_INVOKE("backup_control", { dest, action, job })),
+	/**
+	 *  The job's events after `after`, at most `limit` (default and cap 1000).
+	 *  A long-poll: with nothing new, waits up to `wait_secs` (default 25, at
+	 *  most 60) for the next event. When no service answers, reads the drive's
+	 *  `events.jsonl` at once instead; the answer is the same shape either way.
+	 * 
+	 *  To be told about new events without polling, use `backup_watch`: it
+	 *  forwards them as `backup:events`.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`BackupError::Invalid`] for a bad job id or an unknown job.
+	 */
+	backupEvents: (dest: string, job: string, after: number, waitSecs: number | null, limit: number | null) => typedError<BackupEventsPage, BackupError>(__TAURI_INVOKE("backup_events", { dest, job, after, waitSecs, limit })),
+	/**
+	 *  Starts forwarding a job's events to the UI as `backup:events`, after
+	 *  `after` (default: the job's current `last_seq`, i.e. only new events).
+	 *  Idempotent. The follower survives the service going away and resumes
+	 *  after the last `seq` it forwarded; it ends when the job is finished.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`BackupError::Invalid`] for a bad job id or an unknown job.
+	 */
+	backupWatch: (dest: string, job: string, after: number | null) => typedError<boolean, BackupError>(__TAURI_INVOKE("backup_watch", { dest, job, after })),
+	/**
+	 *  Stops forwarding a job's events. Returns whether a follower was running.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`BackupError::Invalid`] / [`BackupError::NotMounted`] for a bad
+	 *  destination.
+	 */
+	backupUnwatch: (dest: string, job: string) => typedError<boolean, BackupError>(__TAURI_INVOKE("backup_unwatch", { dest, job })),
+	/**
+	 *  The drive's profiles (`<dest>/.rdirstat/profiles/*.toml`), by name. A
+	 *  file that does not parse is listed with its error, not dropped.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`BackupError::Invalid`] / [`BackupError::NotMounted`] for a bad
+	 *  destination.
+	 */
+	backupProfiles: (dest: string) => typedError<BackupProfileEntry[], BackupError>(__TAURI_INVOKE("backup_profiles", { dest })),
+	/**
+	 *  Reads profile `name` from the drive.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`BackupError::Invalid`] when it is missing, unreadable or invalid.
+	 */
+	backupProfileLoad: (dest: string, name: string) => typedError<BackupProfile, BackupError>(__TAURI_INVOKE("backup_profile_load", { dest, name })),
+	/**
+	 *  Writes a profile to `<profile.dest>/.rdirstat/profiles/<name>.toml`,
+	 *  atomically, after the checks that need no filesystem (schema, names,
+	 *  absolute paths, includes under their roots). Returns the path written.
+	 *  Use `backup_profile_validate` for the checks against the disks.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`BackupError::NotMounted`] when `profile.dest` is not a mounted volume;
+	 *  [`BackupError::Invalid`] when the profile does not validate (nothing is
+	 *  written).
+	 */
+	backupProfileSave: (profile: BackupProfile) => typedError<string, BackupError>(__TAURI_INVOKE("backup_profile_save", { profile })),
+	/**
+	 *  Checks saved profile `name` against the filesystem, the way the service
+	 *  will: destination and roots exist, each source is on another disk than
+	 *  the destination, includes exist under their roots after symlinks, the
+	 *  rules file parses. Runs the sidecar's `backup check-profile`.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`BackupError::Runner`] when the sidecar itself cannot run. A profile
+	 *  that fails a check is `ok: false` with the reason, not an error.
+	 */
+	backupProfileValidate: (dest: string, name: string) => typedError<ProfileValidation, BackupError>(__TAURI_INVOKE("backup_profile_validate", { dest, name })),
+	/**
+	 *  What a run of profile `name` would copy, defer and skip, largest first,
+	 *  with the skip rule and reason (`backup recommend --json`). A dry run:
+	 *  nothing is written or applied.
+	 * 
+	 *  **Long-running**: it walks every source of the profile. `limit` (default
+	 *  1000, at most 10 000) caps the rows listed; totals cover every row.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`BackupError::Invalid`] for a profile that does not load;
+	 *  [`BackupError::Runner`] carrying the sidecar's reason when the
+	 *  recommendation fails (e.g. a source on the destination disk).
+	 */
+	backupRecommend: (dest: string, name: string, limit: number | null) => typedError<Recommendation_Serialize, BackupError>(__TAURI_INVOKE("backup_recommend", { dest, name, limit })),
+	/**
+	 *  What the drive holds per source (`backup status --json`): bytes and
+	 *  files backed up, clone savings, pending items of the last plan, files
+	 *  over the floor not yet backed up, and warnings. Reads the drive's
+	 *  Parquet index only; never walks the drive. The answer is the CLI's JSON
+	 *  document as text, unchanged: its shape belongs to `rdirstat backup
+	 *  status --json`, and a JSON value type sends the TypeScript exporter into
+	 *  unbounded recursion.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`BackupError::Runner`] carrying the sidecar's reason, e.g. a drive with
+	 *  no index yet.
+	 */
+	backupIndexStatus: (dest: string, sourceLabel: string | null) => typedError<string, BackupError>(__TAURI_INVOKE("backup_index_status", { dest, sourceLabel })),
 };
 
 /** Events */
 export const events = {
+	backupEvents: makeEvent<BackupEventsEvent>("backup:events"),
 	scanProgress: makeEvent<ScanProgressEvent>("scan:progress"),
 	transferProgress: makeEvent<TransferProgressEvent>("transfer:progress"),
 };
@@ -936,6 +1095,43 @@ export type ArenaError =
 	parent: NodeId,
 } };
 
+/**  What `backup_control` asks. */
+export type BackupAction = 
+/**  Hold the job between items. */
+"pause" | 
+/**
+ *  Continue a paused job, or re-queue a stopped, cancelled, incomplete
+ *  or failed one.
+ */
+"resume" | 
+/**  Stop the job between items. */
+"cancel" | 
+/**
+ *  Finish the current item, record the job as stopped, and stop the
+ *  service. The next service on the drive resumes it.
+ */
+"shutdown";
+
+/**  One mounted drive that has backup records (`<dest>/.rdirstat`). */
+export type BackupDrive = {
+	/**  The drive's mount point. */
+	dest: string,
+	/**  Its volume name. */
+	name: string,
+	service: ServiceState,
+	/**  The service's answer, when one answered. */
+	health: BackupHealth | null,
+	/**  `<dest>/.rdirstat/run/lock`, when present. */
+	lock: BackupLockInfo | null,
+	jobs_source: JobsSource,
+	/**  Every job, by id. */
+	jobs: BackupJobSummary[],
+	/**  Ids of the jobs not in a terminal phase. */
+	unfinished: string[],
+	/**  Profile names on the drive. */
+	profiles: string[],
+};
+
 /**
  *  Why a backup command failed.
  * 
@@ -958,6 +1154,320 @@ export type BackupError =
 { kind: "incompatible"; detail: string } | 
 /**  The service binary could not be checked, installed or started. */
 { kind: "runner"; detail: string } | { kind: "internal"; detail: string };
+
+/**
+ *  New events of one backup job, and whether its service answers.
+ * 
+ *  Emitted by the follower in `backup::watch` for each page the service's
+ *  long-poll returns, in `seq` order with no gaps or repeats, and once
+ *  whenever the service stops or starts answering (`connected`). While it
+ *  does not answer, the page comes from the drive's own `events.jsonl`.
+ */
+export type BackupEventsEvent = {
+	/**  The drive's mount point. */
+	dest: string,
+	/**  The job. */
+	job_id: string,
+	/**  New events, oldest first; may be empty. */
+	events: Event[],
+	/**  The highest `seq` the job has. */
+	last_seq: number,
+	/**  The job is in a terminal phase. */
+	finished: boolean,
+	/**  The service answered this time. */
+	connected: boolean,
+};
+
+/**  `GET /v1/jobs/{id}/events`. */
+export type BackupEventsPage = {
+	/**  Events with `seq > after`, in order, at most `limit`. */
+	events: Event[],
+	/**
+	 *  The highest `seq` the job has. Ask again with
+	 *  `after = events.last().seq` (or `after` unchanged when empty).
+	 */
+	last_seq: number,
+	/**
+	 *  The job's phase is terminal: no more events will come unless it is
+	 *  resumed.
+	 */
+	finished: boolean,
+};
+
+/**  `GET /v1/health`. */
+export type BackupHealth = {
+	/**  [`SCHEMA_VERSION`] the service speaks. */
+	schema_version: number,
+	/**  The service binary's version. */
+	version: string,
+	/**  Its process id. */
+	pid: number,
+	/**  Its host. */
+	host: string,
+	/**  The destination it serves. */
+	dest: string,
+	/**
+	 *  The destination's physical disk (`disk14`), when known. Not an
+	 *  identity: macOS renumbers disks on every plug.
+	 */
+	dest_disk_id?: string | null,
+	/**  When it started. */
+	started_at_ms: number,
+	/**  Milliseconds since it started. */
+	uptime_ms: number,
+	/**  The job it is running. */
+	active_job?: string | null,
+	/**  It has been asked to stop and is finishing the current item. */
+	stopping: boolean,
+	/**
+	 *  Optional behaviour this service supports within [`SCHEMA_VERSION`],
+	 *  e.g. [`FEATURE_JOB_INCLUDES`]. Absent from older services.
+	 */
+	features?: string[],
+};
+
+/**
+ *  One source of a job: a volume (or directory) root and the label it is
+ *  mirrored under, `<dest>/Backups/<label>/`.
+ */
+export type BackupJobSource = {
+	/**  Name under `Backups/`, e.g. `mac-data`. */
+	label: string,
+	/**  The source root plan paths are relative to. */
+	root: string,
+	/**
+	 *  Directories and single files under `root`, relative to it, to back
+	 *  up instead of the whole root (a profile's `include`). Empty: the
+	 *  whole root. A service without [`FEATURE_JOB_INCLUDES`] in
+	 *  [`Health::features`] ignores this field and backs up the whole root,
+	 *  so a client must not send it to one.
+	 */
+	include?: string[],
+};
+
+/**  `job.json`: what a job backs up. Written once. */
+export type BackupJobSpec = {
+	/**  [`SCHEMA_VERSION`] at the time of writing. */
+	schema_version: number,
+	/**  The job directory's name. */
+	id: string,
+	/**  Milliseconds since the Unix epoch. */
+	created_at_ms: number,
+	/**  Destination root: the backup volume's mount point. */
+	dest: string,
+	/**  Labels run in this order. */
+	sources: BackupJobSource[],
+	/**
+	 *  Skip/include rules file (TOML). Relative paths are relative to the job
+	 *  directory. `None`: the built-in Backup rules.
+	 */
+	rules?: string | null,
+	/**  Smallest allocated size of a candidate, in bytes. */
+	floor: number,
+	/**  Plan + apply rounds per label before it is called incomplete. */
+	max_rounds: number,
+	/**
+	 *  Review cap on ranked candidates per source and round. `None`: the
+	 *  planner's default.
+	 */
+	review_cap?: number | null,
+	/**  Cover what is not planned on its own with directory roll-ups. */
+	rollup: boolean,
+	/**  Primary catalog directory. `None`: the desktop app's data dir. */
+	catalog?: string | null,
+	/**  How often to look for a missing source or destination, in ms. */
+	mount_poll_ms: number,
+	/**
+	 *  Give up waiting for a missing volume after this many ms. `None`: wait
+	 *  until it comes back or the job is cancelled.
+	 */
+	mount_timeout_ms?: number | null,
+	/**  The profile this job was made from, if any. */
+	profile?: string | null,
+};
+
+/**  `state.json`, and the state in [`JobSummary`]. */
+export type BackupJobState = {
+	/**  [`SCHEMA_VERSION`]. */
+	schema_version: number,
+	/**  The job's id. */
+	job_id: string,
+	/**  See [`Phase`]. */
+	phase: Phase,
+	/**  The label being worked on. */
+	label?: string | null,
+	/**  Its current round, from 1. */
+	round: number,
+	/**  One entry per source, in [`JobSpec::sources`] order. */
+	labels: BackupLabelProgress[],
+	/**  Outcomes over the whole job. */
+	counts: Partial<{ [key in ItemOutcome]: BackupTally }>,
+	/**  Items finished in the current round. */
+	items_done: number,
+	/**  Items in the current round's plan. */
+	items_total: number,
+	/**  The item being landed, relative to its source root. */
+	current_item?: string | null,
+	/**  The last error or refusal, if any. */
+	last_error?: string | null,
+	/**  `seq` of the last event this snapshot reflects. */
+	last_seq: number,
+	/**  When a service first started the job. */
+	started_at_ms?: number | null,
+	/**  When this snapshot was taken. */
+	updated_at_ms: number,
+	/**  When it reached a terminal phase. */
+	finished_at_ms?: number | null,
+};
+
+/**  One job as the API (and `backup jobs`) reports it. */
+export type BackupJobSummary = {
+	/**  `job.json`. */
+	spec: BackupJobSpec,
+	/**  The live state (or `state.json` when read from the drive). */
+	state: BackupJobState,
+	/**  The persisted control word. */
+	control: Control,
+	/**  A service is running this job right now. */
+	active: boolean,
+	/**  [`Phase::is_unfinished`] of its phase. */
+	unfinished: boolean,
+};
+
+/**  Jobs of one drive. */
+export type BackupJobs = {
+	source: JobsSource,
+	jobs: BackupJobSummary[],
+};
+
+/**  Per-label progress in [`JobState::labels`]. */
+export type BackupLabelProgress = {
+	/**  The source's label. */
+	label: string,
+	/**  See [`LabelStatus`]. */
+	status: LabelStatus,
+	/**  Rounds started. */
+	rounds: number,
+	/**
+	 *  Of those, rounds a lost source or destination volume cut short. They
+	 *  do not count against [`JobSpec::max_rounds`]: a drive that drops off
+	 *  the bus is waited for, not given up on.
+	 */
+	drops?: number,
+	/**  Items copied or cloned over all rounds. */
+	landed_items: number,
+	/**  Logical bytes copied or cloned over all rounds. */
+	landed_bytes: number,
+	/**  Items the last round did not land. */
+	not_landed_items: number,
+	/**  The last round's plan file. */
+	last_plan?: string | null,
+};
+
+/**
+ *  `run/lock`: who holds this drive's service.
+ * 
+ *  A lock is stale when it names this host and either another boot or a
+ *  pid that is not running. A lock from another host cannot be judged and
+ *  is never taken over automatically.
+ */
+export type BackupLockInfo = {
+	/**  The service's process id. */
+	pid: number,
+	/**  `gethostname(3)`. */
+	host: string,
+	/**  The boot the pid belongs to (`kern.boottime` on macOS). */
+	boot_id: string,
+	/**  The service binary's version. */
+	version: string,
+	/**  When it took the lock. */
+	started_at_ms: number,
+};
+
+/**
+ *  A backup profile on the wire: `rdirstat_organize::Profile` with every
+ *  field present (its TOML form omits defaults, which would give the
+ *  exported TypeScript two shapes). See that type for each field.
+ */
+export type BackupProfile = {
+	/**  Must be the profile format this build reads (1). */
+	schema_version: number,
+	/**  Profile name; also the file stem. */
+	name: string,
+	/**  Destination root: the backup volume's mount point. */
+	dest: string,
+	/**
+	 *  Rules file, relative to the profiles directory or absolute. `None`:
+	 *  the built-in Backup rules.
+	 */
+	rules: string | null,
+	/**  Smallest allocated size a candidate may have, in bytes. */
+	floor_allocated: number,
+	/**  Review cap on ranked candidates per source. */
+	review_cap: number,
+	/**  At least one. */
+	sources: BackupProfileSource[],
+};
+
+/**
+ *  A profile after every path was resolved and checked against the
+ *  filesystem (`rdirstat backup check-profile --json`): canonical roots,
+ *  includes that exist and stay under their root after symlinks, relative
+ *  to it, with nested ones dropped; the destination on another disk than
+ *  every source; the rules file parsed.
+ */
+export type BackupProfileCheck = {
+	/**  The profile's name. */
+	name: string,
+	/**  Canonical destination root. */
+	dest: string,
+	/**  The profile's floor. */
+	floor_allocated: number,
+	/**  The profile's review cap. */
+	review_cap: number,
+	/**  In profile order. */
+	sources: BackupProfileCheckSource[],
+};
+
+/**  One source of a [`ProfileCheck`]. */
+export type BackupProfileCheckSource = {
+	/**  The source's label. */
+	label: string,
+	/**  Canonical root. */
+	root: string,
+	/**  Relative to `root`. Empty: the whole root. */
+	includes: string[],
+};
+
+/**  One profile file on a drive. */
+export type BackupProfileEntry = {
+	name: string,
+	/**  The profile, when it parses and validates. */
+	profile: BackupProfile | null,
+	/**  Why it does not. */
+	error: string | null,
+};
+
+/**  One source of a [`BackupProfile`]. */
+export type BackupProfileSource = {
+	/**  Name under `<dest>/Backups/`. */
+	label: string,
+	/**  Source volume root. */
+	root: string,
+	/**
+	 *  Directories and files under `root` (relative or absolute under it).
+	 *  Empty: the whole root.
+	 */
+	include: string[],
+};
+
+/**  Items and logical bytes. */
+export type BackupTally = {
+	/**  How many. */
+	items: number,
+	/**  Logical bytes. */
+	bytes: number,
+};
 
 /**  One child directory offered by [`browse_directories`]. */
 export type BrowseEntry = {
@@ -1239,6 +1749,24 @@ export type ContentDigest = {
 	bytes: number,
 };
 
+/**  `control`: what the runner should do at the next item boundary. */
+export type Control = 
+/**  Keep going. */
+"run" | 
+/**  Hold between items until `run` or `cancel`. */
+"pause" | 
+/**  Stop at the next item boundary; the job becomes [`Phase::Cancelled`]. */
+"cancel";
+
+/**
+ *  The answer to `backup_control`: the job for a job action, the service's
+ *  health for `shutdown`.
+ */
+export type ControlOutcome = {
+	job: BackupJobSummary | null,
+	health: BackupHealth | null,
+};
+
 /**
  *  An opaque paging cursor.
  * 
@@ -1248,6 +1776,37 @@ export type ContentDigest = {
  *  meaning of "the next page".
  */
 export type Cursor = string;
+
+/**
+ *  The destination and the 75 % fill rule.
+ * 
+ *  `used = total - available`. A fill fraction is `(used + logical) / total`.
+ *  The rule: a plan never takes the destination to `reserve_pressure` or
+ *  beyond.
+ */
+export type DestFill = {
+	/**  Destination capacity in bytes. */
+	total_bytes: number,
+	/**  Free bytes on the destination now. */
+	available_bytes: number,
+	/**  `total_bytes - available_bytes`. */
+	used_bytes: number,
+	/**  The fill limit, a fraction (0.75). */
+	reserve_pressure: number,
+	/**  Logical bytes of every planned item over all sources. */
+	planned_logical: number,
+	/**  Planned plus deferred: everything the profile wants that no rule skips. */
+	wanted_logical: number,
+	/**  Fill after the planned items land. */
+	projected_fill_planned: number,
+	/**  Fill if everything wanted landed. */
+	projected_fill_wanted: number,
+	/**
+	 *  `projected_fill_wanted < reserve_pressure`: the whole profile fits in
+	 *  one run. When false, a run lands the planned rows and defers the rest.
+	 */
+	fits: boolean,
+};
 
 /**  Everything the details panel shows for one selected item. */
 export type Details = {
@@ -1762,6 +2321,71 @@ export type ErrorClassCount = {
 	count: number,
 };
 
+/**  One line of `events.jsonl`, and one entry of [`EventsPage::events`]. */
+export type Event = {
+	/**  From 1, one more than the previous line's. */
+	seq: number,
+	/**  Milliseconds since the Unix epoch. */
+	ts_ms: number,
+} & EventBody;
+
+/**  The kinds of event, tagged by `"event"`. */
+export type EventBody = 
+/**  The job moved to another phase. */
+{ event: "phase"; 
+/**  The new phase. */
+phase: Phase; 
+/**  The label it concerns. */
+label?: string | null; 
+/**  That label's round. */
+round: number; 
+/**  Why, for waits, stops and failures. */
+detail?: string | null } | 
+/**  One planned item was attempted. */
+{ event: "item"; 
+/**  The source's label. */
+label: string; 
+/**  Its round. */
+round: number; 
+/**  Position in the plan, from 1. */
+index: number; 
+/**  Items in the plan. */
+total: number; 
+/**  Path relative to the source root. */
+relative: string; 
+/**  Where it lands. */
+dest: string; 
+/**  What happened. */
+outcome: ItemOutcome; 
+/**  Logical bytes. */
+bytes: number; 
+/**  Why it did not land. */
+detail?: string | null; 
+/**  A partial copy left on the drive. */
+partial?: string | null } | 
+/**  A round's apply finished (or stopped). */
+{ event: "round"; 
+/**  The source's label. */
+label: string; 
+/**  Its round. */
+round: number; 
+/**  Copied or cloned this round. */
+landed: BackupTally; 
+/**  Already on the drive. */
+already_landed: BackupTally; 
+/**  Not landed (including not attempted). */
+not_landed: BackupTally; 
+/**  Every item landed and every receipt was written. */
+complete: boolean; 
+/**  Why the apply stopped early, if it did. */
+stopped?: string | null } | 
+/**  Something failed that the job survives or that ends a label. */
+{ event: "error"; 
+/**  The label it concerns. */
+label?: string | null; 
+/**  The error, with its causes. */
+message: string };
+
 /**
  *  One exclusion or inclusion rule.
  * 
@@ -1800,32 +2424,35 @@ export type Field =
 /**  S3 access key and secret, or a WebDAV password. */
 "secret";
 
-/**  `GET /v1/health`. */
-export type Health = {
-	/**  [`SCHEMA_VERSION`] the service speaks. */
-	schema_version: number,
-	/**  The service binary's version. */
-	version: string,
-	/**  Its process id. */
-	pid: number,
-	/**  Its host. */
-	host: string,
-	/**  The destination it serves. */
-	dest: string,
-	/**
-	 *  The destination's physical disk (`disk14`), when known. Not an
-	 *  identity: macOS renumbers disks on every plug.
-	 */
-	dest_disk_id?: string | null,
-	/**  When it started. */
-	started_at_ms: number,
-	/**  Milliseconds since it started. */
-	uptime_ms: number,
-	/**  The job it is running. */
-	active_job?: string | null,
-	/**  It has been asked to stop and is finishing the current item. */
-	stopping: boolean,
-};
+/**  What kind of filesystem object an item is. */
+export type ItemKind = 
+/**  Regular file. */
+"file" | 
+/**  A macOS package (`.app`, `.photoslibrary`, ...): copied as one unit. */
+"package" | 
+/**  Ordinary directory. */
+"dir" | 
+/**  Symbolic link. */
+"symlink" | 
+/**  Socket, FIFO, or device node. */
+"special";
+
+/**  What happened to one planned item (the `backup apply` outcomes). */
+export type ItemOutcome = 
+/**  Copied and verified. Receipted. */
+"copied" | 
+/**  Cloned from a landed duplicate and verified. Receipted. */
+"cloned" | 
+/**  The drive already holds it. */
+"already_landed" | 
+/**  The source changed after the plan. Skipped. */
+"changed_since_scan" | 
+/**  The source changed while being copied. Not receipted. */
+"changed_during_copy" | 
+/**  Something else is at the destination path. Left alone. */
+"destination_occupied" | 
+/**  Copy or verify failed, or the item was not attempted. */
+"failed";
 
 /**  Where a job is in its life. */
 export type JobState = 
@@ -1851,6 +2478,13 @@ export type JobState =
 "failed" | 
 /**  Stopped by the user and not resumable. What was already uploaded stays. */
 "cancelled";
+
+/**  Where a list of jobs came from. */
+export type JobsSource = 
+/**  The running service: live state. */
+"service" | 
+/**  The drive's files: `state.json` may trail by a few items. */
+"drive";
 
 /**
  *  What kind of filesystem object a node is.
@@ -1880,6 +2514,19 @@ export type Kind =
 "char_device" | 
 /**  A block device. */
 "block_device";
+
+/**  Where one label is. */
+export type LabelStatus = 
+/**  Not started. */
+"pending" | 
+/**  Has had at least one round and is not finished. */
+"running" | 
+/**  Its last round's apply landed everything. */
+"done" | 
+/**  Out of rounds, or a round landed nothing new. */
+"incomplete" | 
+/**  Plan or apply was refused. */
+"failed";
 
 /**
  *  Which hierarchy layout `layout` should compute.
@@ -1962,6 +2609,31 @@ export type Operation =
 /**  Writing or reading a snapshot or catalog artifact. */
 "persist";
 
+/**  Where a job is. */
+export type Phase = 
+/**  Created or re-queued; not started. */
+"queued" | 
+/**  A source root or the destination is missing; polling for it. */
+"waiting_for_mount" | 
+/**  Walking a source and writing a round's plan. */
+"planning" | 
+/**  Copying a round's items. */
+"applying" | 
+/**  Held between items by a `pause`. */
+"paused" | 
+/**  Rebuilding `<dest>/index.parquet`. */
+"indexing" | 
+/**  Every label landed everything its last plan held. */
+"done" | 
+/**  Rounds ran out, or a round landed nothing new, with items not landed. */
+"incomplete" | 
+/**  Stopped by `cancel`. */
+"cancelled" | 
+/**  Stopped by `shutdown` or `SIGTERM`; resumes when a service starts. */
+"stopped" | 
+/**  A label was refused (bad pair, wrong volume, unreadable rules). */
+"failed";
+
 /**
  *  What the settings page shows: the stored preferences plus the running
  *  version, which it needs in the same breath and which is not a preference.
@@ -1998,6 +2670,15 @@ export type Profile = {
 	region: string,
 	/**  What the user must still fill in, in the order it should be asked. */
 	required: Field[],
+};
+
+/**  The outcome of `backup_profile_validate`. */
+export type ProfileValidation = {
+	ok: boolean,
+	/**  The first problem, when not ok. */
+	error: string | null,
+	/**  The resolved profile, when ok. */
+	check: BackupProfileCheck | null,
 };
 
 /**
@@ -2073,6 +2754,79 @@ export type ReadyScanRow = {
 	scan_id: ScanId,
 	root: DisplayPath,
 	summary: ScanSummary,
+};
+
+/**  The whole document. */
+export type Recommendation = Recommendation_Serialize | Recommendation_Deserialize;
+
+/**  The whole document. */
+export type Recommendation_Deserialize = {
+	/**  Always [`RECOMMEND_SCHEMA_VERSION`]. */
+	schema_version: number,
+	/**  The profile's name. */
+	profile: string,
+	/**  Path of the profile file the recommendation was made from. */
+	profile_path: string,
+	/**  Destination root (canonical). */
+	dest_root: string,
+	/**  Milliseconds since the Unix epoch when the recommendation was made. */
+	created_at_ms: number,
+	/**  Floor and review cap the plans used. */
+	floor_allocated: number,
+	/**  Review cap on ranked candidates per source. */
+	review_cap: number,
+	/**  Destination capacity and whether everything wanted fits. */
+	fill: DestFill,
+	/**  Per-source totals, in profile order. */
+	sources: SourceSummary[],
+	/**  Sums over every source. */
+	totals: Totals,
+	/**
+	 *  Ranked rows over every source: allocated bytes descending, then
+	 *  source label, then relative path. At most `--limit` of them.
+	 */
+	rows: Row_Deserialize[],
+	/**  Rows before the limit was applied. */
+	rows_total: number,
+	/**  `rows.len() < rows_total`. */
+	rows_truncated: boolean,
+	/**  Plan warnings, each prefixed with its source label in `text`. */
+	warnings: Warning[],
+};
+
+/**  The whole document. */
+export type Recommendation_Serialize = {
+	/**  Always [`RECOMMEND_SCHEMA_VERSION`]. */
+	schema_version: number,
+	/**  The profile's name. */
+	profile: string,
+	/**  Path of the profile file the recommendation was made from. */
+	profile_path: string,
+	/**  Destination root (canonical). */
+	dest_root: string,
+	/**  Milliseconds since the Unix epoch when the recommendation was made. */
+	created_at_ms: number,
+	/**  Floor and review cap the plans used. */
+	floor_allocated: number,
+	/**  Review cap on ranked candidates per source. */
+	review_cap: number,
+	/**  Destination capacity and whether everything wanted fits. */
+	fill: DestFill,
+	/**  Per-source totals, in profile order. */
+	sources: SourceSummary[],
+	/**  Sums over every source. */
+	totals: Totals,
+	/**
+	 *  Ranked rows over every source: allocated bytes descending, then
+	 *  source label, then relative path. At most `--limit` of them.
+	 */
+	rows: Row_Serialize[],
+	/**  Rows before the limit was applied. */
+	rows_total: number,
+	/**  `rows.len() < rows_total`. */
+	rows_truncated: boolean,
+	/**  Plan warnings, each prefixed with its source label in `text`. */
+	warnings: Warning[],
 };
 
 /**  What a release check found. */
@@ -2475,6 +3229,66 @@ export type RootSource =
 "setting" | 
 /**  Nothing was configured; this is `<app data>/snapshots`. */
 "default";
+
+/**  One ranked row. */
+export type Row = Row_Serialize | Row_Deserialize;
+
+/**  What a run would do with a row. */
+export type RowStatus = 
+/**  Copied by the run. */
+"planned" | 
+/**  Wanted, but past the fill rule this run. */
+"deferred" | 
+/**  Left out; `rule_id` and `reason` say why. */
+"skipped";
+
+/**  One ranked row. */
+export type Row_Deserialize = {
+	/**  1-based rank over every row of every source. */
+	rank: number,
+	/**  Which source the row belongs to. */
+	source_label: string,
+	/**  Path relative to the source root (lossy if not UTF-8). */
+	relative: string,
+	/**  Planned, deferred, or skipped. */
+	status: RowStatus,
+	/**  Object kind. Absent on skipped rows: a skip names a path, not a kind. */
+	kind?: ItemKind | null,
+	/**  Logical bytes. Absent on skipped rows. */
+	logical?: number | null,
+	/**  Allocated bytes on the source; the ranking key. */
+	allocated: number,
+	/**  Files inside a directory roll-up row. */
+	rollup_files?: number | null,
+	/**  Skipped rows: the rule id (`builtin:…` for built-in reasons). */
+	rule_id?: string | null,
+	/**  Skipped rows: the rule's reason. */
+	reason?: string | null,
+};
+
+/**  One ranked row. */
+export type Row_Serialize = {
+	/**  1-based rank over every row of every source. */
+	rank: number,
+	/**  Which source the row belongs to. */
+	source_label: string,
+	/**  Path relative to the source root (lossy if not UTF-8). */
+	relative: string,
+	/**  Planned, deferred, or skipped. */
+	status: RowStatus,
+	/**  Object kind. Absent on skipped rows: a skip names a path, not a kind. */
+	kind?: ItemKind | null,
+	/**  Logical bytes. Absent on skipped rows. */
+	logical?: number | null,
+	/**  Allocated bytes on the source; the ranking key. */
+	allocated: number,
+	/**  Files inside a directory roll-up row. */
+	rollup_files?: number | null,
+	/**  Skipped rows: the rule id (`builtin:…` for built-in reasons). */
+	rule_id?: string | null,
+	/**  Skipped rows: the rule's reason. */
+	reason?: string | null,
+};
 
 /**  Include or exclude. */
 export type RuleAction = 
@@ -3012,6 +3826,22 @@ export type SecretInput = {
 	key_path: string | null,
 };
 
+/**  What runs for a drive. */
+export type ServiceState = 
+/**  A compatible service answers. */
+"running" | 
+/**  A service answers, of another schema or for another drive. */
+"incompatible" | 
+/**
+ *  No answer, but the lock's holder is alive (or another host's). It
+ *  may be busy, or a service from a build that listened elsewhere.
+ */
+"not_answering" | 
+/**  No answer, and the lock's holder is gone: it was killed or crashed. */
+"stale" | 
+/**  No answer and no lock. */
+"stopped";
+
 /**
  *  One file inside a band, for the breakdown.
  * 
@@ -3170,6 +4000,20 @@ export type SourceDisposal =
  */
 "keep";
 
+/**  One source's share of the recommendation. */
+export type SourceSummary = {
+	/**  Backup label. */
+	label: string,
+	/**  Source root (canonical). */
+	root: string,
+	/**  Includes relative to the root; empty means the whole root. */
+	includes: string[],
+	/**  The snapshot identity the plan was built from. */
+	source_snapshot: string,
+	/**  This source's totals. */
+	totals: Totals,
+};
+
 /**  Starting a scan failed before any traversal happened. */
 export type StartError = 
 /**  There is already an active scan. v1 supports exactly one. */
@@ -3289,6 +4133,19 @@ export type StructureDigest = {
 	 *  to be able to say so rather than show it as if it were complete.
 	 */
 	truncated: boolean,
+};
+
+/**  What `backup_submit_job` may set beyond the profile. */
+export type SubmitOptions = {
+	/**  Job id. Default: `job-<created_at_ms>`. */
+	id?: string | null,
+	/**  Rounds per source before it is called incomplete. Default 5. */
+	max_rounds?: number | null,
+	/**
+	 *  Give up waiting for a missing volume after this many ms. Default:
+	 *  wait until it comes back or the job is cancelled.
+	 */
+	mount_timeout_ms?: number | null,
 };
 
 /**  What two folders each have, and where they disagree. */
@@ -3516,6 +4373,33 @@ export type TargetView = {
 export type Theme = 
 /**  Follow macOS, including when it changes while the app is running. */
 "system" | "light" | "dark";
+
+/**  Item counts and bytes. */
+export type Totals = {
+	/**  Items a run copies. */
+	planned_items: number,
+	/**  Their logical bytes. */
+	planned_logical: number,
+	/**  Their allocated bytes. */
+	planned_allocated: number,
+	/**  Items that do not fit under the fill rule this run. */
+	deferred_items: number,
+	/**  Their logical bytes. */
+	deferred_logical: number,
+	/**  Their allocated bytes. */
+	deferred_allocated: number,
+	/**  Candidates a rule (or a change since the scan) left out. */
+	skipped_items: number,
+	/**  Their allocated bytes. */
+	skipped_allocated: number,
+	/**
+	 *  Files no item covers (past the review cap, or a name the plan cannot
+	 *  carry).
+	 */
+	not_considered_items: number,
+	/**  Their allocated bytes. */
+	not_considered_allocated: number,
+};
 
 /**  One file that did not make it, and why. */
 export type TransferFailure = {
@@ -3889,6 +4773,14 @@ export type WaitReason =
 } } | 
 /**  Starting now could push the process past its memory budget. */
 { kind: "memory" };
+
+/**  A labelled caveat on the plan. */
+export type Warning = {
+	/**  Stable code from [`codes`]. */
+	code: string,
+	/**  Human sentence. */
+	text: string,
+};
 
 /* Tauri Specta runtime */
 async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {

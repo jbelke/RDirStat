@@ -33,6 +33,9 @@ pub use fit::{
 pub use layout::{BACKUPS_DIR, LayoutError, mirror_path, validate_label};
 pub use pair::{DiskFacts, PairRefusal, judge_backup_pair};
 pub use plan::{INTENT_BACKUP, PLAN_SCHEMA_VERSION, PlanFile, plan_token};
-pub use profile::{PROFILE_SCHEMA_VERSION, PROFILES_DIR, Profile, ProfileError, ProfileSource, profile_path};
+pub use profile::{
+    PROFILE_SCHEMA_VERSION, PROFILES_DIR, Profile, ProfileCheck, ProfileCheckSource, ProfileError, ProfileSource,
+    profile_path,
+};
 pub use recommend::{RECOMMEND_SCHEMA_VERSION, Recommendation, RowStatus};
 pub use rules::{Rule, RuleAction, Rules, RulesError};

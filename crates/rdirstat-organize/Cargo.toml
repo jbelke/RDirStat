@@ -16,6 +16,12 @@ serde_json = { workspace = true }
 sha2       = { workspace = true }
 thiserror  = { workspace = true }
 toml       = { workspace = true }
+# Off by default: the desktop app turns it on to export the profile and
+# recommendation types to TypeScript.
+specta     = { workspace = true, optional = true }
+
+[features]
+specta = ["dep:specta"]
 
 [dev-dependencies]
 proptest = { workspace = true }

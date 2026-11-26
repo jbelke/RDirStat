@@ -1,4 +1,4 @@
-//! Runs one job to an end: per label, rounds of `build_plan` + `apply_with`
+//! Runs one job to an end: per label, rounds of `build_plan_scoped` + `apply_with`
 //! until a round lands everything, lands nothing new, or the label runs out
 //! of rounds; then the drive's index is rebuilt.
 //!
@@ -18,9 +18,7 @@ use rdirstat_jobs::{
 };
 use rdirstat_organize::{PlanItem, Rules};
 
-use crate::backup::{
-    ApplyHooks, ApplyRequest, DiskProbe, Gate, ItemResult, Outcome, PlanRequest, apply_with, build_plan, now_ms,
-};
+use crate::backup::{ApplyHooks, ApplyRequest, DiskProbe, Gate, ItemResult, Outcome, PlanRequest, apply_with, now_ms};
 
 use super::record::Record;
 
@@ -355,7 +353,12 @@ impl Runner<'_> {
             progress: false,
             rollup: self.spec.rollup,
         };
-        build_plan(&request, self.probe)
+        let scope = crate::backup::plan::PlanScope {
+            includes: source.include.clone(),
+            cap: self.spec.review_cap.unwrap_or(rdirstat_organize::DEFAULT_CAP),
+            dry_run: false,
+        };
+        crate::backup::plan::build_plan_scoped(&request, &scope, self.probe)
     }
 
     fn index(&self) -> Result<(), Halt> {

@@ -20,7 +20,6 @@
 //! Everything here blocks (copies, `fsync`, child processes); callers run it
 //! on a blocking thread.
 
-use std::io::Read as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
@@ -63,39 +62,85 @@ pub(crate) fn sidecar_path() -> Result<PathBuf, BackupError> {
 }
 
 /// Runs `command` to completion within `timeout`, killing it past that.
-/// Returns its exit success, stdout and stderr.
-fn run_bounded(mut command: Command, timeout: Duration, what: &str) -> Result<(bool, String, String), BackupError> {
+/// Returns its exit success, stdout and stderr. Both pipes are drained on
+/// their own threads while it runs, so a large answer cannot fill a pipe
+/// and stall the child.
+pub(crate) fn run_bounded(
+    mut command: Command,
+    timeout: Duration,
+    what: &str,
+) -> Result<(bool, String, String), BackupError> {
+    fn drain(pipe: Option<impl std::io::Read + Send + 'static>) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(mut pipe) = pipe {
+                drop(pipe.read_to_string(&mut text));
+            }
+            text
+        })
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| BackupError::Runner(format!("cannot run {what}: {error}")))?;
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => break Ok(status),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
             Ok(None) => {
                 drop(child.kill());
                 drop(child.wait());
-                return Err(BackupError::Runner(format!(
+                break Err(BackupError::Runner(format!(
                     "{what} did not finish within {} s",
                     timeout.as_secs()
                 )));
             }
-            Err(error) => return Err(BackupError::Runner(format!("waiting for {what}: {error}"))),
+            Err(error) => break Err(BackupError::Runner(format!("waiting for {what}: {error}"))),
         }
     };
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    if let Some(mut pipe) = child.stdout.take() {
-        drop(pipe.read_to_string(&mut stdout));
+    // A pipe stays open while a grandchild holds it (`serve --detach` hands
+    // the service a log file, not these pipes, so this returns promptly).
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    Ok((status?.success(), stdout, stderr))
+}
+
+/// Runs the bundled sidecar with `args` and decodes its stdout as JSON.
+///
+/// # Errors
+///
+/// [`BackupError::Runner`] when the sidecar is missing, fails (carrying its
+/// stderr, e.g. why a profile does not resolve), runs past `timeout`, or
+/// prints something that is not a `T`.
+pub(crate) fn sidecar_json<T: serde::de::DeserializeOwned>(
+    args: &[&std::ffi::OsStr],
+    timeout: Duration,
+) -> Result<T, BackupError> {
+    let sidecar = sidecar_path()?;
+    let mut command = Command::new(&sidecar);
+    command.args(args);
+    let what = format!(
+        "{SIDECAR_NAME} {}",
+        args.iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let (ok, stdout, stderr) = run_bounded(command, timeout, &what)?;
+    if !ok {
+        // The CLI prints `rdirstat: <error with causes>`; the prefix is noise
+        // in the app.
+        let reason = stderr.trim();
+        let reason = reason.strip_prefix("rdirstat: ").unwrap_or(reason);
+        return Err(BackupError::Runner(reason.to_owned()));
     }
-    if let Some(mut pipe) = child.stderr.take() {
-        drop(pipe.read_to_string(&mut stderr));
-    }
-    Ok((status.success(), stdout, stderr))
+    serde_json::from_str(&stdout)
+        .map_err(|error| BackupError::Runner(format!("{what} printed no usable JSON: {error}")))
 }
 
 /// Asks `binary` which version and job schema it is.

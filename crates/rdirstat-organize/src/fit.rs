@@ -63,6 +63,7 @@ pub mod codes {
 
 /// What kind of filesystem object an item is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "lowercase")]
 pub enum ItemKind {
     /// Regular file.
@@ -218,6 +219,7 @@ pub struct SkippedItem {
 
 /// A labelled caveat on the plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Warning {
     /// Stable code from [`codes`].
     pub code: String,

@@ -252,17 +252,24 @@ pub fn valid_job_id(id: &str) -> bool {
 /// One source of a job: a volume (or directory) root and the label it is
 /// mirrored under, `<dest>/Backups/<label>/`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupJobSource"))]
 pub struct JobSource {
     /// Name under `Backups/`, e.g. `mac-data`.
     pub label: String,
     /// The source root plan paths are relative to.
     pub root: PathBuf,
+    /// Directories and single files under `root`, relative to it, to back
+    /// up instead of the whole root (a profile's `include`). Empty: the
+    /// whole root. A service without [`FEATURE_JOB_INCLUDES`] in
+    /// [`Health::features`] ignores this field and backs up the whole root,
+    /// so a client must not send it to one.
+    #[serde(default)]
+    pub include: Vec<PathBuf>,
 }
 
 /// `job.json`: what a job backs up. Written once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupJobSpec"))]
 pub struct JobSpec {
     /// [`SCHEMA_VERSION`] at the time of writing.
     pub schema_version: u32,
@@ -282,6 +289,10 @@ pub struct JobSpec {
     pub floor: u64,
     /// Plan + apply rounds per label before it is called incomplete.
     pub max_rounds: u32,
+    /// Review cap on ranked candidates per source and round. `None`: the
+    /// planner's default.
+    #[serde(default)]
+    pub review_cap: Option<usize>,
     /// Cover what is not planned on its own with directory roll-ups.
     pub rollup: bool,
     /// Primary catalog directory. `None`: the desktop app's data dir.
@@ -301,7 +312,7 @@ pub struct JobSpec {
 /// `POST /v1/jobs` body. The service fills in the id (when absent), the
 /// destination (its own), and the defaults.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupNewJob"))]
 pub struct NewJob {
     /// Must be a [`valid_job_id`] not already used. Default:
     /// `job-<created_at_ms>`.
@@ -321,6 +332,9 @@ pub struct NewJob {
     /// Default [`DEFAULT_MAX_ROUNDS`].
     #[serde(default)]
     pub max_rounds: Option<u32>,
+    /// See [`JobSpec::review_cap`].
+    #[serde(default)]
+    pub review_cap: Option<usize>,
     /// Default `true`.
     #[serde(default)]
     pub rollup: Option<bool>,
@@ -343,7 +357,7 @@ pub const DEFAULT_FLOOR: u64 = 100 << 20;
 
 /// Where a job is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupPhase"))]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     /// Created or re-queued; not started.
@@ -388,7 +402,7 @@ impl Phase {
 
 /// Where one label is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupLabelStatus"))]
 #[serde(rename_all = "snake_case")]
 pub enum LabelStatus {
     /// Not started.
@@ -405,7 +419,7 @@ pub enum LabelStatus {
 
 /// Per-label progress in [`JobState::labels`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupLabelProgress"))]
 pub struct LabelProgress {
     /// The source's label.
     pub label: String,
@@ -431,7 +445,7 @@ pub struct LabelProgress {
 
 /// What happened to one planned item (the `backup apply` outcomes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupItemOutcome"))]
 #[serde(rename_all = "snake_case")]
 pub enum ItemOutcome {
     /// Copied and verified. Receipted.
@@ -466,7 +480,7 @@ impl ItemOutcome {
 
 /// Items and logical bytes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupTally"))]
 pub struct Tally {
     /// How many.
     pub items: u64,
@@ -476,7 +490,7 @@ pub struct Tally {
 
 /// `state.json`, and the state in [`JobSummary`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupJobState"))]
 pub struct JobState {
     /// [`SCHEMA_VERSION`].
     pub schema_version: u32,
@@ -560,7 +574,7 @@ impl JobState {
 
 /// One line of `events.jsonl`, and one entry of [`EventsPage::events`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupEvent"))]
 pub struct Event {
     /// From 1, one more than the previous line's.
     pub seq: u64,
@@ -573,7 +587,7 @@ pub struct Event {
 
 /// The kinds of event, tagged by `"event"`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupEventBody"))]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum EventBody {
     /// The job moved to another phase.
@@ -644,7 +658,7 @@ pub enum EventBody {
 
 /// `control`: what the runner should do at the next item boundary.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupControl"))]
 #[serde(rename_all = "snake_case")]
 pub enum Control {
     /// Keep going.
@@ -684,7 +698,7 @@ impl Control {
 /// pid that is not running. A lock from another host cannot be judged and
 /// is never taken over automatically.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupLockInfo"))]
 pub struct LockInfo {
     /// The service's process id.
     pub pid: u32,
@@ -700,7 +714,7 @@ pub struct LockInfo {
 
 /// What `rdirstat backup version` prints (one JSON line).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupRunnerVersion"))]
 pub struct RunnerVersion {
     /// The binary's version.
     pub version: String,
@@ -710,7 +724,7 @@ pub struct RunnerVersion {
 
 /// `GET /v1/health`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupHealth"))]
 pub struct Health {
     /// [`SCHEMA_VERSION`] the service speaks.
     pub schema_version: u32,
@@ -735,11 +749,19 @@ pub struct Health {
     pub active_job: Option<String>,
     /// It has been asked to stop and is finishing the current item.
     pub stopping: bool,
+    /// Optional behaviour this service supports within [`SCHEMA_VERSION`],
+    /// e.g. [`FEATURE_JOB_INCLUDES`]. Absent from older services.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
+
+/// [`Health::features`]: the service plans only [`JobSource::include`] when
+/// it is given.
+pub const FEATURE_JOB_INCLUDES: &str = "job_includes";
 
 /// One job as the API (and `backup jobs`) reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupJobSummary"))]
 pub struct JobSummary {
     /// `job.json`.
     pub spec: JobSpec,
@@ -755,7 +777,7 @@ pub struct JobSummary {
 
 /// `GET /v1/jobs`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupJobList"))]
 pub struct JobList {
     /// By id.
     pub jobs: Vec<JobSummary>,
@@ -763,7 +785,7 @@ pub struct JobList {
 
 /// `GET /v1/jobs/{id}/events`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupEventsPage"))]
 pub struct EventsPage {
     /// Events with `seq > after`, in order, at most `limit`.
     pub events: Vec<Event>,
@@ -777,7 +799,7 @@ pub struct EventsPage {
 
 /// The body of every error answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupApiError"))]
 pub struct ApiError {
     /// What went wrong, for a person.
     pub error: String,
@@ -818,10 +840,12 @@ mod tests {
             sources: vec![JobSource {
                 label: "a".into(),
                 root: "/s".into(),
+                include: Vec::new(),
             }],
             rules: None,
             floor: 1,
             max_rounds: 1,
+            review_cap: None,
             rollup: true,
             catalog: None,
             mount_poll_ms: 1,

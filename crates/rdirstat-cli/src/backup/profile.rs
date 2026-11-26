@@ -295,6 +295,52 @@ pub(crate) fn run_plan(path: &Path, args: &crate::cli::BackupPlanArgs) -> Result
     Ok(std::process::ExitCode::SUCCESS)
 }
 
+/// `backup check-profile`: [`resolve`] alone, reported as a
+/// [`rdirstat_organize::ProfileCheck`].
+pub(crate) fn run_check(args: &crate::cli::BackupProfileArgs) -> Result<std::process::ExitCode> {
+    let resolved = resolve(&load(&args.profile)?, &args.profile, &super::SystemProbe)?;
+    let check = check_of(&resolved);
+    let text = if args.json {
+        let mut text = serde_json::to_string(&check)?;
+        text.push('\n');
+        text
+    } else {
+        use std::fmt::Write as _;
+        let mut text = format!("Profile {} -> {}: ok\n", check.name, check.dest.display());
+        for source in &check.sources {
+            let _ = writeln!(
+                text,
+                "  {}  {}  ({} includes)",
+                source.label,
+                source.root.display(),
+                source.includes.len()
+            );
+        }
+        text
+    };
+    super::print(&text)?;
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// The report of a resolved profile.
+pub(crate) fn check_of(resolved: &Resolved) -> rdirstat_organize::ProfileCheck {
+    rdirstat_organize::ProfileCheck {
+        name: resolved.name.clone(),
+        dest: resolved.dest.clone(),
+        floor_allocated: resolved.floor,
+        review_cap: resolved.cap,
+        sources: resolved
+            .sources
+            .iter()
+            .map(|source| rdirstat_organize::ProfileCheckSource {
+                label: source.label.clone(),
+                root: source.root.clone(),
+                includes: source.includes.clone(),
+            })
+            .collect(),
+    }
+}
+
 /// `backup recommend --profile <path>`.
 pub(crate) fn run_recommend(args: &crate::cli::BackupRecommendArgs) -> Result<std::process::ExitCode> {
     let profile = resolve(&load(&args.profile)?, &args.profile, &super::SystemProbe)?;
@@ -507,6 +553,15 @@ globs = ["**/cache"]
             vec![PathBuf::from("disk.iso"), PathBuf::from("docs")]
         );
         assert!(resolved.sources[1].includes.is_empty());
+        let check = super::check_of(&resolved);
+        assert_eq!(check.name, resolved.name);
+        assert_eq!(check.dest, resolved.dest);
+        assert_eq!(check.sources[0].includes, resolved.sources[0].includes);
+        let text = serde_json::to_string(&check).unwrap();
+        assert_eq!(
+            serde_json::from_str::<rdirstat_organize::ProfileCheck>(&text).unwrap(),
+            check
+        );
 
         let mut missing = fx.profile();
         missing.sources[0].include = vec![PathBuf::from("nope")];

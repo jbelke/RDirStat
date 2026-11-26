@@ -58,6 +58,11 @@ pub(crate) enum BackupCommand {
     /// defer, and skip, largest first, with the skip rule and reason. Writes
     /// nothing and applies nothing.
     Recommend(BackupRecommendArgs),
+    /// Resolve and check a profile against the filesystem without planning:
+    /// the destination and roots exist, every source is on another disk
+    /// than the destination, includes exist under their roots, the rules
+    /// file parses. Exits 1 with the first problem.
+    CheckProfile(BackupProfileArgs),
     /// Run the backup service for one destination drive: hold its lock, run
     /// jobs (plan + apply rounds until everything lands, waiting for a
     /// dropped drive), and answer the /v1 API on a Unix socket in a per-user
@@ -142,6 +147,18 @@ pub(crate) struct BackupControlArgs {
     /// The job (not for `shutdown`).
     #[arg(value_name = "JOB_ID", required_if_eq_any = [("action", "pause"), ("action", "resume"), ("action", "cancel")])]
     pub(crate) job: Option<String>,
+}
+
+/// `rdirstat backup check-profile` options.
+#[derive(Debug, Args)]
+pub(crate) struct BackupProfileArgs {
+    /// The profile file (`<dest>/.rdirstat/profiles/<name>.toml`).
+    #[arg(long, value_name = "FILE")]
+    pub(crate) profile: PathBuf,
+
+    /// Print one JSON document (`rdirstat_organize::ProfileCheck`) instead of text.
+    #[arg(long)]
+    pub(crate) json: bool,
 }
 
 /// `rdirstat backup recommend` options.

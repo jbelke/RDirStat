@@ -31,7 +31,20 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 import {
   commands,
+  type BackupAction,
+  type BackupDrive,
+  type BackupEventsEvent,
+  type BackupEventsPage,
+  type BackupHealth,
+  type BackupJobSummary,
+  type BackupJobs,
+  type BackupProfile,
+  type BackupProfileEntry,
   type CancelState,
+  type ControlOutcome,
+  type ProfileValidation,
+  type Recommendation_Serialize,
+  type SubmitOptions,
   type ErrorClass,
   type Kind,
   type LayoutKind,
@@ -2322,5 +2335,155 @@ export async function fileDigest(generation: number, node: number): Promise<Cont
   return {
     digest: view.digest,
     bytes: num(view.bytes),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Backup: the drive-resident backup service
+// ---------------------------------------------------------------------------
+//
+// Thin wrappers: each unwraps one command and returns the generated type. The
+// TRANSFER > Backup page (rds-fkk.14.5) owns its view models. Byte counts and
+// seqs are `u64` on the wire and arrive as `number` (see `num()` above).
+
+export type {
+  BackupAction,
+  BackupDrive,
+  BackupEventsEvent,
+  BackupEventsPage,
+  BackupHealth,
+  BackupJobSummary,
+  BackupJobs,
+  BackupProfile,
+  BackupProfileEntry,
+  ControlOutcome as BackupControlOutcome,
+  ProfileValidation as BackupProfileValidation,
+  Recommendation_Serialize as BackupRecommendation,
+  SubmitOptions as BackupSubmitOptions,
+} from "@/lib/bindings";
+
+/** Name of the event `backup_watch` (and app start) forwards job events on. */
+export const BACKUP_EVENTS_EVENT = "backup:events";
+
+/** Mounted drives with backup records: service state, jobs, profiles. */
+export async function backupServices(): Promise<readonly BackupDrive[]> {
+  return unwrap("backup_services", commands.backupServices());
+}
+
+/** Starts the drive's backup service (installing it on the drive), or returns the running one. */
+export async function backupStartService(dest: string): Promise<BackupHealth> {
+  return unwrap("backup_start_service", commands.backupStartService(dest));
+}
+
+/** The drive's jobs, from its service or, when none answers, its files. */
+export async function backupJobs(dest: string): Promise<BackupJobs> {
+  return unwrap("backup_jobs", commands.backupJobs(dest));
+}
+
+/** Queues a job from a saved profile (starting the service if needed) and follows its events. */
+export async function backupSubmitJob(
+  dest: string,
+  profile: string,
+  options: SubmitOptions = {},
+): Promise<BackupJobSummary> {
+  return unwrap("backup_submit_job", commands.backupSubmitJob(dest, profile, options));
+}
+
+/** Pause, resume or cancel `job`, or shut the drive's service down (`job` unused). */
+export async function backupControl(
+  dest: string,
+  action: BackupAction,
+  job: string | null = null,
+): Promise<ControlOutcome> {
+  return unwrap("backup_control", commands.backupControl(dest, action, job));
+}
+
+/** One long-poll page of a job's events after `after` (or the drive's log when no service answers). */
+export async function backupEvents(
+  dest: string,
+  job: string,
+  after: number,
+  waitSecs: number | null = null,
+  limit: number | null = null,
+): Promise<BackupEventsPage> {
+  return unwrap("backup_events", commands.backupEvents(dest, job, after, waitSecs, limit));
+}
+
+/** Forwards a job's events as `backup:events`, after `after` (default: only new ones). */
+export async function backupWatch(dest: string, job: string, after: number | null = null): Promise<boolean> {
+  return unwrap("backup_watch", commands.backupWatch(dest, job, after));
+}
+
+/** Stops forwarding a job's events. */
+export async function backupUnwatch(dest: string, job: string): Promise<boolean> {
+  return unwrap("backup_unwatch", commands.backupUnwatch(dest, job));
+}
+
+/** The drive's profiles; one that does not parse carries its error. */
+export async function backupProfiles(dest: string): Promise<readonly BackupProfileEntry[]> {
+  return unwrap("backup_profiles", commands.backupProfiles(dest));
+}
+
+export async function backupProfileLoad(dest: string, name: string): Promise<BackupProfile> {
+  return unwrap("backup_profile_load", commands.backupProfileLoad(dest, name));
+}
+
+/** Writes the profile to its drive after the checks that need no filesystem. Returns the path. */
+export async function backupProfileSave(profile: BackupProfile): Promise<string> {
+  return unwrap("backup_profile_save", commands.backupProfileSave(profile));
+}
+
+/** Checks a saved profile against the disks the way the service will. */
+export async function backupProfileValidate(dest: string, name: string): Promise<ProfileValidation> {
+  return unwrap("backup_profile_validate", commands.backupProfileValidate(dest, name));
+}
+
+/** Dry run of a profile: what a run would copy, defer and skip. Long-running: walks the sources. */
+export async function backupRecommend(
+  dest: string,
+  name: string,
+  limit: number | null = null,
+): Promise<Recommendation_Serialize> {
+  return unwrap("backup_recommend", commands.backupRecommend(dest, name, limit));
+}
+
+/**
+ * What the drive holds per source (`rdirstat backup status --json`), parsed.
+ * Its shape belongs to the CLI, so it is `unknown` here; reads Parquet only.
+ */
+export async function backupIndexStatus(dest: string, sourceLabel: string | null = null): Promise<unknown> {
+  return JSON.parse(await unwrap("backup_index_status", commands.backupIndexStatus(dest, sourceLabel))) as unknown;
+}
+
+/**
+ * Calls `onEvents` for every `backup:events` payload. The backend forwards
+ * each job's events in `seq` order without gaps or repeats; this drops any
+ * page whose events it has already seen for that job, so a re-subscribe
+ * never double-counts. Returns the unsubscribe function.
+ */
+export function subscribeBackupEvents(onEvents: (event: BackupEventsEvent) => void): () => void {
+  let disposed = false;
+  let unlisten: UnlistenFn | null = null;
+  const lastSeq = new Map<string, number>();
+
+  void listen<BackupEventsEvent>(BACKUP_EVENTS_EVENT, (event) => {
+    if (disposed) return;
+    const payload = event.payload;
+    const key = `${payload.dest}\u0000${payload.job_id}`;
+    const seen = lastSeq.get(key) ?? 0;
+    const fresh = payload.events.filter((item) => num(item.seq) > seen);
+    const newest = fresh.at(-1);
+    if (newest !== undefined) lastSeq.set(key, num(newest.seq));
+    if (fresh.length === 0 && payload.events.length > 0) return;
+    onEvents({ ...payload, events: fresh });
+  }).then((stop) => {
+    if (disposed) stop();
+    else unlisten = stop;
+  });
+
+  return () => {
+    disposed = true;
+    unlisten?.();
+    unlisten = null;
   };
 }

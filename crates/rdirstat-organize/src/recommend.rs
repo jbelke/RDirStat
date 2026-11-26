@@ -20,6 +20,7 @@ pub const RECOMMEND_SCHEMA_VERSION: u32 = 1;
 
 /// The whole document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Recommendation {
     /// Always [`RECOMMEND_SCHEMA_VERSION`].
     pub schema_version: u32,
@@ -58,6 +59,7 @@ pub struct Recommendation {
 /// The rule: a plan never takes the destination to `reserve_pressure` or
 /// beyond.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct DestFill {
     /// Destination capacity in bytes.
     pub total_bytes: u64,
@@ -82,6 +84,7 @@ pub struct DestFill {
 
 /// One source's share of the recommendation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct SourceSummary {
     /// Backup label.
     pub label: String,
@@ -97,6 +100,7 @@ pub struct SourceSummary {
 
 /// Item counts and bytes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Totals {
     /// Items a run copies.
     pub planned_items: u64,
@@ -141,6 +145,7 @@ impl Totals {
 
 /// What a run would do with a row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum RowStatus {
     /// Copied by the run.
@@ -153,6 +158,7 @@ pub enum RowStatus {
 
 /// One ranked row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Row {
     /// 1-based rank over every row of every source.
     pub rank: u64,

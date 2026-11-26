@@ -60,7 +60,7 @@ mod updates;
 mod verify;
 mod volumes;
 
-pub use crate::events::{ScanProgressEvent, TransferProgressEvent};
+pub use crate::events::{BackupEventsEvent, ScanProgressEvent, TransferProgressEvent};
 pub use crate::state::AppState;
 
 /// Commands that answer with raw bytes instead of JSON. Exported as a constant
@@ -150,9 +150,26 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::transfer_resume,
             commands::transfer_cancel,
             commands::transfers_clear,
+            backup::backup_services,
             backup::backup_start_service,
+            backup::backup_jobs,
+            backup::backup_submit_job,
+            backup::backup_control,
+            backup::backup_events,
+            backup::backup_watch,
+            backup::backup_unwatch,
+            backup::backup_profiles,
+            backup::backup_profile_load,
+            backup::backup_profile_save,
+            backup::backup_profile_validate,
+            backup::backup_recommend,
+            backup::backup_index_status,
         ])
-        .events(tauri_specta::collect_events![ScanProgressEvent, TransferProgressEvent])
+        .events(tauri_specta::collect_events![
+            ScanProgressEvent,
+            TransferProgressEvent,
+            BackupEventsEvent
+        ])
         // Argument types for the two binary commands, so the frontend still has
         // generated types for a hand-written `invoke<ArrayBuffer>` call.
         .typ::<rdirstat_core::LayoutKind>()
@@ -377,6 +394,7 @@ pub fn run() -> tauri::Result<()> {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
+        .manage(backup::Watchers::default())
         .setup(move |app| {
             builder.mount_events(app);
             // The transfer queue needs the app data directory, which needs the
@@ -396,6 +414,9 @@ pub fn run() -> tauri::Result<()> {
             }
             restore_last_scan(app.handle().clone());
             start_schedule_timer(app.handle().clone());
+            // Follow every unfinished backup job on the mounted drives: a
+            // backup keeps running while the app is closed.
+            backup::reattach(app.handle().clone());
             Ok(())
         })
         // Closing the main window hides it — the app stays in the menu bar and

@@ -33,6 +33,29 @@ pub struct ScanProgressEvent(pub ScanProgress);
 #[tauri_specta(event_name = "transfer:progress")]
 pub struct TransferProgressEvent(pub TransferJob);
 
+/// New events of one backup job, and whether its service answers.
+///
+/// Emitted by the follower in `backup::watch` for each page the service's
+/// long-poll returns, in `seq` order with no gaps or repeats, and once
+/// whenever the service stops or starts answering (`connected`). While it
+/// does not answer, the page comes from the drive's own `events.jsonl`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, specta::Type, tauri_specta::Event)]
+#[tauri_specta(event_name = "backup:events")]
+pub struct BackupEventsEvent {
+    /// The drive's mount point.
+    pub dest: String,
+    /// The job.
+    pub job_id: String,
+    /// New events, oldest first; may be empty.
+    pub events: Vec<rdirstat_jobs::Event>,
+    /// The highest `seq` the job has.
+    pub last_seq: u64,
+    /// The job is in a terminal phase.
+    pub finished: bool,
+    /// The service answered this time.
+    pub connected: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,6 +64,11 @@ mod tests {
     #[test]
     fn the_event_name_matches_the_contract_constant() {
         assert_eq!(ScanProgressEvent::NAME, rdirstat_core::SCAN_PROGRESS_EVENT);
+    }
+
+    #[test]
+    fn the_backup_event_name_is_namespaced_like_the_others() {
+        assert_eq!(BackupEventsEvent::NAME, "backup:events");
     }
 
     #[test]

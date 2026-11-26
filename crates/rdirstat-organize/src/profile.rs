@@ -237,6 +237,38 @@ pub fn include_relative(root: &Path, include: &Path) -> Option<PathBuf> {
     (!out.as_os_str().is_empty()).then_some(out)
 }
 
+/// A profile after every path was resolved and checked against the
+/// filesystem (`rdirstat backup check-profile --json`): canonical roots,
+/// includes that exist and stay under their root after symlinks, relative
+/// to it, with nested ones dropped; the destination on another disk than
+/// every source; the rules file parsed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupProfileCheck"))]
+pub struct ProfileCheck {
+    /// The profile's name.
+    pub name: String,
+    /// Canonical destination root.
+    pub dest: PathBuf,
+    /// The profile's floor.
+    pub floor_allocated: u64,
+    /// The profile's review cap.
+    pub review_cap: usize,
+    /// In profile order.
+    pub sources: Vec<ProfileCheckSource>,
+}
+
+/// One source of a [`ProfileCheck`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type), serde(rename = "BackupProfileCheckSource"))]
+pub struct ProfileCheckSource {
+    /// The source's label.
+    pub label: String,
+    /// Canonical root.
+    pub root: PathBuf,
+    /// Relative to `root`. Empty: the whole root.
+    pub includes: Vec<PathBuf>,
+}
+
 /// `<dest>/.rdirstat/profiles/<name>.toml`.
 #[must_use]
 pub fn profile_path(dest: &Path, name: &str) -> PathBuf {

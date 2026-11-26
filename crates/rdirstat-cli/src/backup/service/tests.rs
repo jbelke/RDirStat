@@ -129,6 +129,7 @@ impl Fixture {
             sources: vec![JobSource {
                 label: "mac-data".into(),
                 root: self.source.clone(),
+                include: Vec::new(),
             }],
             floor: Some(8192),
             mount_poll_ms: Some(20),
@@ -391,10 +392,8 @@ fn a_stale_socket_is_replaced_once_the_lock_proves_its_service_dead() {
     std::fs::create_dir_all(fixture.socket().parent().unwrap()).unwrap();
     drop(std::os::unix::net::UnixListener::bind(fixture.socket()).unwrap());
     assert!(fixture.socket().exists());
-    assert!(matches!(
-        get::<Health>(&fixture.socket(), "/v1/health"),
-        Err(CallError::Unreachable(_))
-    ));
+    let dead = get::<Health>(&fixture.socket(), "/v1/health");
+    assert!(matches!(dead, Err(CallError::Unreachable(_))), "{dead:?}");
 
     let running = fixture.start(None);
     let health: Health = get(&fixture.socket(), "/v1/health").expect("health over the new socket");
@@ -408,6 +407,40 @@ fn a_stale_socket_is_replaced_once_the_lock_proves_its_service_dead() {
         .mode()
         & 0o777;
     assert_eq!(dir_mode, 0o700, "a pre-existing socket directory is tightened to 0700");
+    running.shutdown();
+    running.join().unwrap();
+}
+
+#[test]
+fn a_job_with_includes_lands_only_what_they_name() {
+    let fixture = Fixture::new();
+    let running = fixture.start(None);
+    let health: Health = get(&fixture.socket(), "/v1/health").unwrap();
+    assert!(health.features.iter().any(|f| f == rdirstat_jobs::FEATURE_JOB_INCLUDES));
+
+    let mut job = fixture.new_job("narrow");
+    job.sources[0].include = vec![PathBuf::from("Documents"), PathBuf::from("./notes.txt")];
+    job.floor = Some(1);
+    job.review_cap = Some(100);
+    let created = fixture.submit(&job);
+    assert_eq!(
+        created.spec.sources[0].include,
+        vec![PathBuf::from("Documents"), PathBuf::from("notes.txt")],
+        "includes are stored normalised"
+    );
+    assert_eq!(created.spec.review_cap, Some(100));
+    fixture.wait_phase("narrow", Phase::Done);
+    let backups = fixture.dest.join("Backups/mac-data");
+    assert!(backups.join("Documents/report.pdf").is_file());
+    assert!(!backups.join("Movies").exists(), "Movies was not included");
+    assert!(!backups.join("Music").exists(), "Music was not included");
+
+    let mut bad = fixture.new_job("escape");
+    bad.sources[0].include = vec![PathBuf::from("../elsewhere")];
+    assert!(matches!(
+        post::<JobSummary>(&fixture.socket(), "/v1/jobs", Some(&serde_json::to_vec(&bad).unwrap())),
+        Err(CallError::Api { status: 400, .. })
+    ));
     running.shutdown();
     running.join().unwrap();
 }
