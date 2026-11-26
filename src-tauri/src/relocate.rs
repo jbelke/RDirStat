@@ -804,20 +804,34 @@ fn preflight_symlink(source: &Path) -> Result<(), RelocateError> {
     probe_name.push(".rdirstat-link-check");
     let probe = parent.join(probe_name);
 
-    // A leftover from an interrupted earlier run must not fail this run.
-    let _ = fs::remove_file(&probe);
+    // A leftover from an interrupted earlier run must not fail this run, but
+    // only a link this code made (pointing at `source`) is ours to remove.
+    // Anything else under that name is the user's and is left alone.
+    if let Ok(meta) = fs::symlink_metadata(&probe) {
+        let ours = meta.file_type().is_symlink() && fs::read_link(&probe).is_ok_and(|target| target == source);
+        if !ours {
+            return Err(RelocateError::SymlinkFailed {
+                path: display(source),
+                reason: format!(
+                    "{} already exists and is not a link this app left behind; rename or remove it. \
+                     Nothing was moved or deleted",
+                    probe.display()
+                ),
+            });
+        }
+        let _ = fs::remove_file(&probe);
+    }
 
-    let outcome = std::os::unix::fs::symlink(source, &probe).map_err(|error| RelocateError::SymlinkFailed {
+    std::os::unix::fs::symlink(source, &probe).map_err(|error| RelocateError::SymlinkFailed {
         path: display(source),
         reason: format!(
             "a link cannot be created in {}: {error}. Nothing was moved or deleted",
             parent.display()
         ),
-    });
-    // Remove it whether or not the create reported success, so a partial
-    // failure cannot leave the probe behind.
+    })?;
+    // Only the link created just now is removed; a failed create made nothing.
     let _ = fs::remove_file(&probe);
-    outcome
+    Ok(())
 }
 
 /// Moves one path to the Trash.
@@ -1656,6 +1670,31 @@ mod tests {
             .filter(|name| name.contains("rdirstat-link-check"))
             .collect();
         assert!(leftovers.is_empty(), "probe left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn the_symlink_preflight_never_removes_a_user_file_under_the_probe_name() {
+        let directory = scratch();
+        let source = directory.path().join("Photos");
+        fs::create_dir(&source).expect("mkdir");
+        let probe = directory.path().join("Photos.rdirstat-link-check");
+
+        fs::write(&probe, b"the user's own file").expect("write");
+        let error = preflight_symlink(&source).expect_err("refused");
+        assert!(matches!(error, RelocateError::SymlinkFailed { .. }), "got {error:?}");
+        assert_eq!(fs::read(&probe).expect("still there"), b"the user's own file");
+        fs::remove_file(&probe).expect("rm");
+
+        // A link elsewhere is not ours either.
+        std::os::unix::fs::symlink("/somewhere/else", &probe).expect("link");
+        preflight_symlink(&source).expect_err("refused");
+        assert_eq!(fs::read_link(&probe).expect("kept"), Path::new("/somewhere/else"));
+        fs::remove_file(&probe).expect("rm");
+
+        // Our own leftover from an interrupted run is cleared and the check passes.
+        std::os::unix::fs::symlink(&source, &probe).expect("link");
+        preflight_symlink(&source).expect("an own leftover does not fail the run");
+        assert!(fs::symlink_metadata(&probe).is_err(), "leftover cleared");
     }
 
     #[test]
