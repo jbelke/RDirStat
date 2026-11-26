@@ -38,6 +38,7 @@ import { RelocateDialog } from "@/components/RelocateDialog";
 import { SelectionActions } from "@/components/SelectionActions";
 import { ConfigRoute, type ConfigTab } from "@/components/ConfigRoute";
 import { AUTHOR_URL } from "@/components/StoragePanel";
+import { BackupRoute } from "@/components/BackupRoute";
 import { SyncRoute } from "@/components/SyncRoute";
 import { TransfersRoute } from "@/components/TransfersRoute";
 import { CategoryLegend } from "@/components/canvas/CategoryLegend";
@@ -175,6 +176,9 @@ const RAIL_GROUPS: readonly RailGroup[] = [
       // the two share a promise but not a destination picker, a credential
       // model, or a lifetime — a local copy returns, a remote one is queued.
       { id: "transfers", label: "Remote transfers", needsScan: false },
+      // Drive-resident and long-lived: a backup job outlives the app, which
+      // is why it is not a mode of Sync folders.
+      { id: "backup", label: "Backup", needsScan: false },
     ],
   },
 ];
@@ -947,6 +951,7 @@ export function AppShell() {
 
           {route === "sync" && <SyncRoute />}
           {route === "transfers" && <TransfersRoute onAddDestination={() => openConfig("remote")} />}
+          {route === "backup" && <BackupRoute />}
 
           {route === "storage" && (
             <ConfigRoute

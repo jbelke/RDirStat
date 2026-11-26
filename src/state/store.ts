@@ -38,6 +38,7 @@ export type Route =
   | "dupes"
   | "sync"
   | "transfers"
+  | "backup"
   | "storage";
 
 /**
