@@ -112,6 +112,11 @@ pub(crate) fn run(command: &BackupCommand) -> Result<ExitCode> {
     }
 }
 
+/// The API socket of `dest`'s service (see [`service::socket_for`]).
+fn local_socket(dest: &Path) -> Result<PathBuf> {
+    service::socket_for(dest, &SystemProbe, &service::LocalDirs::from_env())
+}
+
 /// How long a CLI call to the service may take.
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -125,6 +130,7 @@ fn run_serve(args: &BackupServeArgs) -> Result<ExitCode> {
         probe: std::sync::Arc::new(SystemProbe),
         default_catalog: Some(catalog_dir(args.catalog.as_deref())?),
         app_catalog: catalog_dir(None).ok(),
+        local: service::LocalDirs::from_env(),
         signals: true,
         on_item: None,
     })?;
@@ -159,8 +165,8 @@ fn detach(dest: &Path, catalog: Option<&Path>) -> Result<ExitCode> {
         .stdout(log.try_clone()?)
         .stderr(log);
     service::new_session(&mut command);
+    let socket = local_socket(dest)?;
     let mut child = command.spawn().context("cannot start the backup service")?;
-    let socket = rdirstat_jobs::socket_path(dest);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
         if let Ok(health) = service::client::call::<rdirstat_jobs::Health>(
@@ -196,7 +202,7 @@ fn detach(dest: &Path, catalog: Option<&Path>) -> Result<ExitCode> {
 
 fn run_jobs(args: &BackupDestArgs) -> Result<ExitCode> {
     let dest = std::fs::canonicalize(&args.dest).with_context(|| format!("cannot resolve {}", args.dest.display()))?;
-    let socket = rdirstat_jobs::socket_path(&dest);
+    let socket = local_socket(&dest)?;
     let (list, source) =
         match service::client::call::<rdirstat_jobs::JobList>(&socket, "GET", "/v1/jobs", None, CALL_TIMEOUT) {
             Ok(list) => (list, "service"),
@@ -219,13 +225,8 @@ fn run_submit(args: &BackupSubmitArgs) -> Result<ExitCode> {
     let body = std::fs::read(&args.job).with_context(|| format!("cannot read {}", args.job.display()))?;
     serde_json::from_slice::<rdirstat_jobs::NewJob>(&body)
         .with_context(|| format!("{} is not a job", args.job.display()))?;
-    let summary: rdirstat_jobs::JobSummary = service::client::call(
-        &rdirstat_jobs::socket_path(&dest),
-        "POST",
-        "/v1/jobs",
-        Some(&body),
-        CALL_TIMEOUT,
-    )?;
+    let summary: rdirstat_jobs::JobSummary =
+        service::client::call(&local_socket(&dest)?, "POST", "/v1/jobs", Some(&body), CALL_TIMEOUT)?;
     if args.json {
         print(&format!("{}\n", serde_json::to_string_pretty(&summary)?))?;
     } else {
@@ -240,7 +241,7 @@ fn run_submit(args: &BackupSubmitArgs) -> Result<ExitCode> {
 
 fn run_control(args: &BackupControlArgs) -> Result<ExitCode> {
     let dest = std::fs::canonicalize(&args.dest).with_context(|| format!("cannot resolve {}", args.dest.display()))?;
-    let socket = rdirstat_jobs::socket_path(&dest);
+    let socket = local_socket(&dest)?;
     if args.action == ControlAction::Shutdown {
         let health: rdirstat_jobs::Health = service::client::call(&socket, "POST", "/v1/shutdown", None, CALL_TIMEOUT)?;
         print(&format!(

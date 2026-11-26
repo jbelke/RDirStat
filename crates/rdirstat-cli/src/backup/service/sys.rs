@@ -18,6 +18,13 @@ pub(crate) fn hostname() -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
+/// `geteuid(2)`: the user the service runs as.
+pub(crate) fn euid() -> u32 {
+    // SAFETY: geteuid takes no arguments, cannot fail, and touches no memory
+    // of ours.
+    unsafe { libc::geteuid() }
+}
+
 /// Whether a process with this pid exists (`kill(pid, 0)`; `EPERM` means it
 /// exists but belongs to someone else).
 pub(crate) fn pid_alive(pid: u32) -> bool {

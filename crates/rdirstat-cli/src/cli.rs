@@ -60,8 +60,10 @@ pub(crate) enum BackupCommand {
     Recommend(BackupRecommendArgs),
     /// Run the backup service for one destination drive: hold its lock, run
     /// jobs (plan + apply rounds until everything lands, waiting for a
-    /// dropped drive), and answer the /v1 API on
-    /// `<dest>/.rdirstat/run/api.sock`. Never deletes anything on the drive.
+    /// dropped drive), and answer the /v1 API on a Unix socket in a per-user
+    /// directory (`~/Library/Application Support/rdirstat/run/<volume
+    /// uuid>.sock`, else under `$TMPDIR`), never on the drive. Never deletes
+    /// anything on the drive.
     Serve(BackupServeArgs),
     /// List the drive's jobs and flag unfinished ones. Asks the service when
     /// one runs, else reads `<dest>/.rdirstat/jobs` directly.

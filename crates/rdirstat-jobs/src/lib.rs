@@ -7,9 +7,8 @@
 //!
 //! ```text
 //! <dest>/.rdirstat/
-//!   run/                      mode 0700
+//!   run/
 //!     lock                    LockInfo (JSON); one service per drive
-//!     api.sock                HTTP/1.1 + JSON over a Unix socket, mode 0600
 //!     serve.log               stdout/stderr of a `--detach`ed service
 //!   jobs/<id>/
 //!     job.json                JobSpec, written once when the job is created
@@ -37,6 +36,28 @@
 //! - **`control`** ([`Control`]) is how a pause or cancel survives a service
 //!   restart. The service writes it when the API is asked; the job runner
 //!   reads it between items.
+//!
+//! # The API socket is not on the drive
+//!
+//! A backup drive is usually mounted with ownership ignored (`noowners`),
+//! so a mode on a file there is not enforced against other local users. The
+//! socket therefore lives on the boot disk, in a per-user directory the
+//! service creates with mode 0700 and refuses to use unless the current user
+//! owns it, keyed by the destination's volume UUID ([`socket_key`]):
+//!
+//! ```text
+//! ~/Library/Application Support/rdirstat/run/   mode 0700
+//!   <volume-uuid>.sock                          mode 0600
+//! ```
+//!
+//! A Unix socket path must fit in 104 bytes (`sun_path`, less its NUL). When
+//! the home directory's path is too long for that, the socket goes to
+//! `$TMPDIR/rds/` instead (a short name, because `$TMPDIR` itself is about 50
+//! bytes; on macOS `$TMPDIR` is already per-user
+//! and 0700). [`local_socket_path`] makes that choice; the service and every
+//! client make it from the same `$HOME`, `$TMPDIR` and volume UUID, so they
+//! agree without the drive telling them where to connect (a path read from
+//! the drive could be planted by anyone who can write to it).
 //!
 //! While the drive is disconnected the files cannot be written. The service
 //! keeps assigning `seq` in memory and appends the held lines, in order, when
@@ -95,8 +116,13 @@ pub const JOBS_DIR: &str = "jobs";
 pub const RUN_DIR: &str = "run";
 /// The service's lock file in [`RUN_DIR`].
 pub const LOCK_FILE: &str = "lock";
-/// The API socket in [`RUN_DIR`].
-pub const SOCKET_FILE: &str = "api.sock";
+/// The per-user directory under `$HOME` that holds API sockets.
+pub const LOCAL_RUN_DIR: &str = "Library/Application Support/rdirstat/run";
+/// The per-user directory under `$TMPDIR` used when [`LOCAL_RUN_DIR`] makes a
+/// socket path too long.
+pub const TMP_RUN_DIR: &str = "rds";
+/// Longest path `bind(2)` accepts for a Unix socket on macOS, less the NUL.
+pub const SUN_PATH_MAX: usize = 103;
 /// A detached service's log in [`RUN_DIR`].
 pub const SERVE_LOG: &str = "serve.log";
 /// In a job directory.
@@ -127,10 +153,52 @@ pub fn run_dir(dest: &Path) -> PathBuf {
     dest.join(RDIRSTAT_DIR).join(RUN_DIR)
 }
 
-/// `<dest>/.rdirstat/run/api.sock`.
+/// The file stem of a destination's socket: its volume UUID when known and
+/// made of hex digits and dashes (as `diskutil` reports one), otherwise
+/// `path-` and a 64-bit FNV-1a hash of the destination path, so a volume
+/// without a UUID still gets a stable, file-name-safe key.
 #[must_use]
-pub fn socket_path(dest: &Path) -> PathBuf {
-    run_dir(dest).join(SOCKET_FILE)
+pub fn socket_key(volume_uuid: Option<&str>, dest: &Path) -> String {
+    if let Some(uuid) = volume_uuid
+        && !uuid.is_empty()
+        && uuid.len() <= 64
+        && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+    {
+        return uuid.to_ascii_uppercase();
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in dest.as_os_str().as_encoded_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("path-{hash:016x}")
+}
+
+/// Where the API socket for `key` may go, in order of preference:
+/// `$HOME/`[`LOCAL_RUN_DIR`]`/<key>.sock`, then
+/// `$TMPDIR/`[`TMP_RUN_DIR`]`/<key>.sock`. Relative or absent bases are
+/// skipped.
+#[must_use]
+pub fn socket_candidates(home: Option<&Path>, tmpdir: Option<&Path>, key: &str) -> Vec<PathBuf> {
+    let file = format!("{key}.sock");
+    [
+        home.map(|home| home.join(LOCAL_RUN_DIR)),
+        tmpdir.map(|tmp| tmp.join(TMP_RUN_DIR)),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|dir| dir.is_absolute())
+    .map(|dir| dir.join(&file))
+    .collect()
+}
+
+/// The first of [`socket_candidates`] that fits in [`SUN_PATH_MAX`] bytes,
+/// or `None` when none does.
+#[must_use]
+pub fn local_socket_path(home: Option<&Path>, tmpdir: Option<&Path>, key: &str) -> Option<PathBuf> {
+    socket_candidates(home, tmpdir, key)
+        .into_iter()
+        .find(|path| path.as_os_str().len() <= SUN_PATH_MAX)
 }
 
 /// `<dest>/.rdirstat/jobs`.
@@ -724,6 +792,43 @@ mod tests {
         assert!(!valid_job_id(".."));
         assert!(!valid_job_id("a/b"));
         assert!(!valid_job_id(&"x".repeat(65)));
+    }
+
+    #[test]
+    fn socket_keys_are_the_uuid_or_a_stable_path_hash() {
+        let dest = Path::new("/Volumes/gdr22tb");
+        assert_eq!(
+            socket_key(Some("b6c3d4e7-1aa7-3bd1-b725-6033f3101516"), dest),
+            "B6C3D4E7-1AA7-3BD1-B725-6033F3101516"
+        );
+        let hashed = socket_key(None, dest);
+        assert!(hashed.starts_with("path-") && hashed.len() == 21, "{hashed}");
+        assert_eq!(
+            hashed,
+            socket_key(Some("../../etc"), dest),
+            "a UUID that is not hex is not trusted"
+        );
+        assert_ne!(hashed, socket_key(None, Path::new("/Volumes/other")));
+    }
+
+    #[test]
+    fn the_socket_is_under_home_unless_that_is_too_long() {
+        let key = "B6C3D4E7-1AA7-3BD1-B725-6033F3101516";
+        let home = Path::new("/Users/josh");
+        let tmp = Path::new("/var/folders/xy/abcdefghijklmnopqrstuvwxyz0000gn/T");
+        let path = local_socket_path(Some(home), Some(tmp), key).unwrap();
+        assert_eq!(
+            path,
+            Path::new("/Users/josh/Library/Application Support/rdirstat/run/B6C3D4E7-1AA7-3BD1-B725-6033F3101516.sock")
+        );
+        assert!(path.as_os_str().len() <= SUN_PATH_MAX);
+
+        let long_home = PathBuf::from(format!("/Users/{}", "a".repeat(60)));
+        let path = local_socket_path(Some(&long_home), Some(tmp), key).unwrap();
+        assert!(path.starts_with(tmp.join(TMP_RUN_DIR)), "{}", path.display());
+
+        assert_eq!(local_socket_path(Some(&long_home), None, key), None);
+        assert_eq!(local_socket_path(Some(Path::new("relative")), None, key), None);
     }
 
     #[test]

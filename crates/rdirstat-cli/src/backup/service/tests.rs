@@ -1,7 +1,8 @@
 //! The service against temp dirs, over a real socket. Two temp dirs share
 //! one disk, so the service gets fixed disk facts through [`DiskProbe`].
 //! Temp dirs are made under `/tmp` because a Unix socket path must fit in
-//! 104 bytes and `$TMPDIR` on macOS is long.
+//! 104 bytes and `$TMPDIR` on macOS is long. Each fixture's socket goes to
+//! its own `t/rds/`, never to the real per-user directory.
 
 #![allow(
     clippy::expect_used,
@@ -18,7 +19,6 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use rdirstat_jobs::{
     Event, EventBody, EventsPage, Health, ItemOutcome, JobList, JobSource, JobSummary, LockInfo, NewJob, Phase,
-    socket_path,
 };
 use rdirstat_organize::DiskFacts;
 
@@ -57,6 +57,8 @@ struct Fixture {
     source: PathBuf,
     dest: PathBuf,
     catalog: PathBuf,
+    /// Stands in for `$TMPDIR`: the socket goes under it.
+    tmp: PathBuf,
 }
 
 impl Fixture {
@@ -76,7 +78,8 @@ impl Fixture {
         let source_disk = base.join("s");
         let dest = base.join("d");
         let catalog = base.join("c");
-        for dir in [&source_disk, &dest, &catalog] {
+        let tmp = base.join("t");
+        for dir in [&source_disk, &dest, &catalog, &tmp] {
             std::fs::create_dir(dir).expect("mkdir");
         }
         Self {
@@ -85,6 +88,14 @@ impl Fixture {
             source_disk,
             dest,
             catalog,
+            tmp,
+        }
+    }
+
+    fn local(&self) -> LocalDirs {
+        LocalDirs {
+            home: None,
+            tmpdir: Some(self.tmp.clone()),
         }
     }
 
@@ -96,6 +107,7 @@ impl Fixture {
             }),
             default_catalog: Some(self.catalog.clone()),
             app_catalog: None,
+            local: self.local(),
             signals: false,
             on_item,
         }
@@ -106,7 +118,9 @@ impl Fixture {
     }
 
     fn socket(&self) -> PathBuf {
-        socket_path(&self.dest)
+        self.tmp
+            .join(rdirstat_jobs::TMP_RUN_DIR)
+            .join(format!("{DEST_UUID}.sock"))
     }
 
     fn new_job(&self, id: &str) -> NewJob {
@@ -316,6 +330,56 @@ fn second_serve_on_the_same_drive_refuses_while_the_first_is_alive() {
 }
 
 #[test]
+fn the_socket_is_per_user_and_never_on_the_drive() {
+    let fixture = Fixture::new();
+    let running = fixture.start(None);
+    assert_eq!(running.socket, fixture.socket());
+    assert!(
+        !running.socket.starts_with(&fixture.dest),
+        "{}",
+        running.socket.display()
+    );
+    assert_eq!(
+        socket_for(
+            &fixture.dest,
+            &FakeProbe {
+                source: fixture.source_disk.clone()
+            },
+            &fixture.local()
+        )
+        .unwrap(),
+        running.socket,
+        "a client computes the path the service bound"
+    );
+    let run = rdirstat_jobs::run_dir(&fixture.dest);
+    assert!(
+        run.join(rdirstat_jobs::LOCK_FILE).is_file(),
+        "the lock stays on the drive"
+    );
+    let on_drive: Vec<_> = std::fs::read_dir(&run)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(on_drive, vec![std::ffi::OsString::from(rdirstat_jobs::LOCK_FILE)]);
+    let dir = running.socket.parent().unwrap().to_path_buf();
+    assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+
+    // Removed from under it (a temp-dir cleaner): listening again, directory
+    // and all, within a rebind tick.
+    std::fs::remove_dir_all(&dir).unwrap();
+    let deadline = Instant::now() + REBIND_EVERY * 3;
+    loop {
+        if get::<Health>(&fixture.socket(), "/v1/health").is_ok() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the socket was not rebound");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    running.shutdown();
+    running.join().unwrap();
+}
+
+#[test]
 fn a_stale_socket_is_replaced_once_the_lock_proves_its_service_dead() {
     let fixture = Fixture::new();
     let run = rdirstat_jobs::run_dir(&fixture.dest);
@@ -324,6 +388,7 @@ fn a_stale_socket_is_replaced_once_the_lock_proves_its_service_dead() {
         &run.join(rdirstat_jobs::LOCK_FILE),
         &lock_info(dead_pid(), me.host, me.boot_id),
     );
+    std::fs::create_dir_all(fixture.socket().parent().unwrap()).unwrap();
     drop(std::os::unix::net::UnixListener::bind(fixture.socket()).unwrap());
     assert!(fixture.socket().exists());
     assert!(matches!(
@@ -337,6 +402,12 @@ fn a_stale_socket_is_replaced_once_the_lock_proves_its_service_dead() {
     assert_eq!(health.dest_disk_id.as_deref(), Some("disk14"));
     let mode = std::fs::metadata(fixture.socket()).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
+    let dir_mode = std::fs::metadata(fixture.socket().parent().unwrap())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(dir_mode, 0o700, "a pre-existing socket directory is tightened to 0700");
     running.shutdown();
     running.join().unwrap();
 }

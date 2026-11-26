@@ -1,9 +1,12 @@
 //! `rdirstat backup serve`: the drive-resident backup service.
 //!
 //! One service per destination drive. It holds `<dest>/.rdirstat/run/lock`,
-//! answers the `/v1` API (see `rdirstat_jobs`) as HTTP/1.1 over the Unix
-//! socket `<dest>/.rdirstat/run/api.sock` (mode 0600 in a 0700 directory;
-//! no TCP listener), and runs jobs one at a time on a worker thread. Every
+//! answers the `/v1` API (see `rdirstat_jobs`) as HTTP/1.1 over a Unix
+//! socket in a per-user directory on the boot disk (mode 0600 in a 0700
+//! directory the current user owns, keyed by the drive's volume UUID; see
+//! [`rdirstat_jobs::local_socket_path`]; no TCP listener), and runs jobs one
+//! at a time on a worker thread. The socket is not on the drive because a
+//! drive mounted with ownership ignored does not enforce its mode. Every
 //! job's events and state are on the drive, so a job the previous service
 //! did not finish is picked up again when the next one starts, and
 //! `backup jobs` can read them while no service runs.
@@ -31,8 +34,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use rdirstat_jobs::{
     Control, DEFAULT_FLOOR, DEFAULT_MAX_ROUNDS, DEFAULT_MOUNT_POLL_MS, EventBody, Health, JOB_FILE, JobList, JobSpec,
-    JobState, JobSummary, LOCK_FILE, LabelStatus, NewJob, Phase, SCHEMA_VERSION, job_dir, jobs_dir, run_dir,
-    socket_path, valid_job_id,
+    JobState, JobSummary, LOCK_FILE, LabelStatus, NewJob, Phase, SCHEMA_VERSION, SUN_PATH_MAX, job_dir, jobs_dir,
+    local_socket_path, run_dir, socket_key, valid_job_id,
 };
 use tokio::sync::watch;
 
@@ -45,11 +48,72 @@ use self::runner::Runner;
 pub(crate) use self::sys::new_session;
 use super::{DiskProbe, now_ms};
 
-/// Longest path `bind(2)` accepts for a Unix socket on macOS, less the NUL.
-const SUN_PATH_MAX: usize = 103;
 /// How often the listener checks that its socket is still at its path (it
-/// is not after the drive drops off and comes back).
+/// is not after something removes it, such as a temp-dir cleaner).
 const REBIND_EVERY: Duration = Duration::from_secs(5);
+
+/// The per-user directories a socket path is derived from.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LocalDirs {
+    pub(crate) home: Option<PathBuf>,
+    pub(crate) tmpdir: Option<PathBuf>,
+}
+
+impl LocalDirs {
+    /// `$HOME` and `$TMPDIR`.
+    pub(crate) fn from_env() -> Self {
+        Self {
+            home: std::env::var_os("HOME").map(PathBuf::from),
+            tmpdir: std::env::var_os("TMPDIR").map(PathBuf::from),
+        }
+    }
+}
+
+/// The API socket of the service for `dest`, computed the same way by the
+/// service and by every client: the destination's volume UUID (from
+/// `probe`) under the per-user run directory. Never a path on the drive.
+///
+/// # Errors
+///
+/// Neither `$HOME` nor `$TMPDIR` gives a socket path short enough to bind.
+pub(crate) fn socket_for(dest: &Path, probe: &dyn DiskProbe, dirs: &LocalDirs) -> Result<PathBuf> {
+    let uuid = probe.facts(dest).ok().and_then(|facts| facts.volume_uuid);
+    let key = socket_key(uuid.as_deref(), dest);
+    local_socket_path(dirs.home.as_deref(), dirs.tmpdir.as_deref(), &key).with_context(|| {
+        format!(
+            "no per-user directory gives a socket path of at most {SUN_PATH_MAX} bytes for {} (HOME {:?}, TMPDIR {:?})",
+            dest.display(),
+            dirs.home,
+            dirs.tmpdir
+        )
+    })
+}
+
+/// Creates the socket's directory with mode 0700 (and any missing parent
+/// with 0700), tightens an existing one to 0700, and refuses it unless the
+/// current user owns it, so no other local user can reach the socket.
+fn prepare_socket_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .with_context(|| format!("cannot create {}", dir.display()))?;
+    let meta = std::fs::symlink_metadata(dir).with_context(|| format!("cannot read {}", dir.display()))?;
+    if !meta.is_dir() {
+        bail!("{} is not a directory", dir.display());
+    }
+    if meta.uid() != sys::euid() {
+        bail!(
+            "{} belongs to uid {}, not to this user (uid {}); refusing to put the API socket there",
+            dir.display(),
+            meta.uid(),
+            sys::euid()
+        );
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("cannot restrict {}", dir.display()))
+}
 
 /// What `serve` was asked.
 pub(crate) struct ServeConfig {
@@ -58,6 +122,8 @@ pub(crate) struct ServeConfig {
     /// Catalog for jobs whose spec names none.
     pub(crate) default_catalog: Option<PathBuf>,
     pub(crate) app_catalog: Option<PathBuf>,
+    /// Where the API socket goes (see [`socket_for`]).
+    pub(crate) local: LocalDirs,
     /// Stop on `SIGTERM` and `SIGINT`. Off in tests, which share a process.
     pub(crate) signals: bool,
     pub(crate) on_item: Option<Arc<ItemHook>>,
@@ -474,13 +540,14 @@ impl Running {
 }
 
 /// Starts the service for `config.dest`: takes the lock (taking over a stale
-/// one), replaces a stale socket, loads every job on the drive, queues the
+/// one), replaces a stale socket in the per-user run directory, loads every job on the drive, queues the
 /// unfinished ones, and serves until shut down.
 ///
 /// # Errors
 ///
 /// The destination does not resolve, the lock is held by a live service
-/// (or cannot be judged), the socket cannot be bound, or a job on the drive
+/// (or cannot be judged), the socket directory is not this user's, the
+/// socket cannot be bound, or a job on the drive
 /// cannot be read.
 pub(crate) fn start(config: ServeConfig) -> Result<Running> {
     let dest =
@@ -496,7 +563,7 @@ pub(crate) fn start(config: ServeConfig) -> Result<Running> {
             stale.pid, stale.host, stale.version
         );
     }
-    let socket = socket_path(&dest);
+    let socket = socket_for(&dest, config.probe.as_ref(), &config.local)?;
     let listener = bind(&socket)?;
     let dest_disk_id = config.probe.facts(&dest).ok().and_then(|facts| facts.disk_id);
     let (stopping, _) = watch::channel(false);
@@ -533,7 +600,8 @@ pub(crate) fn start(config: ServeConfig) -> Result<Running> {
 }
 
 /// Binds the socket, replacing whatever is at its path (the caller holds the
-/// lock, so it is a dead service's), and restricts it to the owner.
+/// lock, so it is a dead service's), and restricts it to the owner. The
+/// directory is created or tightened first ([`prepare_socket_dir`]).
 fn bind(socket: &Path) -> Result<std::os::unix::net::UnixListener> {
     if socket.as_os_str().len() > SUN_PATH_MAX {
         bail!(
@@ -541,6 +609,10 @@ fn bind(socket: &Path) -> Result<std::os::unix::net::UnixListener> {
             socket.display()
         );
     }
+    let Some(dir) = socket.parent() else {
+        bail!("{} has no directory", socket.display());
+    };
+    prepare_socket_dir(dir)?;
     match std::fs::remove_file(socket) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -661,7 +733,7 @@ async fn accept_loop(
                 if let Some(rebound) = rebind_if_gone(socket, ino) {
                     match rebound.and_then(|std| Ok((std::fs::symlink_metadata(socket)?.ino(), tokio::net::UnixListener::from_std(std)?))) {
                         Ok((new_ino, new_listener)) => {
-                            eprintln!("rdirstat: {} was gone (drive reconnected?); listening again", socket.display());
+                            eprintln!("rdirstat: {} was gone; listening again", socket.display());
                             listener = new_listener;
                             ino = new_ino;
                         }
@@ -681,15 +753,10 @@ async fn accept_loop(
 }
 
 /// `Some(new listener)` when the socket at `path` is no longer the one with
-/// inode `ino` and the drive's run directory is back; `None` otherwise. The
-/// run directory is never created here, so a missing drive leaves nothing
-/// on the boot disk.
+/// inode `ino`; `None` otherwise. The socket is on the boot disk, so it is
+/// rebound (and its directory recreated) whether or not the drive is there.
 fn rebind_if_gone(socket: &Path, ino: u64) -> Option<Result<std::os::unix::net::UnixListener>> {
     if std::fs::symlink_metadata(socket).is_ok_and(|meta| meta.ino() == ino) {
-        return None;
-    }
-    let dir = socket.parent()?;
-    if !dir.is_dir() {
         return None;
     }
     Some(bind(socket))
