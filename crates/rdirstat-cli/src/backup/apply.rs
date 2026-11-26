@@ -139,6 +139,10 @@ pub(crate) struct ApplyReport {
     /// was not. The index is derived; a failure here loses no receipt, and
     /// `rdirstat backup index` rebuilds it.
     pub(crate) index: std::result::Result<IndexSummary, String>,
+    /// Why the run stopped before its last item: the source or destination
+    /// volume went away under it. Every item from there on is `failed` with
+    /// the same reason and was not attempted.
+    pub(crate) stopped: Option<String>,
 }
 
 impl ApplyReport {
@@ -226,28 +230,27 @@ pub(crate) fn apply(request: &ApplyRequest, probe: &dyn DiskProbe) -> Result<App
     let mut landed = Landed::load(&catalog, &rollup_dests(&plan, &mirror_root))?;
     let run_id = format!("backup-{}-{}", plan.source_label, now_ms());
     let plan_id = super::plan_id(&plan);
+    let primary_only = Catalog::new(catalog.primary());
+    let mounts = Mounts::capture(&[&plan.source_root, &plan.dest_root])?;
     let mut writer = ReceiptWriter::new(&catalog, &run_id, &plan_id);
     writer.write_plan_rows(&plan_rows(&plan, &plan_id));
-    let never = AtomicBool::new(false);
+    let (results, stopped) = land_all(&plan, &mirror_root, &mounts, &mut landed, &mut writer, request.progress);
 
-    let mut results = Vec::with_capacity(plan.items.len());
-    let total = plan.items.len();
-    for (index, item) in plan.items.iter().enumerate() {
-        if writer.error.is_some() {
-            break;
-        }
-        if request.progress {
-            eprintln!("[{}/{total}] {}", index + 1, item.relative.display());
-        }
-        let result = land_item(&plan, &mirror_root, item, &mut landed, &mut writer, &never);
-        results.push(result);
-        writer.maybe_flush();
+    // The drive's copy of the catalog and its index are written only to the
+    // planned drive: back at its path with its volume UUID, or not at all.
+    let dest_here = stopped.is_none() || destination_back(&plan, probe);
+    if !dest_here {
+        writer.catalog = &primary_only;
     }
     writer.flush();
     writer.finish();
 
     let (receipts_written, catalog_error) = (writer.receipts_written, writer.error);
-    let index = rebuild_index(&plan.dest_root).map_err(|error| error.to_string());
+    let index = if dest_here {
+        rebuild_index(&plan.dest_root).map_err(|error| error.to_string())
+    } else {
+        Err(format!("{} is not mounted", plan.dest_root.display()))
+    };
     Ok(ApplyReport {
         run_id,
         plan_path: request.plan.clone(),
@@ -256,10 +259,111 @@ pub(crate) fn apply(request: &ApplyRequest, probe: &dyn DiskProbe) -> Result<App
         results,
         receipts_written,
         catalog_primary: catalog.primary().to_path_buf(),
-        catalog_mirror: catalog.mirror().map(Path::to_path_buf),
+        catalog_mirror: if dest_here {
+            catalog.mirror().map(Path::to_path_buf)
+        } else {
+            None
+        },
         catalog_error,
         index,
+        stopped,
     })
+}
+
+/// Lands the plan's items in order until the catalog fails or a volume goes
+/// away. Returns one result per attempted item, plus one per item a lost
+/// volume stopped the run before, and why it stopped.
+fn land_all(
+    plan: &PlanFile,
+    mirror_root: &Path,
+    mounts: &Mounts,
+    landed: &mut Landed,
+    writer: &mut ReceiptWriter<'_>,
+    progress: bool,
+) -> (Vec<ItemResult>, Option<String>) {
+    let never = AtomicBool::new(false);
+    let mut results = Vec::with_capacity(plan.items.len());
+    let mut stopped = None;
+    let total = plan.items.len();
+    for (index, item) in plan.items.iter().enumerate() {
+        if writer.error.is_some() {
+            break;
+        }
+        // A drive that drops off the bus leaves its mount point gone. Every
+        // later item would then try to create its parent directories from
+        // that point up, and fail (`/Volumes` is root's: EACCES) or, worse,
+        // succeed on the boot disk. Stop instead, naming why.
+        if let Err(reason) = mounts.check() {
+            results.extend(
+                plan.items[index..]
+                    .iter()
+                    .map(|item| not_attempted(plan, mirror_root, item, &reason)),
+            );
+            stopped = Some(reason);
+            break;
+        }
+        if progress {
+            eprintln!("[{}/{total}] {}", index + 1, item.relative.display());
+        }
+        let result = land_item(plan, mirror_root, item, landed, writer, &never);
+        results.push(result);
+        writer.maybe_flush();
+    }
+    (results, stopped)
+}
+
+/// The volumes a run reads and writes, as they were when it started: each
+/// root's `(st_dev, st_ino)`. A root that no longer stats, or stats as
+/// another directory, is a volume that was unmounted or disconnected.
+struct Mounts(Vec<(PathBuf, u64, u64)>);
+
+impl Mounts {
+    fn capture(roots: &[&Path]) -> Result<Self> {
+        roots
+            .iter()
+            .map(|root| {
+                let meta = std::fs::metadata(root).with_context(|| format!("{} is not mounted", root.display()))?;
+                Ok((root.to_path_buf(), meta.dev(), meta.ino()))
+            })
+            .collect::<Result<_>>()
+            .map(Self)
+    }
+
+    fn check(&self) -> std::result::Result<(), String> {
+        for (root, dev, ino) in &self.0 {
+            let same = std::fs::metadata(root).is_ok_and(|meta| meta.dev() == *dev && meta.ino() == *ino);
+            if !same {
+                return Err(format!(
+                    "{} went away during the run (unmounted or disconnected); not attempted. Make a new plan",
+                    root.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The planned destination volume is mounted at its path again.
+fn destination_back(plan: &PlanFile, probe: &dyn DiskProbe) -> bool {
+    std::fs::canonicalize(&plan.dest_root).is_ok_and(|now| now == plan.dest_root)
+        && probe
+            .facts(&plan.dest_root)
+            .is_ok_and(|facts| facts.volume_uuid.as_deref() == Some(plan.dest_volume_uuid.as_str()))
+}
+
+/// An item the run stopped before reaching.
+fn not_attempted(plan: &PlanFile, mirror_root: &Path, item: &PlanItem, reason: &str) -> ItemResult {
+    ItemResult {
+        relative: item.relative.to_string_lossy().into_owned(),
+        dest: destination_of(plan, mirror_root, item)
+            .map(|dest| dest.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        outcome: Outcome::Failed,
+        bytes: item.logical,
+        detail: Some(reason.to_owned()),
+        partial: None,
+        files: item.rollup.as_ref().map(|r| r.files),
+    }
 }
 
 /// Where the plan's roll-ups land, by scope. Rows that do not parse as a
@@ -935,6 +1039,9 @@ pub(crate) fn text(report: &ApplyReport) -> String {
     if let Some(error) = &report.catalog_error {
         let _ = writeln!(out, "Catalog error: {error}");
     }
+    if let Some(reason) = &report.stopped {
+        let _ = writeln!(out, "Stopped: {reason}");
+    }
     match &report.index {
         Ok(index) => {
             let _ = writeln!(
@@ -990,6 +1097,7 @@ pub(crate) fn json(report: &ApplyReport) -> Value {
         "catalog_primary": report.catalog_primary.to_string_lossy(),
         "catalog_mirror": report.catalog_mirror.as_ref().map(|m| m.to_string_lossy().into_owned()),
         "catalog_error": report.catalog_error,
+        "stopped": report.stopped,
         "index": match &report.index {
             Ok(index) => json!({ "path": index.index.to_string_lossy(), "sql": index.sql.to_string_lossy(), "files": index.rows, "logical": index.bytes }),
             Err(error) => json!({ "error": error }),

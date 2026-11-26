@@ -1463,3 +1463,55 @@ fn apply_loads_landed_rows_only_for_the_plans_rollup_directories() {
     let loose = rollup::Landed::load(Some(&mirror), &receipts, &dests).expect("load");
     assert_eq!(loose.len(), 2, "letter.txt and latest, not the notes below");
 }
+
+#[test]
+fn a_destination_that_goes_away_mid_run_stops_the_run_and_writes_nothing_at_its_path() {
+    let fx = Fixture::with(build_tree);
+    let planned = fx.plan();
+    let order: Vec<String> = planned
+        .plan
+        .items
+        .iter()
+        .map(|item| item.relative.to_string_lossy().into_owned())
+        .collect();
+    let first_rollup = planned
+        .plan
+        .items
+        .iter()
+        .position(|item| item.rollup.is_some())
+        .expect("a roll-up");
+    assert!(first_rollup + 1 < order.len(), "an item follows the roll-up: {order:?}");
+
+    // The drive drops off the bus while the roll-up is copying.
+    let dest = fx.dest.clone();
+    let gone = fx.dest.with_extension("gone");
+    let moved = gone.clone();
+    let mut dropped = false;
+    let hook = on_copy(move |_, _| {
+        if !dropped {
+            dropped = true;
+            std::fs::rename(&dest, &moved).expect("unmount");
+        }
+    });
+    let report = fx.apply(&planned.token).expect("apply");
+    drop(hook);
+
+    let stopped = report.stopped.clone().expect("the run says why it stopped");
+    assert!(stopped.contains("went away"), "{stopped}");
+    assert!(!report.complete());
+    for result in &report.results[first_rollup + 1..] {
+        assert_eq!(result.outcome, Outcome::Failed, "{result:?}");
+        assert_eq!(result.detail.as_deref(), Some(stopped.as_str()), "{result:?}");
+    }
+    assert_eq!(report.results.len(), order.len(), "every item is reported");
+    assert!(
+        !fx.dest.exists(),
+        "nothing is created where the drive was mounted: {:?}",
+        files_under(&fx.dest)
+    );
+    assert!(report.catalog_mirror.is_none());
+    assert!(report.index.is_err());
+    assert!(apply::text(&report).contains("Stopped: "), "{}", apply::text(&report));
+
+    std::fs::rename(&gone, &fx.dest).expect("remount");
+}
