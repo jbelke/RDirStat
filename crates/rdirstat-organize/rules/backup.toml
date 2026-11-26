@@ -1,0 +1,158 @@
+# Default Backup rules (.settings/docs/11-ORGANIZE.md, Amendment A).
+#
+# Paths are RELATIVE TO THE SOURCE VOLUME ROOT. For the boot disk that root is
+# the Data volume, /System/Volumes/Data, so a home directory is `Users/<name>/`.
+# Globs never name a user: they use `Users/*/` or a leading `**/`.
+#
+# Matching (see `Rules::matched` in src/rules.rs):
+#   * `*` and `?` never cross a `/`; `**/` matches zero or more directories, so
+#     `**/node_modules` also matches a top-level `node_modules`.
+#   * A rule applies to a path when it matches the path itself OR ANY OF ITS
+#     ANCESTOR DIRECTORIES. A rule naming a directory therefore covers
+#     everything under it; there is no need to append `/**`.
+#   * Rules are tried in file order and the FIRST rule that applies wins. An
+#     `include` rule placed above a `skip` rule rescues the paths it names.
+#     Specific rules sit above broad ones so the reported id is the precise one.
+#   * Matching is case-sensitive on the stored name bytes.
+#
+# Bump `version` whenever a rule is added, removed, or changes meaning. Plans
+# record both the version and the SHA-256 of this file's bytes, and the plan
+# token binds the hash, so a plan made under other rules cannot be applied.
+#
+# Every rule here skips content that is REBUILDABLE: downloaded, generated, or
+# a runtime image. Nothing personal is skipped by default.
+
+version = 1
+
+[[rule]]
+id = "trash"
+reason = "Trash: items the user already chose to throw away"
+action = "skip"
+globs = ["**/.Trash", "**/.Trashes"]
+
+[[rule]]
+id = "volume-metadata"
+reason = "Spotlight index, FSEvents log, and document revisions: rebuilt by macOS per volume"
+action = "skip"
+globs = ["**/.Spotlight-V100", "**/.fseventsd", "**/.DocumentRevisions-V100"]
+
+[[rule]]
+id = "colima-lima-vm"
+reason = "Colima/Lima VM disks: container runtime images, recreated by `colima start`"
+action = "skip"
+globs = ["**/.colima", "**/.lima"]
+
+[[rule]]
+id = "docker-desktop-vm"
+reason = "Docker Desktop VM disk: container runtime image, recreated by Docker"
+action = "skip"
+globs = ["**/Docker.raw", "Users/*/Library/Containers/com.docker.docker"]
+
+[[rule]]
+id = "qcow2-image"
+reason = "QEMU qcow2 disk images: emulator and VM runtime disks"
+action = "skip"
+globs = ["**/*.qcow2"]
+
+[[rule]]
+id = "android-avd"
+reason = "Android emulator virtual devices: recreated from the SDK"
+action = "skip"
+globs = ["**/.android/avd"]
+
+# `.vmdk` is NOT skipped globally: a VMware Fusion or Parallels VM can be the
+# only copy of real work. It is skipped only under tool directories whose disks
+# are disposable boxes (`vagrant box add` re-downloads them). Colima and Lima
+# disks are already covered above.
+[[rule]]
+id = "vagrant-boxes"
+reason = "Vagrant base boxes: downloaded images, re-fetched by `vagrant box add`"
+action = "skip"
+globs = ["**/.vagrant.d/boxes"]
+
+[[rule]]
+id = "ios-simulator"
+reason = "iOS Simulator devices and runtimes: reinstalled by Xcode"
+action = "skip"
+globs = ["**/Library/Developer/CoreSimulator"]
+
+[[rule]]
+id = "mobile-asset"
+reason = "macOS MobileAsset downloads (simulator runtimes, OS assets): re-downloaded on demand"
+action = "skip"
+globs = ["System/Library/AssetsV2", "**/com_apple_MobileAsset_*"]
+
+[[rule]]
+id = "xcode-derived-data"
+reason = "Xcode DerivedData: build products and indexes, rebuilt on the next build"
+action = "skip"
+globs = ["**/DerivedData"]
+
+[[rule]]
+id = "caches"
+reason = "Caches: application and tool caches, refilled on demand"
+action = "skip"
+globs = ["**/Library/Caches", "**/.cache", "**/Cache", "**/Caches"]
+
+[[rule]]
+id = "node-modules"
+reason = "node_modules: npm/yarn/pnpm installs, restored from the lockfile"
+action = "skip"
+globs = ["**/node_modules"]
+
+[[rule]]
+id = "pnpm-store"
+reason = "pnpm content store: package downloads, re-fetched by pnpm"
+action = "skip"
+globs = ["**/.pnpm-store", "**/Library/pnpm/store"]
+
+# A glob cannot see that a `target` directory has a sibling Cargo.toml, so this
+# rule names only the profile directories Cargo creates (`target/debug`,
+# `target/release`, and their per-triple forms `target/<triple>/debug`). A
+# directory merely called `target` keeps being backed up.
+[[rule]]
+id = "rust-target"
+reason = "Cargo build output (target/debug, target/release): rebuilt by `cargo build`"
+action = "skip"
+globs = [
+  "**/target/debug",
+  "**/target/release",
+  "**/target/*/debug",
+  "**/target/*/release",
+]
+
+[[rule]]
+id = "cargo-registry"
+reason = "Cargo registry: crate downloads and sources, re-fetched by cargo"
+action = "skip"
+globs = ["**/.cargo/registry"]
+
+[[rule]]
+id = "python-venv"
+reason = "Python virtual environments: recreated from requirements"
+action = "skip"
+globs = ["**/.venv", "**/venv"]
+
+[[rule]]
+id = "editor-state-db"
+reason = "VS Code/Cursor state databases: live editor state, large and rebuilt by the editor"
+action = "skip"
+globs = ["**/state.vscdb", "**/state.vscdb.backup"]
+
+[[rule]]
+id = "claude-vm-bundles"
+reason = "Claude desktop VM bundles: downloaded runtime images"
+action = "skip"
+globs = ["Users/*/Library/Application Support/Claude/vm_bundles"]
+
+[[rule]]
+id = "system"
+reason = "System content on the Data volume: owned and restored by macOS"
+action = "skip"
+globs = ["System"]
+
+[[rule]]
+id = "vm-swap"
+reason = "Swap files and the sleep image: kernel scratch space"
+action = "skip"
+globs = ["private/var/vm"]
