@@ -109,6 +109,14 @@ pub(crate) fn run(command: &BackupCommand) -> Result<ExitCode> {
         BackupCommand::Jobs(args) => run_jobs(args),
         BackupCommand::Submit(args) => run_submit(args),
         BackupCommand::Control(args) => run_control(args),
+        BackupCommand::Version => {
+            let version = rdirstat_jobs::RunnerVersion {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                schema_version: rdirstat_jobs::SCHEMA_VERSION,
+            };
+            print(&format!("{}\n", serde_json::to_string(&version)?))?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 

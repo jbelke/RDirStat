@@ -11,6 +11,8 @@ target/
 src-tauri/target/
 src-tauri/gen/schemas/
 src-tauri/WixTools/
+# The staged sidecar (scripts/build-sidecar.mjs, or build.rs's placeholder).
+src-tauri/binaries/
 .tauri/
 
 # ---------------------------------------------------------------------------

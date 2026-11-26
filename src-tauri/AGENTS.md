@@ -10,7 +10,8 @@ adapts library APIs; it does not own scan algorithms or arena structures.
 
 | Path | Owns |
 | --- | --- |
-| `Cargo.toml`, `build.rs` | Tauri-only dependencies and build integration |
+| `Cargo.toml`, `build.rs` | Tauri-only dependencies and build integration; `build.rs` stages a placeholder sidecar when the real one is missing |
+| `binaries/` | Git-ignored. The `rdirstat-runner-<target>` sidecar (`bundle.externalBin`): the `rdirstat-cli` binary staged by `scripts/build-sidecar.mjs`, which `beforeDevCommand` / `beforeBuildCommand` run. The app installs it on a backup drive and launches it there as the drive's backup service |
 | `tauri.conf.json` | Stable bundle identity, window policy, minimum macOS version, and packaging metadata |
 | `capabilities/` | Tauri capability grants; these are not macOS privacy authorization |
 | `src/` | Command/event registration, application state, native actions, and serializable error boundary |

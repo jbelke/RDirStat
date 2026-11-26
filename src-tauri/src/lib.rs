@@ -20,6 +20,7 @@
 //! | [`fsident`] | path reconstruction, `lstat`, and error classification |
 //! | [`snapshot_store`] | where `*.rdstat` files live, atomic writes, retention, restore-at-launch |
 //! | [`volumes`] | the launch screen's volume list |
+//! | [`backup`] | client of each drive's backup service; installs and launches its runner |
 //! | [`engine`] | **integration seam** — the temporary home of `rdirstat-scan` |
 //! | [`layout`] | **integration seam** — the temporary home of `rdirstat-treemap` |
 //!
@@ -35,6 +36,7 @@
 //! with typed arguments and reads the batch with `tableFromIPC`.
 
 mod actions;
+mod backup;
 mod commands;
 mod cursor;
 mod digest;
@@ -148,6 +150,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             commands::transfer_resume,
             commands::transfer_cancel,
             commands::transfers_clear,
+            backup::backup_start_service,
         ])
         .events(tauri_specta::collect_events![ScanProgressEvent, TransferProgressEvent])
         // Argument types for the two binary commands, so the frontend still has

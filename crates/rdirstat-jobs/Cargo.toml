@@ -11,6 +11,12 @@ publish.workspace      = true
 
 [dependencies]
 serde      = { workspace = true }
+# Off by default: only the desktop app, which exports TypeScript bindings,
+# turns it on.
+specta     = { workspace = true, optional = true }
+
+[features]
+specta = ["dep:specta"]
 
 [dev-dependencies]
 serde_json = { workspace = true }

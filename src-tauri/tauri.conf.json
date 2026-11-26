@@ -5,9 +5,9 @@
   "version": "0.1.0",
   "identifier": "jbelke.rdirstat",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "node scripts/build-sidecar.mjs && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build && node scripts/build-sidecar.mjs --release",
     "frontendDist": "../dist"
   },
   "app": {
@@ -35,6 +35,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": ["binaries/rdirstat-runner"],
     "category": "Utility",
     "publisher": "Joshua Belke",
     "homepage": "https://github.com/jbelke/RDirStat",

@@ -116,7 +116,17 @@ security-framework = { workspace = true }
 # `opendal` is async and the transfer manager is a long-lived task, so
 # src-tauri names tokio directly rather than reaching it through tauri's
 # re-export. `sync` is the cancellation primitives, `fs` the streaming reads.
-tokio = { workspace = true, features = ["fs", "sync", "time", "io-util"] }
+tokio = { workspace = true, features = ["fs", "sync", "time", "io-util", "net"] }
+
+# --- the drive-resident backup service (`rdirstat backup serve`) ---
+# `src/backup.rs` is a client of it: HTTP/1.1 + JSON over its Unix socket,
+# with the request and answer types from `rdirstat-jobs` (types only; the
+# `specta` feature exports them to TypeScript). hyper is already in the tree
+# through reqwest and the CLI's server; the client adds only its features.
+rdirstat-jobs  = { workspace = true, features = ["specta"] }
+hyper          = { workspace = true, features = ["client", "http1"] }
+hyper-util     = { workspace = true, features = ["tokio"] }
+http-body-util = { workspace = true }
 
 # --- bounded channels between the reader workers and the single builder ---
 crossbeam-channel = { workspace = true }

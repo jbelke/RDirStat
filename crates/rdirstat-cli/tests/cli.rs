@@ -446,3 +446,17 @@ fn backup_index_and_status_read_the_drives_catalog_and_refuse_without_one() {
     assert_eq!(status.status.code(), Some(0), "{status:?}");
     assert!(stdout_of(&status).contains("nothing backed up yet"));
 }
+
+#[test]
+fn backup_version_prints_the_version_and_job_schema_as_one_json_line() {
+    let output = run(&["backup", "version"]);
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(text.lines().count(), 1, "{text}");
+    let doc: Value = serde_json::from_str(&text).expect("JSON");
+    assert_eq!(doc["version"], env!("CARGO_PKG_VERSION"));
+    assert!(
+        doc["schema_version"].as_u64().is_some_and(|schema| schema >= 1),
+        "{doc}"
+    );
+}

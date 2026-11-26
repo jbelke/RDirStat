@@ -696,6 +696,20 @@ export const commands = {
 	 *  Infallible today; typed for symmetry with the rest of the queue commands.
 	 */
 	transfersClear: () => typedError<number, RemoteConfigError>(__TAURI_INVOKE("transfers_clear")),
+	/**
+	 *  Starts the backup service for a drive, or returns the one already
+	 *  running there.
+	 * 
+	 *  Installs the app's runner as `<dest>/.rdirstat/bin/rdirstat-<version>`
+	 *  and launches it detached: it keeps running when the app quits.
+	 * 
+	 *  # Errors
+	 * 
+	 *  [`BackupError`]: the destination is not a mounted volume, a service of
+	 *  another schema runs there, the drive holds a job newer than this app, or
+	 *  the runner could not be installed or started.
+	 */
+	backupStartService: (dest: string) => typedError<Health, BackupError>(__TAURI_INVOKE("backup_start_service", { dest })),
 };
 
 /** Events */
@@ -921,6 +935,29 @@ export type ArenaError =
 	/**  The offending parent. */
 	parent: NodeId,
 } };
+
+/**
+ *  Why a backup command failed.
+ * 
+ *  `Display` is hand-written, as for the other shell errors: the shell does
+ *  not depend on `thiserror`.
+ */
+export type BackupError = 
+/**  An argument did not validate. */
+{ kind: "invalid"; detail: string } | 
+/**  The destination is not a mounted volume. */
+{ kind: "not_mounted"; detail: string } | 
+/**  No service answers for the drive. */
+{ kind: "unreachable"; detail: string } | 
+/**  The service refused the request. */
+{ kind: "api"; detail: {
+	status: number,
+	message: string,
+} } | 
+/**  A service, job or binary of another schema. */
+{ kind: "incompatible"; detail: string } | 
+/**  The service binary could not be checked, installed or started. */
+{ kind: "runner"; detail: string } | { kind: "internal"; detail: string };
 
 /**  One child directory offered by [`browse_directories`]. */
 export type BrowseEntry = {
@@ -1762,6 +1799,33 @@ export type Field =
 "endpoint" | "region" | "user" | 
 /**  S3 access key and secret, or a WebDAV password. */
 "secret";
+
+/**  `GET /v1/health`. */
+export type Health = {
+	/**  [`SCHEMA_VERSION`] the service speaks. */
+	schema_version: number,
+	/**  The service binary's version. */
+	version: string,
+	/**  Its process id. */
+	pid: number,
+	/**  Its host. */
+	host: string,
+	/**  The destination it serves. */
+	dest: string,
+	/**
+	 *  The destination's physical disk (`disk14`), when known. Not an
+	 *  identity: macOS renumbers disks on every plug.
+	 */
+	dest_disk_id?: string | null,
+	/**  When it started. */
+	started_at_ms: number,
+	/**  Milliseconds since it started. */
+	uptime_ms: number,
+	/**  The job it is running. */
+	active_job?: string | null,
+	/**  It has been asked to stop and is finishing the current item. */
+	stopping: boolean,
+};
 
 /**  Where a job is in its life. */
 export type JobState = 

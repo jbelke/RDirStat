@@ -4264,9 +4264,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "rdirstat-classify",
  "rdirstat-copy",
  "rdirstat-core",
+ "rdirstat-jobs",
  "rdirstat-remote",
  "rdirstat-scan",
  "rdirstat-treemap",
@@ -4375,6 +4379,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "specta",
 ]
 
 [[package]]

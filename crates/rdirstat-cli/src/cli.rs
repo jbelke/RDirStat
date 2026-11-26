@@ -73,6 +73,9 @@ pub(crate) enum BackupCommand {
     /// Pause, resume or cancel a job, or shut the service down. Takes effect
     /// between items: the item being copied always finishes.
     Control(BackupControlArgs),
+    /// Print this binary's version and the job schema it speaks as one JSON
+    /// line. The desktop app asks this before it launches the binary.
+    Version,
 }
 
 /// `rdirstat backup serve` options.
