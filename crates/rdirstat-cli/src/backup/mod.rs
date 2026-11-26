@@ -1,4 +1,4 @@
-//! `rdirstat backup plan` and `rdirstat backup apply`.
+//! `rdirstat backup plan`, `apply`, `index`, and `status`.
 //!
 //! The contract is `.settings/docs/11-ORGANIZE.md`, Amendment A, and the
 //! council call on `rds-fkk.10`:
@@ -27,9 +27,17 @@
 //! - A receipt is written only for an item whose destination compared equal to
 //!   its source. A failed copy or verify leaves the partial on disk and names
 //!   it; nothing is deleted.
+//!
+//! Amendment B: the drive describes itself. Apply writes the plan's rows
+//! (`plans` parts) and carries the plan's scan entries to
+//! `<dest>/.rdirstat/catalog`, then rebuilds `<dest>/index.parquet` and
+//! `<dest>/index.sql`. `backup index` does that rebuild alone; `backup status`
+//! reports from the same parts. Both read Parquet only and never walk the
+//! drive.
 
 mod apply;
 mod plan;
+mod status;
 #[cfg(test)]
 mod tests;
 
@@ -39,7 +47,7 @@ use std::process::ExitCode;
 use anyhow::{Context as _, Result, bail};
 use rdirstat_organize::DiskFacts;
 
-use crate::cli::{BackupApplyArgs, BackupCommand, BackupPlanArgs};
+use crate::cli::{BackupApplyArgs, BackupCommand, BackupDestArgs, BackupPlanArgs, BackupStatusArgs};
 
 #[cfg(test)]
 pub(crate) use apply::ApplyReport;
@@ -87,7 +95,73 @@ pub(crate) fn run(command: &BackupCommand) -> Result<ExitCode> {
     match command {
         BackupCommand::Plan(args) => run_plan(args),
         BackupCommand::Apply(args) => run_apply(args),
+        BackupCommand::Index(args) => run_index(args),
+        BackupCommand::Status(args) => run_status(args),
     }
+}
+
+/// The run id a plan's scan entries are written under:
+/// `plan-<label>-<created_at_ms>`.
+pub(crate) fn plan_id(plan: &rdirstat_organize::PlanFile) -> String {
+    format!("plan-{}-{}", plan.source_label, plan.created_at_ms)
+}
+
+/// Spotlight caveats for the drive: the marker file, then `mdutil -s`.
+fn spotlight_warnings(dest: &Path) -> Vec<String> {
+    status::spotlight_marker_warning(dest)
+        .into_iter()
+        .chain(status::mdutil_warning(dest))
+        .collect()
+}
+
+fn run_index(args: &BackupDestArgs) -> Result<ExitCode> {
+    let dest = std::fs::canonicalize(&args.dest).with_context(|| format!("cannot resolve {}", args.dest.display()))?;
+    let summary = rdirstat_catalog::rebuild_index(&dest)
+        .with_context(|| format!("rebuilding the index of {}", dest.display()))?;
+    let warnings = spotlight_warnings(&dest);
+    let text = if args.json {
+        let doc = serde_json::json!({
+            "index": summary.index.to_string_lossy(),
+            "sql": summary.sql.to_string_lossy(),
+            "files": summary.rows,
+            "logical": summary.bytes,
+            "warnings": warnings,
+        });
+        let mut text = serde_json::to_string_pretty(&doc)?;
+        text.push('\n');
+        text
+    } else {
+        let mut text = format!(
+            "Index: {} files, {} -> {}\nViews: duckdb -init {}\n",
+            summary.rows,
+            rdirstat_core::format_iec(summary.bytes),
+            summary.index.display(),
+            summary.sql.display()
+        );
+        for warning in &warnings {
+            text.push_str("Warning: ");
+            text.push_str(warning);
+            text.push('\n');
+        }
+        text
+    };
+    print(&text)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_status(args: &BackupStatusArgs) -> Result<ExitCode> {
+    let dest = std::fs::canonicalize(&args.dest).with_context(|| format!("cannot resolve {}", args.dest.display()))?;
+    let mut report = status::status(&dest, args.source_label.as_deref())?;
+    report.warnings.extend(status::mdutil_warning(&dest));
+    let text = if args.json {
+        let mut text = serde_json::to_string_pretty(&status::json(&report))?;
+        text.push('\n');
+        text
+    } else {
+        status::text(&report)
+    };
+    print(&text)?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_plan(args: &BackupPlanArgs) -> Result<ExitCode> {

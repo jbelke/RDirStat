@@ -1,10 +1,13 @@
 //! `rdirstat backup plan`: scan (or load a snapshot), rank, skip, budget,
 //! write the plan file, print the token.
 //!
-//! Planning writes exactly one file, the plan, and it is never on the
-//! destination or under the source (outside the app's own catalog
-//! directory; see the module docs of `backup`). The source is walked or
-//! `lstat`ed, never opened for writing.
+//! Planning writes the plan file and, in the primary catalog, the scan's
+//! `entries` (and a manifest) under the plan's id (`plan-<label>-<ms>`), so
+//! apply can carry them to the drive and `backup status` can say what over
+//! the floor is not yet backed up. Neither is ever on the destination or
+//! under the source (outside the app's own catalog directory; see the module
+//! docs of `backup`). The source is walked or `lstat`ed, never opened for
+//! writing.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -65,6 +68,10 @@ pub(crate) struct PlanOutcome {
     pub(crate) budget_logical: u64,
     pub(crate) warnings: Vec<Warning>,
     pub(crate) dest: DiskFacts,
+    /// The scan entries written under the plan's id, or why they were not.
+    /// A failure here does not void the plan; status just cannot see the
+    /// source's unplanned files.
+    pub(crate) entries: std::result::Result<PathBuf, String>,
 }
 
 /// Builds the plan, writes the plan file, and returns it with its token.
@@ -157,6 +164,7 @@ pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result
     let token = plan_token(&plan);
     let plan_path = plan_path_for(created_at_ms);
     write_plan(&plan, &plan_path)?;
+    let entries = write_scan_entries(&scan, &plan, &request.catalog);
 
     Ok(PlanOutcome {
         token,
@@ -170,8 +178,23 @@ pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result
         budget_logical: fitted.budget_logical,
         warnings: fitted.warnings,
         dest: dest_facts,
+        entries,
         plan,
     })
+}
+
+/// Writes the scan's entries, then a manifest, to the primary catalog under
+/// the plan's id.
+fn write_scan_entries(scan: &CompletedScan, plan: &PlanFile, catalog: &Path) -> std::result::Result<PathBuf, String> {
+    let id = super::plan_id(plan);
+    let primary = rdirstat_catalog::Catalog::new(catalog);
+    let written = primary
+        .write_entries(scan, &plan.source_label, &id)
+        .map_err(|error| format!("writing scan entries: {error}"))?;
+    primary
+        .write_manifest(&id, plan.created_at_ms)
+        .map_err(|error| format!("writing the scan manifest: {error}"))?;
+    Ok(written.primary)
 }
 
 fn canonical_dir(path: &Path) -> Result<PathBuf> {
@@ -394,6 +417,13 @@ fn skipped_by_rule(plan: &PlanFile) -> Vec<(String, String, u64, u64)> {
     rows
 }
 
+fn entries_line(outcome: &PlanOutcome) -> String {
+    match &outcome.entries {
+        Ok(path) => format!("Scan:  {}", path.display()),
+        Err(error) => format!("Scan entries not written ({error}); backup status cannot list unplanned files"),
+    }
+}
+
 /// The plan report as text.
 pub(crate) fn text(outcome: &PlanOutcome, top: usize) -> String {
     let plan = &outcome.plan;
@@ -487,6 +517,7 @@ pub(crate) fn text(outcome: &PlanOutcome, top: usize) -> String {
     }
 
     let _ = writeln!(out);
+    let _ = writeln!(out, "{}", entries_line(outcome));
     let _ = writeln!(out, "Plan:  {}", outcome.plan_path.display());
     let _ = writeln!(out, "Token: {}", outcome.token);
     let _ = writeln!(
@@ -549,6 +580,9 @@ pub(crate) fn json(outcome: &PlanOutcome, top: usize) -> Value {
         "top_items": top_items,
         "skipped_by_rule": skipped,
         "warnings": outcome.warnings,
+        "plan_id": super::plan_id(plan),
+        "entries_part": outcome.entries.as_ref().ok().map(|p| p.to_string_lossy().into_owned()),
+        "entries_error": outcome.entries.as_ref().err(),
     })
 }
 

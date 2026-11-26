@@ -14,6 +14,7 @@ use rdirstat_core::CompletedScan;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::plans::{PlanRow, write_plan_rows};
 use crate::rows::{Columns, HashRow, ReceiptRow, write_hashes, write_receipts};
 use crate::store::{list_parts, mirror_part, part_seq, read_batches, validate_run_id, write_part};
 use crate::{CatalogError, write_entries};
@@ -22,7 +23,7 @@ use crate::{CatalogError, write_entries};
 const MANIFEST: &str = "manifest";
 
 /// Part kinds a manifest inventories, in the order it lists them.
-const INVENTORIED: [&str; 3] = ["entries", "hashes", "receipts"];
+const INVENTORIED: [&str; 4] = ["entries", "hashes", "plans", "receipts"];
 
 /// Where a destination drive keeps its own copy of the catalog, relative to
 /// its mount point (docs/11-ORGANIZE.md, Amendment A).
@@ -39,7 +40,7 @@ pub fn dest_catalog_dir(dest_mount: &Path) -> PathBuf {
 pub struct ManifestRow {
     /// The run that wrote the part.
     pub run_id: String,
-    /// `entries`, `hashes`, or `receipts`.
+    /// `entries`, `hashes`, `plans`, or `receipts`.
     pub kind: String,
     /// The part's file name, e.g. `hashes-run1-0000.parquet`.
     pub file_name: String,
@@ -162,6 +163,15 @@ impl Catalog {
         self.mirrored(write_receipts(rows, &self.primary, run_id)?)
     }
 
+    /// [`write_plan_rows`] to the primary, then mirror.
+    ///
+    /// # Errors
+    ///
+    /// As [`write_plan_rows`], or [`CatalogError::Mirror`].
+    pub fn write_plan_rows(&self, rows: &[PlanRow], run_id: &str) -> Result<Written, CatalogError> {
+        self.mirrored(write_plan_rows(rows, &self.primary, run_id)?)
+    }
+
     /// [`write_entries`] to the primary, then mirror.
     ///
     /// # Errors
@@ -177,7 +187,7 @@ impl Catalog {
     }
 
     /// Writes `manifest-<run_id>-<seq>.parquet`: one row per `entries`,
-    /// `hashes`, and `receipts` part of `run_id` in the primary, with its row
+    /// `hashes`, `plans`, and `receipts` part of `run_id` in the primary, with its row
     /// count, size, and SHA-256, then mirrors it. Call it once a run has
     /// written its last part; a mirror can then be checked against it.
     ///

@@ -47,6 +47,41 @@ pub(crate) enum BackupCommand {
     /// Copy a plan's items to the destination and record a receipt for each
     /// item that verified. Refuses unless `--token` matches the plan file.
     Apply(Box<BackupApplyArgs>),
+    /// Rebuild `<dest>/index.parquet` and `<dest>/index.sql` from the drive's
+    /// own catalog parts. Reads Parquet only; never walks the drive.
+    Index(BackupDestArgs),
+    /// Print what the drive holds per source: bytes and files backed up,
+    /// clone savings, pending items of the last plan, and files over the
+    /// floor not yet backed up. Reads Parquet only; never walks the drive.
+    Status(BackupStatusArgs),
+}
+
+/// `rdirstat backup index` options.
+#[derive(Debug, Args)]
+pub(crate) struct BackupDestArgs {
+    /// Destination root (the backup volume's mount point).
+    #[arg(long, value_name = "DIR")]
+    pub(crate) dest: PathBuf,
+
+    /// Print one JSON document instead of text.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+/// `rdirstat backup status` options.
+#[derive(Debug, Args)]
+pub(crate) struct BackupStatusArgs {
+    /// Destination root (the backup volume's mount point).
+    #[arg(long, value_name = "DIR")]
+    pub(crate) dest: PathBuf,
+
+    /// Only this source label.
+    #[arg(long, value_name = "LABEL")]
+    pub(crate) source_label: Option<String>,
+
+    /// Print one JSON document instead of text.
+    #[arg(long)]
+    pub(crate) json: bool,
 }
 
 /// `rdirstat backup plan` options.

@@ -23,7 +23,10 @@
 //! name a reader picks up. Readers only open files whose names start with
 //! `<kind>-` and end in `.parquet`.
 //!
-//! A fourth kind, `manifest-<run>-<seq>.parquet`, written by
+//! - `plans-<run>-<seq>.parquet` — what a Backup plan chose and skipped,
+//!   one row per item, written by [`write_plan_rows`].
+//!
+//! A fifth kind, `manifest-<run>-<seq>.parquet`, written by
 //! [`Catalog::write_manifest`], lists every part a run wrote with its row
 //! count, size, and SHA-256, so a mirror can be checked file by file.
 //!
@@ -37,11 +40,20 @@
 //! Catalog files hold filenames, which are sensitive: files are created mode
 //! `0600`.
 //!
-//! This crate writes only inside the catalog directory it is handed. It never
-//! opens, stats, or modifies the paths its rows describe.
+//! # The drive's index
+//!
+//! [`rebuild_index`] derives `<dest>/index.parquet` (one row per landed
+//! destination path) and `<dest>/index.sql` (DuckDB views) from the parts in
+//! `<dest>/.rdirstat/catalog/` (docs/11-ORGANIZE.md, Amendment B). Those two
+//! files are the only ones this crate writes outside a catalog directory, and
+//! they are replaced whole, never edited.
+//!
+//! This crate never opens, stats, or modifies the paths its rows describe.
 
 mod catalog;
 mod entries;
+mod index;
+mod plans;
 mod rows;
 mod store;
 
@@ -49,6 +61,11 @@ use std::path::PathBuf;
 
 pub use crate::catalog::{Catalog, DEST_CATALOG_DIR, ManifestRow, Written, dest_catalog_dir, read_manifests};
 pub use crate::entries::write_entries;
+pub use crate::index::{
+    EntryView, INDEX_FILE, INDEX_SQL_FILE, IndexRow, IndexSummary, build_index, index_sql, read_index, rebuild_index,
+    visit_entries, write_index,
+};
+pub use crate::plans::{PLAN_STATUS_PLANNED, PLAN_STATUS_SKIPPED, PlanRow, read_plan_rows, write_plan_rows};
 pub use crate::rows::{HashRow, ReceiptRow, read_hashes, read_receipts, write_hashes, write_receipts};
 
 /// Rows per Arrow record batch while writing `entries`.

@@ -660,6 +660,107 @@ fn a_snapshot_plans_like_a_walk_and_catches_changes_since_it() {
 }
 
 #[test]
+fn apply_leaves_an_index_and_status_reads_it_from_parquet_alone() {
+    let fx = Fixture::new();
+    let planned = fx.plan();
+    assert!(planned.entries.is_ok(), "{:?}", planned.entries);
+    let plan_id = plan_id(&planned.plan);
+    assert!(
+        !fx.dest.join(".rdirstat").exists() && !fx.dest.join("index.parquet").exists(),
+        "planning still writes nothing on the destination"
+    );
+
+    let report = fx.apply(&planned.token).expect("apply");
+    assert!(report.complete(), "{}", apply::text(&report));
+    let index = report.index.as_ref().expect("index rebuilt by apply");
+    assert_eq!(index.rows, planned.plan.items.len());
+    assert!(apply::text(&report).contains("Index: "));
+
+    let rows = rdirstat_catalog::read_index(&fx.dest.join("index.parquet")).expect("index");
+    assert_eq!(rows.len(), planned.plan.items.len());
+    let dupe = rows
+        .iter()
+        .find(|r| r.dest_path.ends_with("dupe-b.bin"))
+        .expect("dupe row");
+    assert_eq!(dupe.dup_count, 2, "both duplicate source paths counted");
+    assert_eq!(dupe.ext.as_deref(), Some("bin"));
+    assert!(dupe.category.is_some(), "category joined from the plan's scan entries");
+    let sql = std::fs::read_to_string(fx.dest.join("index.sql")).expect("index.sql");
+    for view in ["files", "receipts", "entries", "skipped", "dupes"] {
+        assert!(sql.contains(&format!("VIEW {view} AS")), "{view}");
+    }
+
+    let catalog = fx.dest.join(".rdirstat/catalog");
+    let names: Vec<String> = std::fs::read_dir(&catalog)
+        .expect("mirror")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.starts_with(&format!("entries-{plan_id}-"))),
+        "{names:?}"
+    );
+    assert!(names.iter().any(|n| n.starts_with("plans-")), "{names:?}");
+
+    let report = status::status(&fx.dest, None).expect("status");
+    assert_eq!(report.sources.len(), 1);
+    let source = &report.sources[0];
+    assert_eq!(source.backed_up.items, planned.plan.items.len() as u64);
+    assert!(source.cloned.items >= 1, "{source:?}");
+    assert_eq!(source.pending.items, 0);
+    assert!(source.skipped.items >= 1, "node_modules skipped: {source:?}");
+    assert_eq!(source.last_plan.as_deref(), Some(plan_id.as_str()));
+    assert_eq!(source.not_backed_up.map(|t| t.items), Some(0), "{source:?}");
+    assert!(
+        report.warnings.iter().any(|w| w.contains(".metadata_never_index")),
+        "{:?}",
+        report.warnings
+    );
+    let text = status::text(&report);
+    assert!(text.contains("mac-data") && text.contains("clone savings"), "{text}");
+    assert_eq!(status::json(&report)["sources"][0]["pending"]["items"], 0);
+
+    // Parquet only: a landed file removed behind the catalog's back is still
+    // reported, and `backup index` rebuilds the same rows without looking.
+    std::fs::remove_file(fx.mirror("Movies/big.bin")).expect("remove");
+    let again = status::status(&fx.dest, Some("mac-data")).expect("status");
+    assert_eq!(again.sources[0].backed_up, source.backed_up);
+    let rebuilt = rdirstat_catalog::rebuild_index(&fx.dest).expect("rebuild");
+    assert_eq!(rebuilt.rows, rows.len());
+
+    assert!(status::status(&fx.dest, Some("tuf8tb")).is_err(), "unknown label");
+}
+
+#[test]
+fn status_counts_what_the_last_plan_left_behind() {
+    let fx = Fixture::new();
+    let planned = fx.plan();
+    std::fs::write(fx.source.join("Documents/report.pdf"), bytes(9, 32 * 1024)).expect("rewrite");
+    let report = fx.apply(&planned.token).expect("apply");
+    assert_eq!(outcome_of(&report, "Documents/report.pdf"), Outcome::ChangedSinceScan);
+
+    let status = status::status(&fx.dest, None).expect("status");
+    let source = &status.sources[0];
+    assert_eq!(source.pending.items, 1);
+    assert_eq!(source.pending.bytes, 32 * 1024);
+    let missing = source.not_backed_up.expect("scan entries on the drive");
+    assert_eq!(missing.items, 1, "{source:?}");
+    assert!(
+        source.largest_not_backed_up[0].0.ends_with("Documents/report.pdf"),
+        "{:?}",
+        source.largest_not_backed_up
+    );
+}
+
+#[test]
+fn index_and_status_refuse_a_drive_without_a_catalog() {
+    let fx = Fixture::new();
+    assert!(rdirstat_catalog::rebuild_index(&fx.dest).is_err());
+    let error = status::status(&fx.dest, None).expect_err("no catalog");
+    assert!(error.to_string().contains("no catalog"), "{error:#}");
+    assert!(!fx.dest.join("index.parquet").exists());
+}
+
+#[test]
 fn sizes_parse() {
     assert_eq!(parse_size("100MiB"), Ok(100 << 20));
     assert_eq!(parse_size("100 mib"), Ok(100 << 20));

@@ -9,7 +9,10 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
-use rdirstat_catalog::{Catalog, CatalogError, HashRow, ReceiptRow, read_receipts};
+use rdirstat_catalog::{
+    Catalog, CatalogError, HashRow, IndexSummary, PLAN_STATUS_PLANNED, PLAN_STATUS_SKIPPED, PlanRow, ReceiptRow,
+    read_receipts, rebuild_index,
+};
 use rdirstat_copy::{Method, land, partial_path, sha256_file, sha256_hex};
 use rdirstat_core::format_iec;
 use rdirstat_organize::{
@@ -125,6 +128,10 @@ pub(crate) struct ApplyReport {
     /// A catalog write that failed. Items that landed without a receipt on
     /// disk are not proven, so the run is incomplete.
     pub(crate) catalog_error: Option<String>,
+    /// The drive's `index.parquet` rebuilt at the end of the run, or why it
+    /// was not. The index is derived; a failure here loses no receipt, and
+    /// `rdirstat backup index` rebuilds it.
+    pub(crate) index: std::result::Result<IndexSummary, String>,
 }
 
 impl ApplyReport {
@@ -210,7 +217,9 @@ pub(crate) fn apply(request: &ApplyRequest, probe: &dyn DiskProbe) -> Result<App
     let catalog = Catalog::for_destination(&request.catalog, &plan.dest_root);
     let mut landed = Landed::load(&catalog)?;
     let run_id = format!("backup-{}-{}", plan.source_label, now_ms());
-    let mut writer = ReceiptWriter::new(&catalog, &run_id);
+    let plan_id = super::plan_id(&plan);
+    let mut writer = ReceiptWriter::new(&catalog, &run_id, &plan_id);
+    writer.write_plan_rows(&plan_rows(&plan, &plan_id));
     let mirror_root = plan.dest_root.join(BACKUPS_DIR).join(&plan.source_label);
     let never = AtomicBool::new(false);
 
@@ -231,6 +240,7 @@ pub(crate) fn apply(request: &ApplyRequest, probe: &dyn DiskProbe) -> Result<App
     writer.finish();
 
     let (receipts_written, catalog_error) = (writer.receipts_written, writer.error);
+    let index = rebuild_index(&plan.dest_root).map_err(|error| error.to_string());
     Ok(ApplyReport {
         run_id,
         plan_path: request.plan.clone(),
@@ -241,7 +251,39 @@ pub(crate) fn apply(request: &ApplyRequest, probe: &dyn DiskProbe) -> Result<App
         catalog_primary: catalog.primary().to_path_buf(),
         catalog_mirror: catalog.mirror().map(Path::to_path_buf),
         catalog_error,
+        index,
     })
+}
+
+/// The plan's items and listed skips as catalog rows.
+fn plan_rows(plan: &PlanFile, plan_id: &str) -> Vec<PlanRow> {
+    let row = |status: &str, relative: &Path| PlanRow {
+        plan_id: plan_id.to_owned(),
+        source_label: plan.source_label.clone(),
+        status: status.to_owned(),
+        relative: relative.to_string_lossy().into_owned(),
+        source_path: plan.source_root.join(relative).to_string_lossy().into_owned(),
+        kind: String::new(),
+        logical: 0,
+        allocated: 0,
+        rule_id: String::new(),
+        reason: String::new(),
+        floor_allocated: plan.floor_allocated,
+        created_at_ms: plan.created_at_ms,
+    };
+    let planned = plan.items.iter().map(|item| PlanRow {
+        kind: super::plan::kind_key(item.kind).to_owned(),
+        logical: item.logical,
+        allocated: item.allocated,
+        ..row(PLAN_STATUS_PLANNED, &item.relative)
+    });
+    let skipped = plan.skipped.iter().map(|item| PlanRow {
+        allocated: item.allocated,
+        rule_id: item.rule_id.clone(),
+        reason: item.reason.clone(),
+        ..row(PLAN_STATUS_SKIPPED, &item.relative)
+    });
+    planned.chain(skipped).collect()
 }
 
 /// What the destination drive's own catalog says has landed on it.
@@ -301,6 +343,8 @@ impl Landed {
 struct ReceiptWriter<'a> {
     catalog: &'a Catalog,
     run_id: &'a str,
+    /// The plan's id: its scan entries in the primary travel with this run.
+    plan_id: &'a str,
     receipts: Vec<ReceiptRow>,
     hashes: Vec<HashRow>,
     last_flush: Instant,
@@ -310,16 +354,26 @@ struct ReceiptWriter<'a> {
 }
 
 impl<'a> ReceiptWriter<'a> {
-    fn new(catalog: &'a Catalog, run_id: &'a str) -> Self {
+    fn new(catalog: &'a Catalog, run_id: &'a str, plan_id: &'a str) -> Self {
         Self {
             catalog,
             run_id,
+            plan_id,
             receipts: Vec::new(),
             hashes: Vec::new(),
             last_flush: Instant::now(),
             receipts_written: 0,
             parts_written: 0,
             error: None,
+        }
+    }
+
+    /// Records what the plan chose and skipped, before anything is copied,
+    /// so the drive knows what was meant to land even if the run stops.
+    fn write_plan_rows(&mut self, rows: &[PlanRow]) {
+        match self.catalog.write_plan_rows(rows, self.run_id) {
+            Ok(_) | Err(CatalogError::Mirror { .. }) => self.parts_written += 1,
+            Err(error) => self.error = Some(format!("writing the plan rows: {error}")),
         }
     }
 
@@ -367,6 +421,10 @@ impl<'a> ReceiptWriter<'a> {
         }
         if let Err(error) = self.catalog.sync_mirror(self.run_id) {
             self.error = Some(format!("mirroring the catalog to the destination: {error}"));
+            return;
+        }
+        if let Err(error) = self.catalog.sync_mirror(self.plan_id) {
+            self.error = Some(format!("mirroring the plan's scan entries to the destination: {error}"));
             return;
         }
         if let Err(error) = self.catalog.write_manifest(self.run_id, now_ms()) {
@@ -714,6 +772,24 @@ pub(crate) fn text(report: &ApplyReport) -> String {
     if let Some(error) = &report.catalog_error {
         let _ = writeln!(out, "Catalog error: {error}");
     }
+    match &report.index {
+        Ok(index) => {
+            let _ = writeln!(
+                out,
+                "Index: {} files, {} -> {}",
+                index.rows,
+                format_iec(index.bytes),
+                index.index.display()
+            );
+        }
+        Err(error) => {
+            let _ = writeln!(
+                out,
+                "Index not rebuilt ({error}); run: rdirstat backup index --dest {}",
+                report.dest_root.display()
+            );
+        }
+    }
     let not_landed: Vec<&ItemResult> = report.results.iter().filter(|r| !r.outcome.landed()).collect();
     if !not_landed.is_empty() {
         let _ = writeln!(out, "Not landed:");
@@ -751,6 +827,10 @@ pub(crate) fn json(report: &ApplyReport) -> Value {
         "catalog_primary": report.catalog_primary.to_string_lossy(),
         "catalog_mirror": report.catalog_mirror.as_ref().map(|m| m.to_string_lossy().into_owned()),
         "catalog_error": report.catalog_error,
+        "index": match &report.index {
+            Ok(index) => json!({ "path": index.index.to_string_lossy(), "sql": index.sql.to_string_lossy(), "files": index.rows, "logical": index.bytes }),
+            Err(error) => json!({ "error": error }),
+        },
         "items": report.results,
     })
 }

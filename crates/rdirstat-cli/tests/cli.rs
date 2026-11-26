@@ -416,3 +416,33 @@ fn backup_apply_refuses_a_plan_it_cannot_read_and_a_bad_floor_is_a_usage_error()
     ]);
     assert_eq!(usage.status.code(), Some(2), "clap usage error: {usage:?}");
 }
+
+#[test]
+fn backup_index_and_status_read_the_drives_catalog_and_refuse_without_one() {
+    let dest = tempfile::tempdir().expect("tempdir");
+    let dest_arg = dest.path().to_string_lossy().into_owned();
+    for command in ["index", "status"] {
+        let output = run(&["backup", command, "--dest", &dest_arg]);
+        assert_eq!(output.status.code(), Some(1), "{command}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("catalog"),
+            "{command} names the missing catalog: {output:?}"
+        );
+    }
+    assert_eq!(
+        fs::read_dir(dest.path()).expect("readdir").count(),
+        0,
+        "nothing written"
+    );
+
+    // An empty catalog is a drive with nothing on it yet.
+    fs::create_dir_all(dest.path().join(".rdirstat/catalog")).expect("mkdir");
+    let index = run(&["backup", "index", "--dest", &dest_arg, "--json"]);
+    assert_eq!(index.status.code(), Some(0), "{index:?}");
+    let doc: serde_json::Value = serde_json::from_slice(&index.stdout).expect("json");
+    assert_eq!(doc["files"], 0);
+    assert!(dest.path().join("index.parquet").exists() && dest.path().join("index.sql").exists());
+    let status = run(&["backup", "status", "--dest", &dest_arg]);
+    assert_eq!(status.status.code(), Some(0), "{status:?}");
+    assert!(stdout_of(&status).contains("nothing backed up yet"));
+}

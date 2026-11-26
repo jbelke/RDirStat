@@ -67,7 +67,7 @@ pub struct ReceiptRow {
     pub verified_at_ms: i64,
 }
 
-static HASH_SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {
+pub(crate) static HASH_SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
         Field::new("path", DataType::Utf8, false),
         Field::new("dev", DataType::UInt64, false),
@@ -78,7 +78,7 @@ static HASH_SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {
     ]))
 });
 
-static RECEIPT_SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {
+pub(crate) static RECEIPT_SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
         Field::new("run_id", DataType::Utf8, false),
         Field::new("source_label", DataType::Utf8, false),
@@ -219,6 +219,18 @@ impl<'a> Columns<'a> {
 
     pub(crate) fn i64(&self, name: &str) -> Result<&'a Int64Array, CatalogError> {
         self.get(name, "Int64")
+    }
+
+    /// Like [`Columns::get`], but a column that may hold nulls.
+    pub(crate) fn nullable<T: Array + 'static>(&self, name: &str, type_name: &str) -> Result<&'a T, CatalogError> {
+        let column = self.batch.column_by_name(name).ok_or_else(|| CatalogError::Schema {
+            path: self.path.to_path_buf(),
+            detail: format!("missing column {name:?}"),
+        })?;
+        column.as_any().downcast_ref::<T>().ok_or_else(|| CatalogError::Schema {
+            path: self.path.to_path_buf(),
+            detail: format!("column {name:?} is {}, expected {type_name}", column.data_type()),
+        })
     }
 }
 

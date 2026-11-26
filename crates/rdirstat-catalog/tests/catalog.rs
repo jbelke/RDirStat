@@ -465,3 +465,97 @@ fn sync_mirrors_only_the_named_run() {
     to_a.sync_mirror("backup-mac-data-1").unwrap();
     assert!(to_a.sync_mirror("old").is_err());
 }
+
+fn landed(dest: &Path, relative: &str, method: &str, sha: &str, verified_at_ms: i64) -> ReceiptRow {
+    ReceiptRow {
+        run_id: format!("backup-src-{verified_at_ms}"),
+        source_label: "src".to_owned(),
+        source_path: format!("/Volumes/src/{relative}"),
+        source_dev: 1,
+        source_ino: 9,
+        size: 4096,
+        mtime_ns: 30_000_000_000,
+        dest_path: dest.join("Backups/src").join(relative).to_string_lossy().into_owned(),
+        method: method.to_owned(),
+        sha256: sha.to_owned(),
+        verified_at_ms,
+    }
+}
+
+#[test]
+fn plan_rows_round_trip_and_bad_status_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let row = rdirstat_catalog::PlanRow {
+        plan_id: "plan-src-1".into(),
+        source_label: "src".into(),
+        status: rdirstat_catalog::PLAN_STATUS_SKIPPED.into(),
+        relative: "web/node_modules".into(),
+        source_path: "/Volumes/src/web/node_modules".into(),
+        kind: String::new(),
+        logical: 0,
+        allocated: 1 << 30,
+        rule_id: "node-modules".into(),
+        reason: "rebuildable".into(),
+        floor_allocated: 1 << 20,
+        created_at_ms: 1,
+    };
+    rdirstat_catalog::write_plan_rows(std::slice::from_ref(&row), dir.path(), "run1").unwrap();
+    assert_eq!(rdirstat_catalog::read_plan_rows(dir.path()).unwrap(), vec![row.clone()]);
+
+    let mut bad = row;
+    bad.status = "maybe".into();
+    assert!(matches!(
+        rdirstat_catalog::write_plan_rows(&[bad], dir.path(), "run2"),
+        Err(CatalogError::InvalidRow { index: 0, .. })
+    ));
+}
+
+#[test]
+fn the_index_is_rebuilt_from_the_drives_parts_only() {
+    let dest = tempfile::tempdir().unwrap();
+    let dest = dest.path();
+    let catalog = dest_catalog_dir(dest);
+    assert!(rdirstat_catalog::rebuild_index(dest).is_err(), "no catalog, no index");
+
+    // clip.MKV copied, then re-landed later; readme cloned from the same
+    // content; one unrelated file.
+    let first = landed(dest, "media/clip.MKV", "copy", SHA_A, 10);
+    let mut again = landed(dest, "media/clip.MKV", "copy", SHA_A, 20);
+    again.run_id = "backup-src-later".into();
+    let clone = landed(dest, "readme.TXT", "clone", SHA_A, 15);
+    let other = landed(dest, "other.bin", "copy", SHA_B, 15);
+    write_receipts(&[first, clone], &catalog, "backup-src-10").unwrap();
+    write_receipts(&[again, other], &catalog, "backup-src-later").unwrap();
+    write_entries(&scan(), "src", &catalog, "plan-src-1").unwrap();
+
+    let summary = rdirstat_catalog::rebuild_index(dest).unwrap();
+    assert_eq!(summary.rows, 3, "one row per destination path");
+    assert_eq!(summary.bytes, 3 * 4096);
+    assert!(!dest.join("index.parquet.tmp").exists());
+
+    let rows = rdirstat_catalog::read_index(&dest.join(rdirstat_catalog::INDEX_FILE)).unwrap();
+    assert_eq!(rows, rdirstat_catalog::build_index(&catalog).unwrap());
+    let clip = rows.iter().find(|r| r.dest_path.ends_with("clip.MKV")).unwrap();
+    assert_eq!(clip.run_id, "backup-src-later", "the later receipt wins");
+    assert_eq!(clip.ext.as_deref(), Some("mkv"));
+    assert_eq!(clip.category, Some(3), "category from the source's scan entries");
+    assert_eq!(clip.dup_count, 2, "clip and readme share content");
+    let readme = rows.iter().find(|r| r.dest_path.ends_with("readme.TXT")).unwrap();
+    assert_eq!((readme.method.as_str(), readme.dup_count), ("clone", 2));
+    let other = rows.iter().find(|r| r.dest_path.ends_with("other.bin")).unwrap();
+    assert_eq!((other.dup_count, other.category), (1, None));
+
+    let sql = std::fs::read_to_string(dest.join(rdirstat_catalog::INDEX_SQL_FILE)).unwrap();
+    for view in ["files", "receipts", "entries", "plans", "skipped", "dupes"] {
+        assert!(
+            sql.contains(&format!("CREATE OR REPLACE VIEW {view} AS")),
+            "{view}: {sql}"
+        );
+    }
+    assert!(sql.contains(&catalog.join("receipts-*.parquet").to_string_lossy().into_owned()));
+    assert!(sql.contains("No plans parts yet"), "{sql}");
+
+    // A rebuild replaces the index whole.
+    write_receipts(&[landed(dest, "new.bin", "copy", SHA_B, 30)], &catalog, "backup-src-30").unwrap();
+    assert_eq!(rdirstat_catalog::rebuild_index(dest).unwrap().rows, 4);
+}

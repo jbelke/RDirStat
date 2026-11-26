@@ -40,12 +40,12 @@ use crate::store::{validate_run_id, write_part};
 use crate::{CatalogError, ENTRIES_BATCH_ROWS};
 
 /// Part-file kind for scan entries.
-const ENTRIES: &str = "entries";
+pub(crate) const ENTRIES: &str = "entries";
 
 /// Longest extension kept; anything longer is a name with a dot, not a type.
 const MAX_EXT_BYTES: usize = 16;
 
-static ENTRY_SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {
+pub(crate) static ENTRY_SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
         Field::new("entry_id", DataType::UInt32, false),
         Field::new("parent_id", DataType::UInt32, true),
@@ -77,7 +77,7 @@ fn kind_key(kind: Kind) -> &'static str {
 
 /// Lowercase extension of `name`, or `None` for dotfiles, trailing dots,
 /// over-long suffixes, and non-UTF-8 suffixes.
-fn extension(name: &[u8]) -> Option<String> {
+pub(crate) fn extension(name: &[u8]) -> Option<String> {
     let dot = name.iter().rposition(|&b| b == b'.')?;
     if dot == 0 {
         return None;
