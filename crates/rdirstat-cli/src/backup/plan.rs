@@ -2,7 +2,9 @@
 //! write the plan file, print the token.
 //!
 //! Planning writes exactly one file, the plan, and it is never on the
-//! destination. The source is walked or `lstat`ed, never opened for writing.
+//! destination or under the source (outside the app's own catalog
+//! directory; see the module docs of `backup`). The source is walked or
+//! `lstat`ed, never opened for writing.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -40,6 +42,9 @@ pub(crate) struct PlanRequest {
     pub(crate) out: Option<PathBuf>,
     /// Primary catalog directory (the default plan location hangs off it).
     pub(crate) catalog: PathBuf,
+    /// The app's own catalog directory: the one place under the source a
+    /// plan or catalog may be written. `None` allows no such place.
+    pub(crate) app_catalog: Option<PathBuf>,
     pub(crate) progress: bool,
 }
 
@@ -88,6 +93,19 @@ pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result
     let Some(dest_disk_id) = dest_facts.disk_id.clone() else {
         bail!("the destination's physical disk is unknown; refusing to guess");
     };
+    let Some(dest_volume_uuid) = dest_facts.volume_uuid.clone() else {
+        bail!("the destination's volume UUID is unknown; apply could not tell this drive from another");
+    };
+    let plan_path_for = |created_at_ms: i64| match &request.out {
+        Some(path) => path.clone(),
+        None => request
+            .catalog
+            .join("plans")
+            .join(format!("{}-{created_at_ms}.json", request.label)),
+    };
+    let app_catalog = request.app_catalog.as_deref();
+    super::refuse_write_under_source(&source, "the catalog", &request.catalog, app_catalog)?;
+    super::refuse_write_under_source(&source, "the plan file", &plan_path_for(0), app_catalog)?;
 
     let (scan, snapshot_identity) = match snapshot {
         Some(loaded) => loaded,
@@ -126,6 +144,7 @@ pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result
         source_label: request.label.clone(),
         dest_root: dest,
         dest_disk_id,
+        dest_volume_uuid,
         source_snapshot: snapshot_identity,
         rules_hash: request.rules.hash_hex(),
         rules_version: request.rules.version(),
@@ -136,13 +155,7 @@ pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result
         created_at_ms,
     };
     let token = plan_token(&plan);
-    let plan_path = match &request.out {
-        Some(path) => path.clone(),
-        None => request
-            .catalog
-            .join("plans")
-            .join(format!("{}-{created_at_ms}.json", request.label)),
-    };
+    let plan_path = plan_path_for(created_at_ms);
     write_plan(&plan, &plan_path)?;
 
     Ok(PlanOutcome {
@@ -516,6 +529,7 @@ pub(crate) fn json(outcome: &PlanOutcome, top: usize) -> Value {
         "source_label": plan.source_label,
         "dest_root": plan.dest_root.to_string_lossy(),
         "dest_disk_id": plan.dest_disk_id,
+        "dest_volume_uuid": plan.dest_volume_uuid,
         "source_snapshot": plan.source_snapshot,
         "rules_hash": plan.rules_hash,
         "rules_version": plan.rules_version,

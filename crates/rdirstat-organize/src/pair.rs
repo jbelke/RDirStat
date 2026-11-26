@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 pub struct DiskFacts {
     /// Physical store identifier (for example `disk14`), `None` when unknown.
     pub disk_id: Option<String>,
+    /// Volume UUID of the mounted filesystem, `None` when unknown. Stable
+    /// across replugs and reboots, where `disk_id` (a BSD name) is not.
+    #[serde(default)]
+    pub volume_uuid: Option<String>,
     /// `st_dev` of the mounted filesystem.
     pub st_dev: u64,
     /// Filesystem type name as reported by the OS (`apfs`, `exfat`, ...).
@@ -75,6 +79,7 @@ mod tests {
     fn facts(disk: Option<&str>, dev: u64) -> DiskFacts {
         DiskFacts {
             disk_id: disk.map(str::to_owned),
+            volume_uuid: None,
             st_dev: dev,
             filesystem: "apfs".into(),
             total_bytes: 100,

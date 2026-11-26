@@ -35,6 +35,9 @@ pub(crate) struct ApplyRequest {
     pub(crate) token: String,
     /// Primary catalog directory; receipts are mirrored to the destination.
     pub(crate) catalog: PathBuf,
+    /// The app's own catalog directory: the one place under the source the
+    /// catalog may be. `None` allows no such place.
+    pub(crate) app_catalog: Option<PathBuf>,
     /// Print one line per item on stderr.
     pub(crate) progress: bool,
 }
@@ -48,7 +51,9 @@ pub(crate) enum Outcome {
     /// `clonefile(2)` of a landed duplicate, then a contents compare passed.
     /// Receipted.
     Cloned,
-    /// A receipt for this source identity at this destination already exists.
+    /// The destination drive's own catalog holds a receipt for this source
+    /// identity at this path, and what is there still has the receipt's kind
+    /// and size.
     AlreadyLanded,
     /// The source's `(dev, ino, size, mtime)` differs from the plan. Skipped.
     ChangedSinceScan,
@@ -56,7 +61,8 @@ pub(crate) enum Outcome {
     /// and named; no receipt.
     ChangedDuringCopy,
     /// Something not receipted by a matching source is at the destination
-    /// path. It is left alone.
+    /// path, or a receipted copy that no longer has its receipt's kind or
+    /// size. It is left alone.
     DestinationOccupied,
     /// The copy or verify failed. A partial, if any, is left and named; no
     /// receipt.
@@ -141,7 +147,8 @@ impl ApplyReport {
 ///
 /// Refusals that stop the whole plan before anything is written: an unreadable
 /// or non-Backup plan file, a token mismatch, a refused disk pair, a
-/// destination whose `disk_id` is not the plan's, or an unreadable catalog.
+/// destination volume whose UUID is not the plan's, a catalog under the
+/// source, or an unreadable catalog.
 /// Per-item problems are not errors; they are [`Outcome`]s in the report.
 pub(crate) fn apply(request: &ApplyRequest, probe: &dyn DiskProbe) -> Result<ApplyReport> {
     let bytes = std::fs::read(&request.plan).with_context(|| format!("cannot read {}", request.plan.display()))?;
@@ -183,13 +190,22 @@ pub(crate) fn apply(request: &ApplyRequest, probe: &dyn DiskProbe) -> Result<App
             plan.dest_root.display()
         )
     })?;
-    if dest_facts.disk_id.as_deref() != Some(plan.dest_disk_id.as_str()) {
+    // The BSD disk name is renumbered on every plug and boot, so the volume
+    // UUID is what says this is the drive the plan was made for.
+    if dest_facts.volume_uuid.as_deref() != Some(plan.dest_volume_uuid.as_str()) {
         bail!(
-            "the destination is on disk {:?}, the plan was made for {:?}; make a new plan",
-            dest_facts.disk_id.as_deref().unwrap_or("unknown"),
-            plan.dest_disk_id
+            "the volume at {} is {:?}, the plan was made for volume {:?}; make a new plan",
+            plan.dest_root.display(),
+            dest_facts.volume_uuid.as_deref().unwrap_or("unknown"),
+            plan.dest_volume_uuid
         );
     }
+    super::refuse_write_under_source(
+        &plan.source_root,
+        "the catalog",
+        &request.catalog,
+        request.app_catalog.as_deref(),
+    )?;
 
     let catalog = Catalog::for_destination(&request.catalog, &plan.dest_root);
     let mut landed = Landed::load(&catalog)?;
@@ -228,7 +244,7 @@ pub(crate) fn apply(request: &ApplyRequest, probe: &dyn DiskProbe) -> Result<App
     })
 }
 
-/// What the catalog already says has landed.
+/// What the destination drive's own catalog says has landed on it.
 struct Landed {
     /// `(size, sha256)` → a landed destination file with that content.
     by_content: HashMap<(u64, String), PathBuf>,
@@ -240,12 +256,18 @@ struct Landed {
 }
 
 impl Landed {
+    /// Reads receipts from the drive's mirror catalog only. The primary holds
+    /// receipts for every drive ever used; another drive mounted at the same
+    /// path must not inherit them. A receipt that reached the primary but not
+    /// the mirror reads as absent, which refuses (`DestinationOccupied`)
+    /// rather than claims.
     fn load(catalog: &Catalog) -> Result<Self> {
-        let mut rows = read_receipts(catalog.primary())
-            .with_context(|| format!("reading receipts in {}", catalog.primary().display()))?;
-        if let Some(mirror) = catalog.mirror() {
-            rows.extend(read_receipts(mirror).with_context(|| format!("reading receipts in {}", mirror.display()))?);
-        }
+        let rows = match catalog.mirror() {
+            Some(mirror) => {
+                read_receipts(mirror).with_context(|| format!("reading receipts in {}", mirror.display()))?
+            }
+            None => Vec::new(),
+        };
         let mut landed = Landed {
             by_content: HashMap::new(),
             sizes: HashSet::new(),
@@ -266,7 +288,8 @@ impl Landed {
     }
 
     /// A landed regular file with this size and hash that still exists with
-    /// that size. The clone is compared against the source anyway.
+    /// that size. `land` compares it against the source before cloning and
+    /// copies instead if it has gone stale.
     fn clone_source(&self, size: u64, sha256: &str) -> Option<&Path> {
         let path = self.by_content.get(&(size, sha256.to_owned()))?;
         let meta = std::fs::symlink_metadata(path).ok()?;
@@ -342,7 +365,7 @@ impl<'a> ReceiptWriter<'a> {
         if self.parts_written == 0 || self.error.is_some() {
             return;
         }
-        if let Err(error) = self.catalog.sync_mirror() {
+        if let Err(error) = self.catalog.sync_mirror(self.run_id) {
             self.error = Some(format!("mirroring the catalog to the destination: {error}"));
             return;
         }
@@ -385,7 +408,13 @@ fn land_item(
 
     if std::fs::symlink_metadata(&dest).is_ok() {
         match landed.by_dest.get(&result.dest) {
-            Some(receipt) if receipt_matches(receipt, item) => result.outcome = Outcome::AlreadyLanded,
+            Some(receipt) if receipt_matches(receipt, plan, item) => match still_landed(&dest, item.kind, receipt) {
+                Ok(()) => result.outcome = Outcome::AlreadyLanded,
+                Err(reason) => {
+                    result.outcome = Outcome::DestinationOccupied;
+                    result.detail = Some(format!("receipted, but the copy at the destination {reason}"));
+                }
+            },
             _ => {
                 result.outcome = Outcome::DestinationOccupied;
                 result.detail = Some("something without a matching receipt is already at the destination path".into());
@@ -574,11 +603,36 @@ fn unchanged(item: &PlanItem) -> Result<(), String> {
     }
 }
 
-fn receipt_matches(receipt: &ReceiptRow, item: &PlanItem) -> bool {
-    receipt.source_dev == item.dev
+/// The receipt was written for this source item. `st_dev` is left out on
+/// purpose: macOS assigns it from the BSD device node, which changes when a
+/// drive is replugged or the machine reboots, so an unchanged file would stop
+/// matching its own receipt. The label and absolute path scope the inode.
+fn receipt_matches(receipt: &ReceiptRow, plan: &PlanFile, item: &PlanItem) -> bool {
+    receipt.source_label == plan.source_label
+        && receipt.source_path.as_bytes() == item.absolute.as_os_str().as_encoded_bytes()
         && receipt.source_ino == item.ino
         && receipt.size == item.logical
         && receipt.mtime_ns == clamp_i64(item.mtime_ns)
+}
+
+/// `Ok` when what is at `dest` still has the receipt's kind and logical size
+/// (a regular file of `size` bytes, or a directory whose tree totals `size`).
+/// It does not re-read contents.
+fn still_landed(dest: &Path, kind: ItemKind, receipt: &ReceiptRow) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(dest).map_err(|error| format!("cannot be read: {error}"))?;
+    let size = match kind {
+        ItemKind::File if meta.file_type().is_file() => meta.size(),
+        ItemKind::Package if meta.file_type().is_dir() => {
+            tree_logical(dest).map_err(|error| format!("cannot be read: {error}"))?
+        }
+        ItemKind::File => return Err("is no longer a regular file".into()),
+        _ => return Err("is no longer a directory".into()),
+    };
+    if size == receipt.size {
+        Ok(())
+    } else {
+        Err(format!("is {size} bytes, the receipt says {}", receipt.size))
+    }
 }
 
 fn clamp_i64(value: i128) -> i64 {

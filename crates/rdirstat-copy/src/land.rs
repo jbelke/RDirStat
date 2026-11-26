@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CopyError, VerifyTally, clone_file, compare_contents_tree, compare_tree, ditto};
+use crate::{CopyError, VerifyTally, clone_file, compare_contents_tree, compare_tree, contents_differ, ditto};
 
 /// How an item reached its destination. Recorded on the receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,10 +29,12 @@ pub struct Landed {
 /// Puts `source` at `destination` and verifies it against `source`.
 ///
 /// When `clone_from` names a destination file the catalog says has the same
-/// size and SHA-256 as `source`, the new path is a `clonefile(2)` of it (zero
-/// new blocks). If the volume cannot clone, this falls back to `ditto`. The
-/// clone is still compared byte for byte against `source`, so a stale catalog
-/// row cannot produce a receipt for wrong contents.
+/// size and SHA-256 as `source`, it is first compared byte for byte against
+/// `source`. Only if it still matches is the new path a `clonefile(2)` of it
+/// (zero new blocks). A catalog row gone stale — the landed copy was edited,
+/// replaced, or removed — costs a read, never the item: it falls back to
+/// `ditto`, as does a volume that cannot clone or any clone failure that left
+/// nothing at `destination`. The result is still compared against `source`.
 ///
 /// `cancel` is checked before anything is written and again before the
 /// verify. `source` is only read. `destination` must not exist: nothing is
@@ -61,10 +63,17 @@ pub fn land(
         return Err(CopyError::Cancelled);
     }
 
+    let clone_from = clone_from.filter(|existing| clone_source_matches(source, existing));
     let cloned = match clone_from.map(|existing| clone_file(existing, destination)) {
         Some(Ok(())) => true,
-        Some(Err(CopyError::CloneUnsupported { .. })) | None => false,
-        Some(Err(error)) => return Err(partial_or(destination, error)),
+        None => false,
+        Some(Err(error @ CopyError::AlreadyExists { .. })) => return Err(error),
+        Some(Err(error)) => {
+            if std::fs::symlink_metadata(destination).is_ok() {
+                return Err(partial(destination, error));
+            }
+            false
+        }
     };
     let method = if cloned {
         Method::Clone
@@ -85,6 +94,13 @@ pub fn land(
     };
     let tally = verified.map_err(|error| partial(destination, error))?;
     Ok(Landed { method, tally })
+}
+
+/// `existing` is a regular file whose bytes equal `source`'s. Anything
+/// unreadable or different is not a clone source.
+fn clone_source_matches(source: &Path, existing: &Path) -> bool {
+    let is_file = std::fs::symlink_metadata(existing).is_ok_and(|meta| meta.file_type().is_file());
+    is_file && matches!(contents_differ(source, existing), Ok(false))
 }
 
 fn partial(destination: &Path, cause: CopyError) -> CopyError {
@@ -151,18 +167,36 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_clone_source_fails_verify_and_the_partial_is_kept_and_named() {
+    fn a_stale_clone_source_is_not_cloned_and_the_item_is_copied() {
         let scratch = tempfile::tempdir().expect("tempdir");
         let source = scratch.path().join("source.bin");
         std::fs::write(&source, b"what the source holds").expect("write");
-        let wrong = scratch.path().join("wrong.bin");
-        std::fs::write(&wrong, b"something else entirely").expect("write");
+        // Same length, other bytes: a landed copy edited in place since its
+        // receipt.
+        let stale = scratch.path().join("stale.bin");
+        std::fs::write(&stale, b"what the source HOLDS").expect("write");
         let destination = scratch.path().join("out/dest.bin");
 
-        let error = land(&source, &destination, Some(&wrong), &never()).expect_err("verify fails");
-        assert_eq!(partial_path(&error), Some(&destination), "got {error:?}");
-        assert!(destination.exists(), "the partial is never deleted");
-        assert!(error.to_string().contains("dest.bin"), "named: {error}");
+        let landed = land(&source, &destination, Some(&stale), &never()).expect("lands by copy");
+        assert_eq!(landed.method, Method::Copy);
+        assert_eq!(std::fs::read(&destination).expect("read"), b"what the source holds");
+        assert_eq!(
+            std::fs::read(&stale).expect("read"),
+            b"what the source HOLDS",
+            "untouched"
+        );
+    }
+
+    #[test]
+    fn a_vanished_clone_source_falls_back_to_a_copy() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let source = scratch.path().join("source.bin");
+        std::fs::write(&source, b"bytes").expect("write");
+        let destination = scratch.path().join("dest.bin");
+        let landed =
+            land(&source, &destination, Some(&scratch.path().join("gone.bin")), &never()).expect("lands by copy");
+        assert_eq!(landed.method, Method::Copy);
+        assert_eq!(std::fs::read(&destination).expect("read"), b"bytes");
     }
 
     #[test]

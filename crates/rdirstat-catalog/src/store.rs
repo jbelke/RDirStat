@@ -216,12 +216,6 @@ fn same_bytes_or_conflict(source: &Path, target: PathBuf) -> Result<PathBuf, Cat
     }
 }
 
-/// Every published part in `dir` whose name ends in `.parquet` and does not
-/// start with a dot, sorted by file name.
-pub(crate) fn list_all_parts(dir: &Path) -> Result<Vec<PathBuf>, CatalogError> {
-    list_parts(dir, "")
-}
-
 /// Every published part of `kind` in `dir`, sorted by file name.
 ///
 /// A missing directory is an empty catalog, not an error: the first backup to

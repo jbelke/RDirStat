@@ -8,6 +8,13 @@
 //! - The source is only read: `lstat`, `open(O_RDONLY)`, and `ditto` /
 //!   `clonefile(2)` with the source as the side being read. Nothing here
 //!   renames, trashes, removes, or links a source path.
+//! - One carve-out: the app's own catalog directory
+//!   (`~/Library/Application Support/<bundle id>/catalog`) is written even
+//!   when it lies under the source root, as it does for the boot Data volume
+//!   or a home folder. Plans, part files and their temp files go there, each
+//!   created new; nothing that already exists is replaced. Any other catalog
+//!   or plan path under the source root is refused
+//!   ([`refuse_write_under_source`]).
 //! - The token is SHA-256 over the plan rows, the source snapshot identity, the
 //!   rules file hash, and the destination `disk_id`
 //!   ([`rdirstat_organize::plan_token`]). Apply refuses the whole plan unless
@@ -66,6 +73,7 @@ impl DiskProbe for SystemProbe {
             .with_context(|| format!("cannot identify the disk of {}", path.display()))?;
         Ok(DiskFacts {
             disk_id: identity.disk_id,
+            volume_uuid: identity.volume_uuid,
             st_dev: identity.st_dev,
             filesystem: identity.filesystem,
             total_bytes: identity.total_bytes,
@@ -100,6 +108,7 @@ fn run_plan(args: &BackupPlanArgs) -> Result<ExitCode> {
         rules,
         out: args.out.clone(),
         catalog,
+        app_catalog: catalog_dir(None).ok(),
         progress: crate::wants_progress(args.progress),
     };
     let outcome = build_plan(&request, &SystemProbe)?;
@@ -119,6 +128,7 @@ fn run_apply(args: &BackupApplyArgs) -> Result<ExitCode> {
         plan: args.plan.clone(),
         token: args.token.clone(),
         catalog: catalog_dir(args.catalog.as_deref())?,
+        app_catalog: catalog_dir(None).ok(),
         progress: std::io::IsTerminal::is_terminal(&std::io::stderr()),
     };
     let report = apply(&request, &SystemProbe)?;
@@ -159,6 +169,74 @@ fn catalog_dir(explicit: Option<&Path>) -> Result<PathBuf> {
         .join("Library/Application Support")
         .join(APP_IDENTIFIER)
         .join("catalog"))
+}
+
+/// Refuses `path` (`what` names it: "the catalog", "the plan file") when it
+/// resolves to a place under `source`, unless it is inside `app_catalog`, the
+/// app's own data directory (the documented carve-out in this module's docs).
+///
+/// Paths are resolved through their deepest existing ancestor, so a catalog
+/// that does not exist yet, or one reached through a symlink, is judged by
+/// where it would really be written.
+///
+/// # Errors
+///
+/// The refusal, naming both paths.
+pub(crate) fn refuse_write_under_source(
+    source: &Path,
+    what: &str,
+    path: &Path,
+    app_catalog: Option<&Path>,
+) -> Result<()> {
+    let resolved = resolve(path);
+    if !resolved.starts_with(resolve(source)) {
+        return Ok(());
+    }
+    if app_catalog.is_some_and(|app| resolved.starts_with(resolve(app))) {
+        return Ok(());
+    }
+    bail!(
+        "{what} {} is inside the source {}; the source is only read. Pass a {} outside it",
+        path.display(),
+        source.display(),
+        if what.contains("plan") { "--out" } else { "--catalog" }
+    )
+}
+
+/// `path` made absolute, with its deepest existing ancestor canonicalized and
+/// the rest appended (`..` popped, `.` dropped).
+fn resolve(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    let mut existing = absolute.as_path();
+    let mut tail = Vec::new();
+    let mut base = loop {
+        if let Ok(canonical) = std::fs::canonicalize(existing) {
+            break canonical;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name.to_owned());
+                existing = parent;
+            }
+            _ => break existing.to_path_buf(),
+        }
+    };
+    for name in tail.iter().rev() {
+        match Path::new(name).components().next() {
+            Some(Component::ParentDir) => {
+                base.pop();
+            }
+            Some(Component::CurDir) | None => {}
+            Some(_) => base.push(name),
+        }
+    }
+    base
 }
 
 /// Milliseconds since the Unix epoch.

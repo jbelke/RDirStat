@@ -477,6 +477,7 @@ mod tests {
     fn dest(total: u64, available: u64) -> DiskFacts {
         DiskFacts {
             disk_id: Some("disk14".into()),
+            volume_uuid: None,
             st_dev: 9,
             filesystem: "apfs".into(),
             total_bytes: total,

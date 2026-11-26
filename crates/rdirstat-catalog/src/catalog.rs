@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::rows::{Columns, HashRow, ReceiptRow, write_hashes, write_receipts};
-use crate::store::{list_all_parts, list_parts, mirror_part, part_seq, read_batches, validate_run_id, write_part};
+use crate::store::{list_parts, mirror_part, part_seq, read_batches, validate_run_id, write_part};
 use crate::{CatalogError, write_entries};
 
 /// Part-file kind for run manifests.
@@ -81,7 +81,7 @@ pub struct Written {
 /// Every write publishes to the primary first, then copies the published
 /// bytes to the mirror under the same file name. A mirror failure leaves the
 /// primary part in place and reports [`CatalogError::Mirror`];
-/// [`Catalog::sync_mirror`] copies whatever the mirror is missing.
+/// [`Catalog::sync_mirror`] copies whatever of a run the mirror is missing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Catalog {
     primary: PathBuf,
@@ -228,23 +228,38 @@ impl Catalog {
         self.mirrored(primary)
     }
 
-    /// Copies every primary part the mirror lacks; returns the mirror paths
-    /// it created. A catalog without a mirror returns nothing.
+    /// Copies every primary part *of `run_id`* the mirror lacks; returns the
+    /// mirror paths it created. A catalog without a mirror returns nothing.
+    ///
+    /// Only the run's own parts travel. The primary holds every source's and
+    /// every destination's rows; copying all of it would put other drives'
+    /// file names and hashes on this one, and a conflict on some unrelated
+    /// old part would fail every later run.
     ///
     /// # Errors
     ///
-    /// [`CatalogError::MirrorConflict`] if a mirror part differs from the
-    /// primary part of the same name, or an I/O failure.
-    pub fn sync_mirror(&self) -> Result<Vec<PathBuf>, CatalogError> {
+    /// [`CatalogError::InvalidRunId`], [`CatalogError::MirrorConflict`] if a
+    /// mirror part differs from the primary part of the same name, or an I/O
+    /// failure.
+    pub fn sync_mirror(&self, run_id: &str) -> Result<Vec<PathBuf>, CatalogError> {
+        validate_run_id(run_id)?;
         let Some(dir) = &self.mirror else {
             return Ok(Vec::new());
         };
         let mut created = Vec::new();
-        for part in list_all_parts(&self.primary)? {
-            let existed = part.file_name().is_some_and(|n| dir.join(n).exists());
-            let target = mirror_part(&part, dir)?;
-            if !existed {
-                created.push(target);
+        for kind in INVENTORIED.iter().chain(std::iter::once(&MANIFEST)) {
+            for part in list_parts(&self.primary, kind)? {
+                let Some(name) = part.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if part_seq(name, kind, run_id).is_none() {
+                    continue;
+                }
+                let existed = dir.join(name).exists();
+                let target = mirror_part(&part, dir)?;
+                if !existed {
+                    created.push(target);
+                }
             }
         }
         Ok(created)

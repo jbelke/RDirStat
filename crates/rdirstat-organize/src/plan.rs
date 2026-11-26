@@ -23,7 +23,7 @@ use crate::fit::{ItemKind, PlanItem, SkippedItem};
 use crate::rules::hex;
 
 /// Version of the [`PlanFile`] layout and of the token encoding.
-pub const PLAN_SCHEMA_VERSION: u32 = 1;
+pub const PLAN_SCHEMA_VERSION: u32 = 2;
 /// The only intent the CLI may apply.
 pub const INTENT_BACKUP: &str = "backup";
 
@@ -40,8 +40,13 @@ pub struct PlanFile {
     pub source_label: String,
     /// Destination volume root.
     pub dest_root: PathBuf,
-    /// Physical disk of the destination; apply refuses if it changed.
+    /// Physical disk of the destination as a BSD name (`disk14`). Shown to
+    /// the user and used for the same-disk pair check; not an identity,
+    /// because macOS renumbers disks on every plug and boot.
     pub dest_disk_id: String,
+    /// Volume UUID of the destination. Apply refuses unless the volume
+    /// mounted at `dest_root` has this UUID.
+    pub dest_volume_uuid: String,
     /// Identity of the scan the plan was made from.
     pub source_snapshot: String,
     /// [`crate::Rules::hash_hex`] of the rules used.
@@ -67,7 +72,7 @@ pub struct PlanFile {
 ///
 /// The digest covers every field of the plan except `created_at_ms`:
 /// schema version, intent, source root, source label, destination root,
-/// destination `disk_id`, source snapshot, rules hash and version, floor,
+/// destination `disk_id` and volume UUID, source snapshot, rules hash and version, floor,
 /// skipped count, and every item (relative and absolute path bytes, kind,
 /// logical, allocated, dev, ino, mtime) in order. Each variable-length
 /// field is length-prefixed so no two different plans encode alike.
@@ -83,6 +88,7 @@ pub fn plan_token(plan: &PlanFile) -> String {
     bytes(&mut h, plan.source_label.as_bytes());
     path(&mut h, &plan.dest_root);
     bytes(&mut h, plan.dest_disk_id.as_bytes());
+    bytes(&mut h, plan.dest_volume_uuid.as_bytes());
     bytes(&mut h, plan.source_snapshot.as_bytes());
     bytes(&mut h, plan.rules_hash.as_bytes());
     h.update(plan.rules_version.to_le_bytes());
@@ -137,6 +143,7 @@ mod tests {
             source_label: "mac-data".into(),
             dest_root: "/Volumes/gdr22tb".into(),
             dest_disk_id: "disk14".into(),
+            dest_volume_uuid: "B6C3D4E7-1AA7-3BD1-B725-6033F3101516".into(),
             source_snapshot: "scan-abc".into(),
             rules_hash: Rules::default_backup().hash_hex(),
             rules_version: 1,
@@ -203,6 +210,7 @@ mod tests {
             ("rules hash", Box::new(|p| p.rules_hash = "0".repeat(64))),
             ("rules version", Box::new(|p| p.rules_version = 2)),
             ("dest disk", Box::new(|p| p.dest_disk_id = "disk15".into())),
+            ("dest volume", Box::new(|p| p.dest_volume_uuid = "0".into())),
             ("snapshot", Box::new(|p| p.source_snapshot = "scan-abd".into())),
             ("source root", Box::new(|p| p.source_root = "/Volumes/tuf8tb".into())),
             ("label", Box::new(|p| p.source_label = "tuf8tb".into())),
@@ -264,6 +272,7 @@ mod tests {
         let rules = Rules::default_backup();
         let d = DiskFacts {
             disk_id: Some("disk14".into()),
+            volume_uuid: None,
             st_dev: 2,
             filesystem: "apfs".into(),
             total_bytes: 1 << 40,

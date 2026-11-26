@@ -356,7 +356,7 @@ fn catalog_mirrors_every_part_byte_for_byte_under_the_drive() {
         read_hashes(catalog.primary()).unwrap()
     );
     assert_eq!(read_receipts(&mirror_dir).unwrap(), vec![receipt("copy")]);
-    assert!(catalog.sync_mirror().unwrap().is_empty());
+    assert!(catalog.sync_mirror("run1").unwrap().is_empty());
 }
 
 #[test]
@@ -404,10 +404,10 @@ fn mirror_never_overwrites_and_sync_fills_gaps() {
     let offline = Catalog::new(app.path());
     let first = write_hashes(&[hash("/a", 1, SHA_A)], app.path(), "run1").unwrap();
     assert_eq!(offline.mirror(), None);
-    assert!(offline.sync_mirror().unwrap().is_empty());
+    assert!(offline.sync_mirror("run1").unwrap().is_empty());
 
     let catalog = Catalog::with_mirror(app.path(), &mirror_dir);
-    let created = catalog.sync_mirror().unwrap();
+    let created = catalog.sync_mirror("run1").unwrap();
     assert_eq!(created, [mirror_dir.join(file_name(&first))]);
 
     // A different file already under the next name in the mirror.
@@ -427,4 +427,41 @@ fn mirror_never_overwrites_and_sync_fills_gaps() {
         .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with('.'))
         .count();
     assert_eq!(hidden, 0);
+}
+
+#[test]
+fn sync_mirrors_only_the_named_run() {
+    let app = tempfile::tempdir().unwrap();
+    let drive_a = tempfile::tempdir().unwrap();
+    let drive_b = tempfile::tempdir().unwrap();
+
+    // An earlier backup of another source to another drive.
+    let to_a = Catalog::for_destination(app.path(), drive_a.path());
+    to_a.write_receipts(&[receipt("copy")], "backup-mac-data-1").unwrap();
+    to_a.write_manifest("backup-mac-data-1", 1).unwrap();
+    // Drive A's mirror has drifted from the primary under another run's name.
+    std::fs::write(dest_catalog_dir(drive_a.path()).join("hashes-old-0000.parquet"), b"x").unwrap();
+    write_hashes(&[hash("/old", 1, SHA_A)], app.path(), "old").unwrap();
+
+    // This run, to drive B, wrote its parts while drive B was away.
+    write_hashes(&[hash("/b", 2, SHA_B)], app.path(), "backup-tuf8tb-12").unwrap();
+    write_hashes(&[hash("/c", 3, SHA_B)], app.path(), "backup-tuf8tb-1").unwrap();
+    let to_b = Catalog::for_destination(app.path(), drive_b.path());
+    let created = to_b.sync_mirror("backup-tuf8tb-1").unwrap();
+    let names: Vec<_> = created.iter().map(|p| file_name(p)).collect();
+    assert_eq!(names, ["hashes-backup-tuf8tb-1-0000.parquet"]);
+    let on_b: Vec<_> = std::fs::read_dir(dest_catalog_dir(drive_b.path()))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".parquet"))
+        .collect();
+    assert_eq!(
+        on_b,
+        ["hashes-backup-tuf8tb-1-0000.parquet"],
+        "nothing from mac-data or drive A"
+    );
+
+    // An unrelated conflict on drive A does not fail a run that did not write it.
+    to_a.sync_mirror("backup-mac-data-1").unwrap();
+    assert!(to_a.sync_mirror("old").is_err());
 }

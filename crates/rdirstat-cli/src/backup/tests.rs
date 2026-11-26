@@ -25,13 +25,17 @@ struct FakeProbe {
     source: PathBuf,
     source_disk: Option<&'static str>,
     dest_disk: Option<&'static str>,
+    dest_uuid: Option<&'static str>,
 }
+
+const DEST_UUID: &str = "B6C3D4E7-1AA7-3BD1-B725-6033F3101516";
 
 impl DiskProbe for FakeProbe {
     fn facts(&self, path: &Path) -> Result<DiskFacts> {
         let on_source = path.starts_with(&self.source);
         Ok(DiskFacts {
             disk_id: if on_source { self.source_disk } else { self.dest_disk }.map(str::to_owned),
+            volume_uuid: if on_source { Some("SOURCE-UUID") } else { self.dest_uuid }.map(str::to_owned),
             st_dev: if on_source { 1 } else { 2 },
             filesystem: "apfs".into(),
             total_bytes: 1 << 40,
@@ -71,6 +75,7 @@ impl Fixture {
             source: self.source.clone(),
             source_disk: Some("disk3"),
             dest_disk: Some("disk14"),
+            dest_uuid: Some(DEST_UUID),
         }
     }
 
@@ -84,6 +89,7 @@ impl Fixture {
             rules: Rules::default_backup(),
             out: Some(self.plan_path.clone()),
             catalog: self.catalog.clone(),
+            app_catalog: None,
             progress: false,
         }
     }
@@ -98,6 +104,7 @@ impl Fixture {
                 plan: self.plan_path.clone(),
                 token: token.to_owned(),
                 catalog: self.catalog.clone(),
+                app_catalog: None,
                 progress: false,
             },
             &self.probe(),
@@ -342,14 +349,14 @@ fn an_item_changed_after_the_plan_is_skipped_and_never_receipted() {
 }
 
 #[test]
-fn a_failed_compare_leaves_a_named_partial_and_no_receipt() {
+fn a_stale_clone_source_is_copied_around_not_left_as_a_partial() {
     let fx = Fixture::new();
     let planned = fx.plan();
     let before = fingerprint(&fx.source);
 
-    // A stale catalog row: it claims `stale.bin` holds big.bin's bytes, but it
-    // holds other bytes of the same length. Apply clones it, the compare
-    // against the source fails, and the clone must not be receipted.
+    // A stale catalog row on the drive: it claims `stale.bin` holds big.bin's
+    // bytes, but it was edited in place since (same length, other bytes).
+    // Apply must not clone it; it copies big.bin from the source instead.
     let source_big = fx.source.join("Movies/big.bin");
     let stale = fx.dest.join("stale.bin");
     std::fs::write(&stale, bytes(7, 64 * 1024)).expect("write");
@@ -369,26 +376,13 @@ fn a_failed_compare_leaves_a_named_partial_and_no_receipt() {
     write_receipts(&[row], &fx.dest.join(".rdirstat/catalog"), "earlier").expect("seed");
 
     let report = fx.apply(&planned.token).expect("apply");
-    assert!(!report.complete());
-    let big = report
-        .results
-        .iter()
-        .find(|r| r.relative == "Movies/big.bin")
-        .expect("in report");
-    assert_eq!(big.outcome, Outcome::Failed, "{big:?}");
-    let target = fx.mirror("Movies/big.bin");
-    assert_eq!(big.partial.as_deref(), Some(target.to_string_lossy().as_ref()));
-    assert!(target.exists(), "the partial is kept, not deleted");
-    assert!(apply::text(&report).contains("left on disk at"));
-
-    let (primary, mirror) = fx.receipts();
-    let landed = target.to_string_lossy();
-    for rows in [&primary, &mirror] {
-        assert!(
-            !rows.iter().any(|r| r.dest_path == landed),
-            "no receipt for a destination that failed compare"
-        );
-    }
+    assert!(report.complete(), "{}", apply::text(&report));
+    assert_eq!(outcome_of(&report, "Movies/big.bin"), Outcome::Copied);
+    assert_eq!(
+        std::fs::read(fx.mirror("Movies/big.bin")).expect("read"),
+        bytes(1, 64 * 1024)
+    );
+    assert_eq!(std::fs::read(&stale).expect("read"), bytes(7, 64 * 1024), "untouched");
     assert_eq!(before, fingerprint(&fx.source));
 }
 
@@ -404,6 +398,7 @@ fn same_or_unknown_disks_are_refused_at_plan_and_at_apply() {
             source: fx.source.clone(),
             source_disk,
             dest_disk,
+            dest_uuid: Some(DEST_UUID),
         };
         let error = build_plan(&fx.request(), &probe).expect_err("plan refused");
         assert!(format!("{error:#}").contains("refusing"), "{error:#}");
@@ -411,24 +406,208 @@ fn same_or_unknown_disks_are_refused_at_plan_and_at_apply() {
     }
 
     let planned = fx.plan();
-    for (source_disk, dest_disk) in [
-        (Some("disk14"), Some("disk14")),
-        (None, Some("disk14")),
-        (Some("disk3"), Some("disk15")),
+    for (source_disk, dest_disk, dest_uuid) in [
+        (Some("disk14"), Some("disk14"), Some(DEST_UUID)),
+        (None, Some("disk14"), Some(DEST_UUID)),
+        // Another drive mounted at the same path, even one that took the
+        // planned drive's BSD name.
+        (Some("disk3"), Some("disk14"), Some("OTHER-VOLUME")),
+        (Some("disk3"), Some("disk14"), None),
     ] {
         let probe = FakeProbe {
             source: fx.source.clone(),
             source_disk,
             dest_disk,
+            dest_uuid,
         };
         let request = ApplyRequest {
             plan: fx.plan_path.clone(),
             token: planned.token.clone(),
             catalog: fx.catalog.clone(),
+            app_catalog: None,
             progress: false,
         };
         apply(&request, &probe).expect_err("apply refused");
         assert!(!fx.dest.join("Backups").exists());
+    }
+}
+
+#[test]
+fn a_replugged_destination_with_a_new_disk_name_is_still_the_planned_drive() {
+    let fx = Fixture::new();
+    let planned = fx.plan();
+    let probe = FakeProbe {
+        source: fx.source.clone(),
+        source_disk: Some("disk3"),
+        dest_disk: Some("disk15"),
+        dest_uuid: Some(DEST_UUID),
+    };
+    let request = ApplyRequest {
+        plan: fx.plan_path.clone(),
+        token: planned.token.clone(),
+        catalog: fx.catalog.clone(),
+        app_catalog: None,
+        progress: false,
+    };
+    let report = apply(&request, &probe).expect("same volume UUID, new BSD name");
+    assert!(report.complete(), "{}", apply::text(&report));
+}
+
+#[test]
+fn a_plan_without_a_destination_volume_uuid_is_refused() {
+    let fx = Fixture::new();
+    let probe = FakeProbe {
+        dest_uuid: None,
+        ..fx.probe()
+    };
+    let error = build_plan(&fx.request(), &probe).expect_err("refused");
+    assert!(format!("{error:#}").contains("volume UUID"), "{error:#}");
+    assert!(!fx.plan_path.exists());
+}
+
+#[test]
+fn a_catalog_or_plan_file_inside_the_source_is_refused() {
+    let fx = Fixture::new();
+    let before = fingerprint(&fx.source);
+
+    let mut request = fx.request();
+    request.catalog = fx.source.join("Library/rdirstat/catalog");
+    let error = build_plan(&request, &fx.probe()).expect_err("catalog refused");
+    assert!(format!("{error:#}").contains("inside the source"), "{error:#}");
+
+    let mut request = fx.request();
+    request.out = Some(fx.source.join("Documents/report.pdf"));
+    let error = build_plan(&request, &fx.probe()).expect_err("plan file refused");
+    assert!(format!("{error:#}").contains("--out"), "{error:#}");
+    assert_eq!(before, fingerprint(&fx.source), "nothing written under the source");
+
+    // The app's own catalog directory is the documented carve-out.
+    let app = fx.source.join("Library/Application Support/app/catalog");
+    let mut request = fx.request();
+    request.catalog = app.clone();
+    request.out = None;
+    request.app_catalog = Some(app.clone());
+    let planned = build_plan(&request, &fx.probe()).expect("carve-out allowed");
+    assert!(planned.plan_path.starts_with(&app));
+
+    // Apply refuses a catalog under the source, before anything is copied.
+    let planned = fx.plan();
+    let request = ApplyRequest {
+        plan: fx.plan_path.clone(),
+        token: planned.token.clone(),
+        catalog: fx.source.join("cat"),
+        app_catalog: None,
+        progress: false,
+    };
+    let error = apply(&request, &fx.probe()).expect_err("apply refused");
+    assert!(format!("{error:#}").contains("inside the source"), "{error:#}");
+    assert!(!fx.dest.join("Backups").exists());
+    assert!(!fx.source.join("cat").exists());
+}
+
+#[test]
+fn a_receipted_copy_that_changed_on_the_destination_is_not_already_landed() {
+    let fx = Fixture::new();
+    let planned = fx.plan();
+    assert!(fx.apply(&planned.token).expect("apply").complete());
+
+    // Truncated on the destination after its receipt.
+    std::fs::write(fx.mirror("Movies/big.bin"), b"short").expect("truncate");
+    // A package that lost a file.
+    std::fs::remove_file(fx.mirror("Applications/Tool.app/Contents/Info.plist")).expect("rm");
+
+    let again = fx.apply(&planned.token).expect("re-apply");
+    assert!(!again.complete(), "{}", apply::text(&again));
+    assert_eq!(outcome_of(&again, "Movies/big.bin"), Outcome::DestinationOccupied);
+    assert_eq!(
+        outcome_of(&again, "Applications/Tool.app"),
+        Outcome::DestinationOccupied
+    );
+    assert_eq!(outcome_of(&again, "Documents/report.pdf"), Outcome::AlreadyLanded);
+    assert_eq!(
+        std::fs::read(fx.mirror("Movies/big.bin")).expect("read"),
+        b"short",
+        "left alone"
+    );
+}
+
+#[test]
+fn receipts_still_match_after_the_source_device_number_changes() {
+    let fx = Fixture::new();
+    let planned = fx.plan();
+    assert!(fx.apply(&planned.token).expect("apply").complete());
+
+    // Rewrite the drive's receipts as if the source volume had been mounted
+    // under another st_dev when they were taken (a replug or a reboot).
+    let mirror = fx.dest.join(".rdirstat/catalog");
+    let mut rows = read_receipts(&mirror).expect("read");
+    for entry in std::fs::read_dir(&mirror).expect("ls") {
+        let path = entry.expect("entry").path();
+        if path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("receipts-"))
+        {
+            std::fs::remove_file(path).expect("rm");
+        }
+    }
+    for row in &mut rows {
+        row.source_dev += 1000;
+    }
+    write_receipts(&rows, &mirror, "earlier").expect("rewrite");
+
+    let again = fx.apply(&planned.token).expect("re-apply");
+    assert!(again.complete(), "{}", apply::text(&again));
+    assert!(again.results.iter().all(|r| r.outcome == Outcome::AlreadyLanded));
+}
+
+#[test]
+fn receipts_for_another_drive_at_the_same_path_are_not_trusted() {
+    let fx = Fixture::new();
+    let planned = fx.plan();
+    assert!(fx.apply(&planned.token).expect("apply").complete());
+
+    // Another drive with the same files, mounted where this one was: its own
+    // catalog is empty. The primary still holds this drive's receipts.
+    std::fs::remove_dir_all(fx.dest.join(".rdirstat")).expect("rm mirror");
+    assert!(!read_receipts(&fx.catalog).expect("primary").is_empty());
+
+    let again = fx.apply(&planned.token).expect("re-apply");
+    assert!(!again.complete());
+    assert!(
+        again.results.iter().all(|r| r.outcome == Outcome::DestinationOccupied),
+        "{}",
+        apply::text(&again)
+    );
+}
+
+#[test]
+fn only_this_runs_catalog_parts_reach_the_drive() {
+    let fx = Fixture::new();
+    // Another source's backup to another drive, already in the primary.
+    let other = ReceiptRow {
+        run_id: "backup-tuf8tb-1".into(),
+        source_label: "tuf8tb".into(),
+        source_path: "/Volumes/tuf8tb/secret-name.bin".into(),
+        source_dev: 5,
+        source_ino: 5,
+        size: 5,
+        mtime_ns: 5,
+        dest_path: "/Volumes/OtherDrive/Backups/tuf8tb/secret-name.bin".into(),
+        method: "copy".into(),
+        sha256: "0".repeat(64),
+        verified_at_ms: 0,
+    };
+    write_receipts(&[other], &fx.catalog, "backup-tuf8tb-1").expect("seed");
+
+    let planned = fx.plan();
+    let report = fx.apply(&planned.token).expect("apply");
+    assert!(report.complete(), "{}", apply::text(&report));
+    let (_, mirror) = fx.receipts();
+    assert_eq!(mirror.len(), planned.plan.items.len());
+    assert!(mirror.iter().all(|r| r.source_label == "mac-data"), "{mirror:?}");
+    for entry in std::fs::read_dir(fx.dest.join(".rdirstat/catalog")).expect("ls") {
+        let name = entry.expect("entry").file_name().to_string_lossy().into_owned();
+        assert!(!name.contains("tuf8tb"), "{name} leaked onto the drive");
     }
 }
 
