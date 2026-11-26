@@ -152,6 +152,7 @@ impl Record {
             return;
         }
         self.state.updated_at_ms = now_ms();
+        let _phase = rdirstat_copy::phase::enter(rdirstat_copy::phase::Phase::Journal);
         if write_atomic(&self.dir, STATE_FILE, &self.state).is_ok() {
             self.state_dirty = false;
             self.last_state_write = Some(Instant::now());
@@ -175,6 +176,7 @@ impl Record {
         if self.pending.is_empty() {
             return;
         }
+        let _phase = rdirstat_copy::phase::enter(rdirstat_copy::phase::Phase::Journal);
         let path = self.dir.join(EVENTS_FILE);
         let result = (|| -> std::io::Result<()> {
             // `create` but never `create_dir`: a missing job directory means

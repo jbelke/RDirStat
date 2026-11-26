@@ -34,6 +34,7 @@ pub struct VerifyTally {
 /// [`CopyError::Mismatch`] for a difference, [`CopyError::Io`] for a side
 /// that could not be read.
 pub fn compare_tree(source: &Path, destination: &Path) -> Result<VerifyTally, CopyError> {
+    let _phase = crate::phase::enter(crate::phase::Phase::CompareMeta);
     let tally = compare_contents_tree(source, destination)?;
     compare_xattr_names(source, destination)?;
     Ok(tally)
@@ -50,6 +51,7 @@ pub fn compare_tree(source: &Path, destination: &Path) -> Result<VerifyTally, Co
 ///
 /// As [`compare_tree`].
 pub fn compare_contents_tree(source: &Path, destination: &Path) -> Result<VerifyTally, CopyError> {
+    let _phase = crate::phase::enter(crate::phase::Phase::CompareMeta);
     let mut tally = VerifyTally::default();
     verify_tree(source, destination, &mut tally)?;
     Ok(tally)
@@ -167,6 +169,7 @@ fn read_names(directory: &Path) -> Result<Vec<PathBuf>, CopyError> {
 /// [`CopyError::Mismatch`] naming the byte offset of the first differing
 /// block, or [`CopyError::Io`].
 pub fn compare_files(source: &Path, destination: &Path) -> Result<(), CopyError> {
+    let _phase = crate::phase::enter(crate::phase::Phase::Compare);
     let mut a = fs::File::open(source).map_err(|error| CopyError::io(source, error))?;
     let mut b = fs::File::open(destination).map_err(|error| CopyError::io(destination, error))?;
     let mut buffer_a = vec![0_u8; COMPARE_CHUNK];
@@ -183,6 +186,7 @@ pub fn compare_files(source: &Path, destination: &Path) -> Result<(), CopyError>
             ));
         }
         if read_a == 0 {
+            crate::phase::add_bytes(crate::phase::Phase::Compare, offset);
             return Ok(());
         }
         if buffer_a[..read_a] != buffer_b[..read_b] {
@@ -203,6 +207,7 @@ pub fn compare_files(source: &Path, destination: &Path) -> Result<(), CopyError>
 ///
 /// Open or read failure on either side.
 pub fn contents_differ(a: &Path, b: &Path) -> io::Result<bool> {
+    let _phase = crate::phase::enter(crate::phase::Phase::Compare);
     let mut left = fs::File::open(a)?;
     let mut right = fs::File::open(b)?;
     let mut buffer_a = vec![0_u8; COMPARE_CHUNK];

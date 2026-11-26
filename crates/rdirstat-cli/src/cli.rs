@@ -78,6 +78,11 @@ pub(crate) enum BackupCommand {
     /// Pause, resume or cancel a job, or shut the service down. Takes effect
     /// between items: the item being copied always finishes.
     Control(BackupControlArgs),
+    /// Run one backup job in-process and print wall time per phase as JSON
+    /// (`scripts/bench-backup.sh`). `phase-timing` builds only.
+    #[cfg(feature = "phase-timing")]
+    #[command(hide = true)]
+    Bench(BackupBenchArgs),
     /// Print this binary's version and the job schema it speaks as one JSON
     /// line. The desktop app asks this before it launches the binary.
     Version,
@@ -179,6 +184,36 @@ pub(crate) struct BackupRecommendArgs {
     /// When to draw the scan progress line on stderr.
     #[arg(long, value_enum, default_value_t = ProgressWhen::Auto)]
     pub(crate) progress: ProgressWhen,
+}
+
+/// `rdirstat backup bench` options.
+#[cfg(feature = "phase-timing")]
+#[derive(Debug, Args)]
+pub(crate) struct BackupBenchArgs {
+    /// Source root (the corpus).
+    #[arg(long, value_name = "DIR")]
+    pub(crate) source: PathBuf,
+
+    /// Destination root. The job, catalog mirror and copies go under it.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) dest: PathBuf,
+
+    /// Primary catalog directory; not under the source.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) catalog: PathBuf,
+
+    /// Source label.
+    #[arg(long, default_value = "bench")]
+    pub(crate) label: String,
+
+    /// Smallest allocated size planned as its own item; smaller files land
+    /// in directory roll-ups. Default: a real job's.
+    #[arg(long, value_name = "BYTES")]
+    pub(crate) floor: Option<u64>,
+
+    /// Write the JSON report here as well as to stdout.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) out: Option<PathBuf>,
 }
 
 /// `rdirstat backup index` options.

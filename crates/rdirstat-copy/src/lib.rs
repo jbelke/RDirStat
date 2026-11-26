@@ -31,6 +31,7 @@ mod ditto;
 mod hash;
 mod identity;
 mod land;
+pub mod phase;
 
 pub use batch::{STAGING_PREFIX, land_files, rename_no_replace, staging_name};
 pub use clone::clone_file;

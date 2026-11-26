@@ -17,13 +17,17 @@ const HASH_BUFFER: usize = 1024 * 1024;
 ///
 /// Open or read failure.
 pub fn sha256_file(path: &Path) -> io::Result<[u8; 32]> {
+    let _phase = crate::phase::enter(crate::phase::Phase::Hash);
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER];
     loop {
         match file.read(&mut buffer) {
             Ok(0) => break,
-            Ok(count) => hasher.update(&buffer[..count]),
+            Ok(count) => {
+                hasher.update(&buffer[..count]);
+                crate::phase::add_bytes(crate::phase::Phase::Hash, count as u64);
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
         }

@@ -13,6 +13,7 @@ use rdirstat_catalog::{
     Catalog, CatalogError, HashRow, IndexSummary, METHOD_ROLLUP, PLAN_STATUS_PLANNED, PLAN_STATUS_SKIPPED, PlanRow,
     ReceiptRow, read_receipts, rebuild_index,
 };
+use rdirstat_copy::phase::{self, Phase};
 use rdirstat_copy::{Method, land, partial_path, sha256_file, sha256_hex};
 use rdirstat_core::format_iec;
 use rdirstat_organize::{
@@ -310,6 +311,7 @@ pub(crate) fn apply_with(
 
     let (receipts_written, catalog_error) = (writer.receipts_written, writer.error);
     let index = if dest_here {
+        let _phase = phase::enter(Phase::Catalog);
         rebuild_index(&plan.dest_root).map_err(|error| error.to_string())
     } else {
         Err(format!("{} is not mounted", plan.dest_root.display()))
@@ -514,6 +516,7 @@ impl Landed {
     /// the mirror reads as absent, which refuses (`DestinationOccupied`)
     /// rather than claims.
     fn load(catalog: &Catalog, rollups: &rollup::RollupDests) -> Result<Self> {
+        let _phase = phase::enter(Phase::Catalog);
         let rows = match catalog.mirror() {
             Some(mirror) => {
                 read_receipts(mirror).with_context(|| format!("reading receipts in {}", mirror.display()))?
@@ -591,6 +594,7 @@ impl<'a> ReceiptWriter<'a> {
     /// Records what the plan chose and skipped, before anything is copied,
     /// so the drive knows what was meant to land even if the run stops.
     fn write_plan_rows(&mut self, rows: &[PlanRow]) {
+        let _phase = phase::enter(Phase::Catalog);
         match self.catalog.write_plan_rows(rows, self.run_id) {
             Ok(_) | Err(CatalogError::Mirror { .. }) => self.parts_written += 1,
             Err(error) => self.error = Some(format!("writing the plan rows: {error}")),
@@ -610,6 +614,7 @@ impl<'a> ReceiptWriter<'a> {
     /// primary part and is retried by [`ReceiptWriter::finish`]; any other
     /// failure stops the run.
     fn flush(&mut self) {
+        let _phase = phase::enter(Phase::Catalog);
         self.last_flush = Instant::now();
         if self.error.is_some() {
             return;
@@ -649,6 +654,7 @@ impl<'a> ReceiptWriter<'a> {
 
     /// Mirrors anything the destination lacks and writes the run's manifest.
     fn finish(&mut self) {
+        let _phase = phase::enter(Phase::Catalog);
         if self.parts_written == 0 || self.error.is_some() {
             return;
         }
@@ -674,6 +680,7 @@ fn land_item(
     writer: &mut ReceiptWriter<'_>,
     cancel: &AtomicBool,
 ) -> ItemResult {
+    let _phase = phase::enter(Phase::Item);
     let mut result = ItemResult {
         relative: item.relative.to_string_lossy().into_owned(),
         dest: String::new(),
@@ -957,6 +964,7 @@ fn destination_of(plan: &PlanFile, mirror_root: &Path, item: &PlanItem) -> Resul
 /// `(dev, ino, size, mtime_ns)` for a file, and for a package the root's
 /// `(dev, ino, mtime_ns)` plus its recomputed logical total.
 fn unchanged(item: &PlanItem) -> Result<(), String> {
+    let _phase = phase::enter(Phase::Restat);
     let meta = std::fs::symlink_metadata(&item.absolute).map_err(|error| format!("cannot stat the source: {error}"))?;
     let kind = meta.file_type();
     let mtime_ns = i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec());

@@ -24,6 +24,9 @@ path = "src/main.rs"
 
 [features]
 default = []
+# Times backup phases and adds the hidden `backup bench` command, for
+# scripts/bench-backup.sh. Off in every shipped build.
+phase-timing = ["rdirstat-copy/phase-timing"]
 # `rdirstat-catalog` is a plain dependency: it writes Parquet with arrow and
 # parquet only. DuckDB is never linked; it reads the part files in place.
 

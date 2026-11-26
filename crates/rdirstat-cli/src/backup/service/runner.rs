@@ -321,6 +321,7 @@ impl Runner<'_> {
 
     fn plan(&self, source: &JobSource, round: u32) -> anyhow::Result<crate::backup::PlanOutcome> {
         use anyhow::Context as _;
+        let _phase = rdirstat_copy::phase::enter(rdirstat_copy::phase::Phase::Plan);
         let dir = self.lock().dir().to_path_buf();
         let rules = match &self.spec.rules {
             Some(path) => {
@@ -377,7 +378,10 @@ impl Runner<'_> {
                 return Ok(());
             }
             self.phase(Phase::Indexing, label.as_deref(), round, None);
-            match rdirstat_catalog::rebuild_index(&self.spec.dest) {
+            let timer = rdirstat_copy::phase::enter(rdirstat_copy::phase::Phase::Catalog);
+            let rebuilt = rdirstat_catalog::rebuild_index(&self.spec.dest);
+            drop(timer);
+            match rebuilt {
                 Ok(_) => return Ok(()),
                 Err(error) => {
                     self.error(None, format!("rebuilding the index: {error}"));

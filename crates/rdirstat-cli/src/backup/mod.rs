@@ -110,6 +110,8 @@ pub(crate) fn run(command: &BackupCommand) -> Result<ExitCode> {
         BackupCommand::Jobs(args) => run_jobs(args),
         BackupCommand::Submit(args) => run_submit(args),
         BackupCommand::Control(args) => run_control(args),
+        #[cfg(feature = "phase-timing")]
+        BackupCommand::Bench(args) => run_bench(args),
         BackupCommand::Version => {
             let version = rdirstat_jobs::RunnerVersion {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -119,6 +121,28 @@ pub(crate) fn run(command: &BackupCommand) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+#[cfg(feature = "phase-timing")]
+fn run_bench(args: &crate::cli::BackupBenchArgs) -> Result<ExitCode> {
+    let request = service::bench::BenchRequest {
+        source: args.source.clone(),
+        dest: args.dest.clone(),
+        catalog: args.catalog.clone(),
+        label: args.label.clone(),
+        floor: args.floor.unwrap_or(service::bench::BENCH_FLOOR),
+    };
+    let report = service::bench::bench(&request)?;
+    let text = format!("{}\n", serde_json::to_string_pretty(&report)?);
+    if let Some(out) = &args.out {
+        std::fs::write(out, &text).with_context(|| format!("cannot write {}", out.display()))?;
+    }
+    print(&text)?;
+    Ok(if report["complete"].as_bool() == Some(true) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(EXIT_INCOMPLETE)
+    })
 }
 
 /// The API socket of `dest`'s service (see [`service::socket_for`]).

@@ -15,6 +15,8 @@
 //! they know nothing of the socket, so another listener (TCP + TLS) can be
 //! added beside the Unix one without touching them.
 
+#[cfg(feature = "phase-timing")]
+pub(crate) mod bench;
 pub(crate) mod client;
 mod http;
 pub(crate) mod lock;

@@ -130,6 +130,13 @@ fn land_chunk(
         let message = error.to_string();
         return all(&|| CopyError::io(&staging, std::io::Error::other(message.clone())));
     }
+    let ditto_phase = crate::phase::enter(crate::phase::Phase::Ditto);
+    crate::phase::add_bytes_with(crate::phase::Phase::Ditto, || {
+        names
+            .iter()
+            .map(|name| crate::ditto::logical_bytes(&source_dir.join(name)))
+            .sum()
+    });
     let copied = run(
         "ditto",
         Command::new("/usr/bin/ditto")
@@ -137,6 +144,7 @@ fn land_chunk(
             .args(names.iter().map(|name| source_dir.join(name)))
             .arg(&staging),
     );
+    drop(ditto_phase);
     let failure = copied.err().map(|error| error.to_string());
     let mut results = Vec::with_capacity(names.len());
     for name in names {

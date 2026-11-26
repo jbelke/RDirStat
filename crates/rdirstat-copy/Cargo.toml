@@ -9,6 +9,10 @@ repository.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+[features]
+# Times backup phases for scripts/bench-backup.sh. Off in every shipped build.
+phase-timing = []
+
 [dependencies]
 libc = { workspace = true }
 plist = { workspace = true }

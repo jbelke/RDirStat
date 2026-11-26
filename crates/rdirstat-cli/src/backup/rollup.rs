@@ -797,6 +797,7 @@ fn mtime_ns(meta: &std::fs::Metadata) -> i128 {
 /// Walks the source scope: the whole tree, or the directory's own files and
 /// symlinks minus the exclusions. Only `lstat` and `readdir`.
 fn walk_scope(root: &Path, rollup: &Rollup) -> std::io::Result<ScopeWalk> {
+    let _phase = rdirstat_copy::phase::enter(rdirstat_copy::phase::Phase::Restat);
     let meta = std::fs::symlink_metadata(root)?;
     if !meta.file_type().is_dir() {
         return Err(std::io::Error::other("is no longer a directory"));

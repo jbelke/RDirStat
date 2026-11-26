@@ -38,6 +38,8 @@ pub(crate) fn create_parent(destination: &Path) -> Result<(), CopyError> {
 /// `ditto` cannot start, [`CopyError::Tool`] if it exits non-zero.
 pub fn ditto(source: &Path, destination: &Path) -> Result<(), CopyError> {
     create_parent(destination)?;
+    let _phase = crate::phase::enter(crate::phase::Phase::Ditto);
+    crate::phase::add_bytes_with(crate::phase::Phase::Ditto, || logical_bytes(source));
     run("ditto", Command::new(DITTO).args(PRESERVE).arg(source).arg(destination)).map(drop)
 }
 
@@ -51,6 +53,7 @@ pub fn ditto(source: &Path, destination: &Path) -> Result<(), CopyError> {
 ///
 /// As [`ditto`].
 pub fn ditto_bom(source: &Path, destination: &Path, bom: &Path) -> Result<(), CopyError> {
+    let _phase = crate::phase::enter(crate::phase::Phase::Ditto);
     run(
         "ditto",
         Command::new(DITTO)
@@ -61,6 +64,21 @@ pub fn ditto_bom(source: &Path, destination: &Path, bom: &Path) -> Result<(), Co
             .arg(destination),
     )
     .map(drop)
+}
+
+/// Logical bytes of the regular files at or under `path`, symlinks not
+/// followed. Only the phase timer asks; unreadable entries count 0.
+pub(crate) fn logical_bytes(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else { return 0 };
+    if meta.is_file() {
+        return meta.len();
+    }
+    if !meta.is_dir() {
+        return 0;
+    }
+    std::fs::read_dir(path).map_or(0, |entries| {
+        entries.flatten().map(|entry| logical_bytes(&entry.path())).sum()
+    })
 }
 
 #[cfg(test)]

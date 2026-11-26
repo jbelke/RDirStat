@@ -22,6 +22,7 @@ const CLONE_NOFOLLOW: u32 = 0x0001;
 /// replaced), [`CopyError::CloneUnsupported`] for `ENOTSUP` / `EXDEV` — the
 /// caller falls back to [`crate::ditto`] — and [`CopyError::Io`] otherwise.
 pub fn clone_file(existing: &Path, new_path: &Path) -> Result<(), CopyError> {
+    let _phase = crate::phase::enter(crate::phase::Phase::Clone);
     if std::fs::symlink_metadata(new_path).is_ok() {
         return Err(CopyError::AlreadyExists {
             path: new_path.to_path_buf(),
