@@ -54,6 +54,30 @@ pub(crate) enum BackupCommand {
     /// clone savings, pending items of the last plan, and files over the
     /// floor not yet backed up. Reads Parquet only; never walks the drive.
     Status(BackupStatusArgs),
+    /// Dry-run every source of a profile and print what a run would copy,
+    /// defer, and skip, largest first, with the skip rule and reason. Writes
+    /// nothing and applies nothing.
+    Recommend(BackupRecommendArgs),
+}
+
+/// `rdirstat backup recommend` options.
+#[derive(Debug, Args)]
+pub(crate) struct BackupRecommendArgs {
+    /// The profile file (`<dest>/.rdirstat/profiles/<name>.toml`).
+    #[arg(long, value_name = "FILE")]
+    pub(crate) profile: PathBuf,
+
+    /// Most rows to list; totals always cover every row.
+    #[arg(long, value_name = "N", default_value_t = crate::backup::RECOMMEND_LIMIT)]
+    pub(crate) limit: usize,
+
+    /// Print one JSON document (`rdirstat_organize::Recommendation`) instead of text.
+    #[arg(long)]
+    pub(crate) json: bool,
+
+    /// When to draw the scan progress line on stderr.
+    #[arg(long, value_enum, default_value_t = ProgressWhen::Auto)]
+    pub(crate) progress: ProgressWhen,
 }
 
 /// `rdirstat backup index` options.
@@ -87,18 +111,24 @@ pub(crate) struct BackupStatusArgs {
 /// `rdirstat backup plan` options.
 #[derive(Debug, Args)]
 pub(crate) struct BackupPlanArgs {
+    /// Plan every source of this profile (`<dest>/.rdirstat/profiles/<name>.toml`),
+    /// one plan file each. The profile supplies sources, destination, rules,
+    /// floor, and review cap.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["source", "label", "dest", "snapshot", "rules", "out", "floor"])]
+    pub(crate) profile: Option<PathBuf>,
+
     /// Source volume root. Plan paths, and the mirror layout, are relative to
     /// it. With `--snapshot` it defaults to the snapshot's scan root.
-    #[arg(long, value_name = "DIR", required_unless_present = "snapshot")]
+    #[arg(long, value_name = "DIR", required_unless_present_any = ["snapshot", "profile"])]
     pub(crate) source: Option<PathBuf>,
 
     /// Name of this source under `<dest>/Backups/`, e.g. `mac-data`.
-    #[arg(long, value_name = "LABEL")]
-    pub(crate) label: String,
+    #[arg(long, value_name = "LABEL", required_unless_present = "profile")]
+    pub(crate) label: Option<String>,
 
     /// Destination root (the backup volume's mount point).
-    #[arg(long, value_name = "DIR")]
-    pub(crate) dest: PathBuf,
+    #[arg(long, value_name = "DIR", required_unless_present = "profile")]
+    pub(crate) dest: Option<PathBuf>,
 
     /// Smallest allocated size a candidate may have: `100MiB`, `1GiB`, `5000`.
     #[arg(long, value_name = "SIZE", default_value = "100MiB", value_parser = crate::backup::parse_size)]

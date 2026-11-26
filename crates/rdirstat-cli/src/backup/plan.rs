@@ -58,6 +58,38 @@ pub(crate) struct PlanRequest {
     pub(crate) rollup: bool,
 }
 
+/// How much of the source a plan covers and whether it is written. The
+/// default is what `backup plan` without `--profile` does: the whole source,
+/// the default review cap, plan file and scan entries written.
+#[derive(Debug, Clone)]
+pub(crate) struct PlanScope {
+    /// Directories and single files under the source, relative to it. Empty:
+    /// the whole source. Each directory is walked on its own; each file is
+    /// `lstat`ed and offered to the fit as one candidate. Mirror paths stay
+    /// relative to the source root.
+    pub(crate) includes: Vec<PathBuf>,
+    /// Review cap on ranked candidates.
+    pub(crate) cap: usize,
+    /// Build the plan but write nothing: no plan file, no scan entries.
+    pub(crate) dry_run: bool,
+}
+
+impl Default for PlanScope {
+    fn default() -> Self {
+        Self {
+            includes: Vec::new(),
+            cap: DEFAULT_CAP,
+            dry_run: false,
+        }
+    }
+}
+
+/// One walked tree of a plan: the scan and its root relative to the source.
+struct Scope {
+    scan: CompletedScan,
+    base: PathBuf,
+}
+
 /// What the roll-up pass added to a plan.
 #[derive(Debug, Default)]
 pub(crate) struct RollupSummary {
@@ -110,11 +142,26 @@ pub(crate) struct PlanOutcome {
 /// A bad label, an unreadable source or snapshot, a refused source/destination
 /// pair (same filesystem, same physical disk, or an unknown `disk_id`), or a
 /// failure writing the plan file.
+pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result<PlanOutcome> {
+    build_plan_scoped(request, &PlanScope::default(), probe)
+}
+
+/// [`build_plan`] narrowed to `scope.includes`, with `scope.cap`, and, for a
+/// dry run, writing nothing.
+///
+/// # Errors
+///
+/// As [`build_plan`], plus an include that does not exist, is neither a
+/// directory nor a regular file, or is combined with `--snapshot`.
 #[allow(
     clippy::too_many_lines,
     reason = "the plan's steps in order: judge the pair, scan, fit, roll up, write; each is already a helper"
 )]
-pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result<PlanOutcome> {
+pub(crate) fn build_plan_scoped(
+    request: &PlanRequest,
+    scope: &PlanScope,
+    probe: &dyn DiskProbe,
+) -> Result<PlanOutcome> {
     validate_label(&request.label)?;
     let dest = canonical_dir(&request.dest)?;
 
@@ -147,17 +194,43 @@ pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result
     super::refuse_write_under_source(&source, "the catalog", &request.catalog, app_catalog)?;
     super::refuse_write_under_source(&source, "the plan file", &plan_path_for(0), app_catalog)?;
 
-    let (scan, snapshot_identity) = match snapshot {
-        Some(loaded) => loaded,
-        None => walk(&source, request.progress)?,
-    };
-    let scan_root = std::fs::canonicalize(&scan.root_path).unwrap_or_else(|_| scan.root_path.clone());
-    let Ok(base) = scan_root.strip_prefix(&source).map(Path::to_path_buf) else {
-        bail!(
-            "the scan root {} is not inside the source {}",
-            scan_root.display(),
-            source.display()
-        );
+    if snapshot.is_some() && !scope.includes.is_empty() {
+        bail!("a snapshot covers its whole scan root; it cannot be narrowed to includes");
+    }
+    let mut scopes = Vec::new();
+    let mut named_files = Vec::new();
+    let mut identities = Vec::new();
+    if let Some((scan, identity)) = snapshot {
+        identities.push(identity);
+        scopes.push(scope_of(scan, &source)?);
+    } else if scope.includes.is_empty() {
+        let (scan, identity) = walk(&source, request.progress)?;
+        identities.push(identity);
+        scopes.push(scope_of(scan, &source)?);
+    } else {
+        for include in &scope.includes {
+            let absolute = source.join(include);
+            let meta = std::fs::symlink_metadata(&absolute)
+                .with_context(|| format!("include {} of {}", include.display(), source.display()))?;
+            if meta.file_type().is_dir() {
+                let (scan, identity) = walk(&absolute, request.progress)?;
+                identities.push(identity);
+                scopes.push(scope_of(scan, &source)?);
+            } else if meta.file_type().is_file() {
+                identities.push(format!("file:{}:{}:{}", meta.ino(), meta.size(), meta.mtime()));
+                named_files.push((include.clone(), absolute, meta));
+            } else {
+                bail!(
+                    "include {} is neither a directory nor a regular file",
+                    absolute.display()
+                );
+            }
+        }
+    }
+    let snapshot_identity = if identities.len() == 1 {
+        identities.remove(0)
+    } else {
+        format!("set:[{}]", identities.join(";"))
     };
 
     // The drive's own catalog, read only, so files already on it are not
@@ -172,23 +245,54 @@ pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result
     } else {
         LandedKeys::default()
     };
-    let (items, changed, landed_candidates) = candidates(&scan, &source, &base, request.floor, &request.rules, &landed);
+    let mut items = Vec::new();
+    let mut changed = Vec::new();
+    let mut landed_candidates = Count::default();
+    for (index, part) in scopes.iter().enumerate() {
+        let (mut found, mut moved, already) =
+            candidates(&part.scan, &source, &part.base, request.floor, &request.rules, &landed);
+        let offset = (index as u64) << 40;
+        for item in &mut found {
+            item.tie = item.tie.saturating_add(offset);
+        }
+        items.append(&mut found);
+        changed.append(&mut moved);
+        landed_candidates.files += already.files;
+        landed_candidates.bytes += already.bytes;
+    }
+    for (index, (relative, absolute, meta)) in named_files.into_iter().enumerate() {
+        let item = ScanItem {
+            relative,
+            absolute,
+            kind: ItemKind::File,
+            logical: meta.size(),
+            allocated: meta.blocks().saturating_mul(512),
+            dev: meta.dev(),
+            ino: meta.ino(),
+            mtime_ns: i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec()),
+            tie: u64::MAX - index as u64,
+        };
+        if landed.contains(&item.absolute, &item.relative, meta.size(), meta.mtime()) {
+            landed_candidates.files += 1;
+            landed_candidates.bytes += meta.size();
+            continue;
+        }
+        items.push(item);
+    }
     let mut fitted = fit(&FitInput {
         items: &items,
         rules: &request.rules,
         floor_allocated: request.floor,
         dest: &dest_facts,
         reserve_pressure: DEFAULT_RESERVE_PRESSURE,
-        cap: DEFAULT_CAP,
+        cap: scope.cap,
     });
 
-    let mut changed = changed;
     let rollups = if request.rollup {
         let summary = add_rollups(
             &RollupContext {
-                scan: &scan,
+                scopes: &scopes,
                 source: &source,
-                base: &base,
                 rules: &request.rules,
                 landed: &landed,
             },
@@ -230,8 +334,12 @@ pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result
     };
     let token = plan_token(&plan);
     let plan_path = plan_path_for(created_at_ms);
-    write_plan(&plan, &plan_path)?;
-    let entries = write_scan_entries(&scan, &plan, &request.catalog);
+    let entries = if scope.dry_run {
+        Err("dry run: nothing written".to_owned())
+    } else {
+        write_plan(&plan, &plan_path)?;
+        write_scan_entries(&scopes, &plan, &request.catalog)
+    };
 
     Ok(PlanOutcome {
         token,
@@ -257,11 +365,38 @@ pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result
 
 /// The scan facts [`add_rollups`] reads.
 struct RollupContext<'a> {
-    scan: &'a CompletedScan,
+    scopes: &'a [Scope],
     source: &'a Path,
-    base: &'a Path,
     rules: &'a Rules,
     landed: &'a LandedKeys,
+}
+
+/// A scan with its root made relative to `source`.
+fn scope_of(scan: CompletedScan, source: &Path) -> Result<Scope> {
+    let scan_root = std::fs::canonicalize(&scan.root_path).unwrap_or_else(|_| scan.root_path.clone());
+    let Ok(base) = scan_root.strip_prefix(source).map(Path::to_path_buf) else {
+        bail!(
+            "the scan root {} is not inside the source {}",
+            scan_root.display(),
+            source.display()
+        );
+    };
+    Ok(Scope { scan, base })
+}
+
+/// Adds `more` into `total`, field by field.
+fn absorb(total: &mut Coverage, more: &Coverage) {
+    for (into, from) in [
+        (&mut total.individual, &more.individual),
+        (&mut total.rolled_up, &more.rolled_up),
+        (&mut total.landed, &more.landed),
+        (&mut total.skipped, &more.skipped),
+        (&mut total.not_covered, &more.not_covered),
+    ] {
+        into.files = into.files.saturating_add(from.files);
+        into.bytes = into.bytes.saturating_add(from.bytes);
+    }
+    total.unreadable_dirs = total.unreadable_dirs.saturating_add(more.unreadable_dirs);
 }
 
 /// Adds roll-up items to a fitted plan: everything not planned or deferred
@@ -286,15 +421,21 @@ fn add_rollups(context: &RollupContext<'_>, fitted: &mut FitPlan, changed: &mut 
                 .map(|item| item.relative.clone()),
         )
         .collect();
-    let mut found = rollup::candidates(&RollupInput {
-        scan: context.scan,
-        source: context.source,
-        base: context.base,
-        rules: context.rules,
-        individual: &individual,
-        other_skips: &other_skips,
-        landed: context.landed,
-    });
+    let mut found = rollup::RollupCandidates::default();
+    for part in context.scopes {
+        let mut more = rollup::candidates(&RollupInput {
+            scan: &part.scan,
+            source: context.source,
+            base: &part.base,
+            rules: context.rules,
+            individual: &individual,
+            other_skips: &other_skips,
+            landed: context.landed,
+        });
+        found.items.append(&mut more.items);
+        found.changed.append(&mut more.changed);
+        absorb(&mut found.coverage, &more.coverage);
+    }
     changed.append(&mut found.changed);
 
     let budget_known = !fitted
@@ -334,14 +475,22 @@ fn add_rollups(context: &RollupContext<'_>, fitted: &mut FitPlan, changed: &mut 
     summary
 }
 
-/// Writes the scan's entries, then a manifest, to the primary catalog under
-/// the plan's id.
-fn write_scan_entries(scan: &CompletedScan, plan: &PlanFile, catalog: &Path) -> std::result::Result<PathBuf, String> {
+/// Writes each scan's entries, then a manifest, to the primary catalog under
+/// the plan's id. Returns the last entries part written.
+fn write_scan_entries(scopes: &[Scope], plan: &PlanFile, catalog: &Path) -> std::result::Result<PathBuf, String> {
     let id = super::plan_id(plan);
     let primary = rdirstat_catalog::Catalog::new(catalog);
-    let written = primary
-        .write_entries(scan, &plan.source_label, &id)
-        .map_err(|error| format!("writing scan entries: {error}"))?;
+    let mut written = None;
+    for part in scopes {
+        written = Some(
+            primary
+                .write_entries(&part.scan, &plan.source_label, &id)
+                .map_err(|error| format!("writing scan entries: {error}"))?,
+        );
+    }
+    let Some(written) = written else {
+        return Err("no directory was walked; only named files are planned".to_owned());
+    };
     primary
         .write_manifest(&id, plan.created_at_ms)
         .map_err(|error| format!("writing the scan manifest: {error}"))?;

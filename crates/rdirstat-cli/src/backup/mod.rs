@@ -37,6 +37,8 @@
 
 mod apply;
 mod plan;
+mod profile;
+mod recommend;
 mod rollup;
 mod status;
 #[cfg(test)]
@@ -56,6 +58,7 @@ pub(crate) use apply::{ApplyRequest, apply};
 #[cfg(test)]
 pub(crate) use plan::PlanOutcome;
 pub(crate) use plan::{PlanRequest, build_plan};
+pub(crate) use recommend::DEFAULT_LIMIT as RECOMMEND_LIMIT;
 
 /// Exit code for an apply that ran to the end but left items not landed.
 pub(crate) const EXIT_INCOMPLETE: u8 = 3;
@@ -98,6 +101,7 @@ pub(crate) fn run(command: &BackupCommand) -> Result<ExitCode> {
         BackupCommand::Apply(args) => run_apply(args),
         BackupCommand::Index(args) => run_index(args),
         BackupCommand::Status(args) => run_status(args),
+        BackupCommand::Recommend(args) => profile::run_recommend(args),
     }
 }
 
@@ -166,6 +170,12 @@ fn run_status(args: &BackupStatusArgs) -> Result<ExitCode> {
 }
 
 fn run_plan(args: &BackupPlanArgs) -> Result<ExitCode> {
+    if let Some(path) = &args.profile {
+        return profile::run_plan(path, args);
+    }
+    let (Some(label), Some(dest)) = (&args.label, &args.dest) else {
+        bail!("--label and --dest are required without --profile");
+    };
     let catalog = catalog_dir(args.catalog.as_deref())?;
     let rules = match &args.rules {
         Some(path) => {
@@ -176,8 +186,8 @@ fn run_plan(args: &BackupPlanArgs) -> Result<ExitCode> {
     };
     let request = PlanRequest {
         source: args.source.clone(),
-        label: args.label.clone(),
-        dest: args.dest.clone(),
+        label: label.clone(),
+        dest: dest.clone(),
         floor: args.floor,
         snapshot: args.snapshot.clone(),
         rules,

@@ -13,6 +13,8 @@
 //! | [`layout`] | `<dest>/Backups/<label>/<relative>` |
 //! | [`fit`] | largest-first wave selection under the destination reserve |
 //! | [`plan`] | the JSON plan file and its SHA-256 token |
+//! | [`profile`] | backup profiles stored on the drive (`.rdirstat/profiles`) |
+//! | [`recommend`] | the schema of a profile's dry-run preview, for the GUI |
 
 #![forbid(unsafe_code)]
 
@@ -20,6 +22,8 @@ pub mod fit;
 pub mod layout;
 pub mod pair;
 pub mod plan;
+pub mod profile;
+pub mod recommend;
 pub mod rules;
 
 pub use fit::{
@@ -29,4 +33,6 @@ pub use fit::{
 pub use layout::{BACKUPS_DIR, LayoutError, mirror_path, validate_label};
 pub use pair::{DiskFacts, PairRefusal, judge_backup_pair};
 pub use plan::{INTENT_BACKUP, PLAN_SCHEMA_VERSION, PlanFile, plan_token};
+pub use profile::{PROFILE_SCHEMA_VERSION, PROFILES_DIR, Profile, ProfileError, ProfileSource, profile_path};
+pub use recommend::{RECOMMEND_SCHEMA_VERSION, Recommendation, RowStatus};
 pub use rules::{Rule, RuleAction, Rules, RulesError};
