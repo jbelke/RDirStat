@@ -175,11 +175,17 @@ pub fn visit_entries(
 ///
 /// A part that cannot be read.
 pub fn build_index(catalog_dir: &Path) -> Result<Vec<IndexRow>, CatalogError> {
-    let mut by_dest: HashMap<String, ReceiptRow> = HashMap::new();
-    let mut keep = |receipt: ReceiptRow| match by_dest.get(&receipt.dest_path) {
-        Some(kept) if kept.verified_at_ms > receipt.verified_at_ms => {}
-        _ => {
-            by_dest.insert(receipt.dest_path.clone(), receipt);
+    // Keyed by a 128-bit digest of the path, not a second copy of it: with a
+    // member row per roll-up file, this map holds every file on the drive.
+    let mut by_dest: HashMap<u128, ReceiptRow> = HashMap::new();
+    let mut keep = |receipt: ReceiptRow| match by_dest.entry(key128(&[receipt.dest_path.as_bytes()])) {
+        std::collections::hash_map::Entry::Occupied(mut kept) => {
+            if kept.get().verified_at_ms <= receipt.verified_at_ms {
+                kept.insert(receipt);
+            }
+        }
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(receipt);
         }
     };
     for receipt in read_receipts(catalog_dir)? {
@@ -189,52 +195,72 @@ pub fn build_index(catalog_dir: &Path) -> Result<Vec<IndexRow>, CatalogError> {
     }
     visit_members(catalog_dir, |member| keep(member.to_owned_row()))?;
 
-    let mut sources: HashMap<&str, HashSet<(&str, &str)>> = HashMap::new();
+    let source_key = |label: &str, path: &str| key128(&[label.as_bytes(), path.as_bytes()]);
+    let mut sources: HashMap<u128, HashSet<u128>> = HashMap::new();
     for receipt in by_dest.values() {
         sources
-            .entry(receipt.sha256.as_str())
+            .entry(key128(&[receipt.sha256.as_bytes()]))
             .or_default()
-            .insert((receipt.source_label.as_str(), receipt.source_path.as_str()));
+            .insert(source_key(&receipt.source_label, &receipt.source_path));
     }
+    let dup_counts: HashMap<u128, u64> = sources.into_iter().map(|(sha, set)| (sha, set.len() as u64)).collect();
 
-    let wanted: HashSet<(&str, &str)> = by_dest
+    let wanted: HashSet<u128> = by_dest
         .values()
-        .map(|r| (r.source_label.as_str(), r.source_path.as_str()))
+        .map(|r| source_key(&r.source_label, &r.source_path))
         .collect();
-    let mut categories: HashMap<(String, String), u8> = HashMap::new();
+    let mut categories: HashMap<u128, u8> = HashMap::new();
     visit_entries(catalog_dir, None, |entry| {
-        if wanted.contains(&(entry.source_label, entry.path)) {
-            categories.insert((entry.source_label.to_owned(), entry.path.to_owned()), entry.category);
+        let key = source_key(entry.source_label, entry.path);
+        if wanted.contains(&key) {
+            categories.insert(key, entry.category);
         }
     })?;
+    drop(wanted);
 
     let mut rows: Vec<IndexRow> = by_dest
-        .values()
+        .into_values()
         .map(|r| {
             let name = Path::new(&r.dest_path)
                 .file_name()
                 .map(|n| n.as_encoded_bytes().to_vec())
                 .unwrap_or_default();
+            let category = categories.get(&source_key(&r.source_label, &r.source_path)).copied();
+            let dup_count = dup_counts.get(&key128(&[r.sha256.as_bytes()])).copied().unwrap_or(1);
             IndexRow {
-                dest_path: r.dest_path.clone(),
+                dest_path: r.dest_path,
                 size: r.size,
-                sha256: r.sha256.clone(),
-                method: r.method.clone(),
-                source_label: r.source_label.clone(),
-                source_path: r.source_path.clone(),
+                sha256: r.sha256,
+                method: r.method,
+                source_label: r.source_label,
+                source_path: r.source_path,
                 source_mtime_ns: r.mtime_ns,
-                run_id: r.run_id.clone(),
+                run_id: r.run_id,
                 verified_at_ms: r.verified_at_ms,
-                category: categories
-                    .get(&(r.source_label.clone(), r.source_path.clone()))
-                    .copied(),
+                category,
                 ext: extension(&name),
-                dup_count: sources.get(r.sha256.as_str()).map_or(1, |s| s.len() as u64),
+                dup_count,
             }
         })
         .collect();
     rows.sort_by(|a, b| a.dest_path.cmp(&b.dest_path));
     Ok(rows)
+}
+
+/// A 128-bit digest of length-prefixed parts: a compact map key for the tens
+/// of millions of paths a drive can hold. Collisions are not a concern at
+/// this width.
+fn key128(parts: &[&[u8]]) -> u128 {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    for part in parts {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part);
+    }
+    let digest = hasher.finalize();
+    let mut out = [0_u8; 16];
+    out.copy_from_slice(digest.get(..16).unwrap_or(&[0; 16]));
+    u128::from_le_bytes(out)
 }
 
 fn io(operation: &'static str, path: &Path) -> impl FnOnce(std::io::Error) -> CatalogError {

@@ -63,8 +63,9 @@ pub(crate) enum Outcome {
     AlreadyLanded,
     /// The source's `(dev, ino, size, mtime)` differs from the plan. Skipped.
     ChangedSinceScan,
-    /// The source changed while it was being copied. The copy is left on disk
-    /// and named; no receipt.
+    /// The source changed while it was being copied. No receipt. A file's
+    /// copy is left on disk and named; a directory roll-up keeps only copies
+    /// of files that did not change, and names the first of them.
     ChangedDuringCopy,
     /// Something not receipted by a matching source is at the destination
     /// path, or a receipted copy that no longer has its receipt's kind or
@@ -221,12 +222,12 @@ pub(crate) fn apply(request: &ApplyRequest, probe: &dyn DiskProbe) -> Result<App
     )?;
 
     let catalog = Catalog::for_destination(&request.catalog, &plan.dest_root);
-    let mut landed = Landed::load(&catalog)?;
+    let mirror_root = plan.dest_root.join(BACKUPS_DIR).join(&plan.source_label);
+    let mut landed = Landed::load(&catalog, &rollup_dests(&plan, &mirror_root))?;
     let run_id = format!("backup-{}-{}", plan.source_label, now_ms());
     let plan_id = super::plan_id(&plan);
     let mut writer = ReceiptWriter::new(&catalog, &run_id, &plan_id);
     writer.write_plan_rows(&plan_rows(&plan, &plan_id));
-    let mirror_root = plan.dest_root.join(BACKUPS_DIR).join(&plan.source_label);
     let never = AtomicBool::new(false);
 
     let mut results = Vec::with_capacity(plan.items.len());
@@ -259,6 +260,27 @@ pub(crate) fn apply(request: &ApplyRequest, probe: &dyn DiskProbe) -> Result<App
         catalog_error,
         index,
     })
+}
+
+/// Where the plan's roll-ups land, by scope. Rows that do not parse as a
+/// mirror path are left out here and refused per item by [`destination_of`].
+pub(crate) fn rollup_dests(plan: &PlanFile, mirror_root: &Path) -> rollup::RollupDests {
+    let mut dests = rollup::RollupDests::default();
+    for item in &plan.items {
+        let Some(rollup) = &item.rollup else { continue };
+        let dest = if item.relative.as_os_str().is_empty() {
+            Some(mirror_root.to_path_buf())
+        } else {
+            mirror_path(&plan.dest_root, &plan.source_label, &item.relative).ok()
+        };
+        if let Some(dest) = dest {
+            match rollup.scope {
+                RollupScope::Tree => dests.trees.insert(dest),
+                RollupScope::Files => dests.files.insert(dest),
+            };
+        }
+    }
+    dests
 }
 
 /// The plan's items and listed skips as catalog rows.
@@ -313,14 +335,14 @@ impl Landed {
     /// path must not inherit them. A receipt that reached the primary but not
     /// the mirror reads as absent, which refuses (`DestinationOccupied`)
     /// rather than claims.
-    fn load(catalog: &Catalog) -> Result<Self> {
+    fn load(catalog: &Catalog, rollups: &rollup::RollupDests) -> Result<Self> {
         let rows = match catalog.mirror() {
             Some(mirror) => {
                 read_receipts(mirror).with_context(|| format!("reading receipts in {}", mirror.display()))?
             }
             None => Vec::new(),
         };
-        let files = rollup::Landed::load(catalog.mirror(), &rows)
+        let files = rollup::Landed::load(catalog.mirror(), &rows, rollups)
             .with_context(|| format!("reading roll-up members in {}", catalog.primary().display()))?;
         let mut landed = Landed {
             by_content: HashMap::new(),
@@ -627,10 +649,13 @@ fn land_rollup_item(
             result.outcome = Outcome::ChangedSinceScan;
             result.detail = Some(reason);
         }
-        RollupOutcome::ChangedDuringCopy(reason) => {
+        RollupOutcome::ChangedDuringCopy { reason, partial } => {
+            // Never the mirror directory itself: it may have existed before
+            // this run (a merge, or the mirror root for the volume root's own
+            // files) and hold landed, receipted files.
             result.outcome = Outcome::ChangedDuringCopy;
             result.detail = Some(reason);
-            result.partial = Some(result.dest.clone());
+            result.partial = partial.map(|path| path.to_string_lossy().into_owned());
         }
         RollupOutcome::Incomplete {
             failed,

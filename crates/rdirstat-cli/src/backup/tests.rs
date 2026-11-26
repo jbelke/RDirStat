@@ -1106,6 +1106,8 @@ fn a_partly_landed_directory_is_merged_without_overwriting_anything() {
         "already receipted, not recorded again"
     );
     assert!(member_paths.iter().any(|p| p.ends_with("clip.mov")));
+    // Missing files land in batches through staging directories, none left.
+    assert_eq!(staging_left(&fx.dest), Vec::<PathBuf>::new());
 }
 
 #[test]
@@ -1187,4 +1189,277 @@ fn no_rollup_plans_exactly_as_before() {
     assert_eq!(planned.plan.items.len(), 1, "only big.mov is over the floor");
     let json = std::fs::read_to_string(&fx.plan_path).expect("plan file");
     assert!(!json.contains("\"rollup\""), "no roll-up keys in the plan file");
+}
+
+// ---------------------------------------------------------------------------
+// Roll-up review fixes
+// ---------------------------------------------------------------------------
+
+/// Clears [`rollup::AFTER_COPY`] when dropped, so a failed test cannot leave
+/// a hook behind for the next test on this thread.
+struct HookGuard;
+
+impl Drop for HookGuard {
+    fn drop(&mut self) {
+        rollup::AFTER_COPY.with(|hook| *hook.borrow_mut() = None);
+    }
+}
+
+fn on_copy(hook: impl FnMut(&Path, &Path) + 'static) -> HookGuard {
+    rollup::AFTER_COPY.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    HookGuard
+}
+
+/// Every staging entry left anywhere under `root`.
+fn staging_left(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries {
+            let path = entry.expect("entry").path();
+            if path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(rdirstat_copy::STAGING_PREFIX))
+            {
+                out.push(path.clone());
+            }
+            if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+                stack.push(path);
+            }
+        }
+    }
+    out
+}
+
+fn result_of<'a>(report: &'a ApplyReport, relative: &str) -> &'a apply::ItemResult {
+    report
+        .results
+        .iter()
+        .find(|r| r.relative == relative)
+        .unwrap_or_else(|| panic!("{relative} not in the report"))
+}
+
+fn build_tree_with_root_files(root: &Path) {
+    build_tree(root);
+    put(root, "top.txt", &bytes(40, 120));
+    put(root, "top2.txt", &bytes(41, 130));
+}
+
+#[test]
+fn a_tree_rollup_whose_source_changes_mid_copy_leaves_nothing_and_lands_next_wave() {
+    let fx = Fixture::with(build_tree);
+    let planned = fx.plan();
+    let source = fx.source.clone();
+    let mut changed = false;
+    let hook = on_copy(move |relative, _| {
+        if relative == Path::new("Users/a/Documents") && !changed {
+            changed = true;
+            put(&source, "Users/a/Documents/notes/deep/d3.txt", &bytes(77, 51));
+        }
+    });
+    let report = fx.apply(&planned.token).expect("apply");
+    drop(hook);
+
+    let documents = result_of(&report, "Users/a/Documents");
+    assert_eq!(documents.outcome, Outcome::ChangedDuringCopy, "{documents:?}");
+    assert_eq!(documents.partial, None, "nothing of it is left on disk: {documents:?}");
+    assert!(
+        !fx.mirror("Users/a/Documents").exists(),
+        "the staged copy is not moved into place"
+    );
+    assert_eq!(staging_left(&fx.dest), Vec::<PathBuf>::new());
+    assert!(
+        !apply::text(&report).contains("left on disk"),
+        "{}",
+        apply::text(&report)
+    );
+
+    // The next wave is not blocked by a copy of the old state.
+    let again = fx.plan();
+    let report = fx.apply(&again.token).expect("apply");
+    assert!(report.complete(), "{}", apply::text(&report));
+    assert_eq!(
+        std::fs::read(fx.mirror("Users/a/Documents/notes/deep/d3.txt")).expect("landed"),
+        bytes(77, 51)
+    );
+}
+
+#[test]
+fn a_merge_whose_source_changes_mid_copy_never_names_the_mirror_root_and_drops_the_stale_copy() {
+    let fx = Fixture::with(build_tree_with_root_files);
+    let planned = fx.plan();
+    assert!(
+        rollup_items(&planned.plan).iter().any(|(r, _, _)| r.is_empty()),
+        "the volume root's own files are a files roll-up: {:?}",
+        rollup_items(&planned.plan)
+    );
+    let source = fx.source.clone();
+    let mut changed = false;
+    let hook = on_copy(move |relative, _| {
+        if relative.as_os_str().is_empty() && !changed {
+            changed = true;
+            put(&source, "top.txt", &bytes(42, 121));
+        }
+    });
+    let report = fx.apply(&planned.token).expect("apply");
+    drop(hook);
+
+    let root = result_of(&report, "");
+    assert_eq!(root.outcome, Outcome::ChangedDuringCopy, "{root:?}");
+    let mirror_root = fx.mirror("");
+    let partial = root.partial.as_deref().map(PathBuf::from);
+    assert_ne!(
+        partial.as_deref().map(|p| p.components().collect::<PathBuf>()),
+        Some(mirror_root.components().collect::<PathBuf>()),
+        "the mirror root holds landed files and is not a partial"
+    );
+    assert_eq!(partial, Some(fx.mirror("top2.txt")), "{root:?}");
+    assert!(
+        !fx.mirror("top.txt").exists(),
+        "the copy of the changed file is removed"
+    );
+    assert!(
+        fx.mirror("Users/a/Documents/letter.txt").exists(),
+        "landed files untouched"
+    );
+    assert_eq!(staging_left(&fx.dest), Vec::<PathBuf>::new());
+
+    let again = fx.plan();
+    let report = fx.apply(&again.token).expect("apply");
+    assert!(report.complete(), "{}", apply::text(&report));
+    assert_eq!(std::fs::read(fx.mirror("top.txt")).expect("landed"), bytes(42, 121));
+}
+
+#[test]
+fn an_adopted_file_that_cannot_be_hashed_is_not_called_a_partial() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fx = Fixture::with(build_tree);
+    // An exact copy with no receipt: adopted by the merge.
+    put(
+        &fx.dest,
+        "Backups/mac-data/Users/a/Documents/notes/n0.txt",
+        &bytes(0, 100),
+    );
+    let adopted = fx.mirror("Users/a/Documents/notes/n0.txt");
+    let planned = fx.plan();
+    let target = adopted.clone();
+    let hook = on_copy(move |relative, _| {
+        if relative == Path::new("Users/a/Documents") {
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        }
+    });
+    let report = fx.apply(&planned.token).expect("apply");
+    drop(hook);
+    std::fs::set_permissions(&adopted, std::fs::Permissions::from_mode(0o644)).expect("chmod back");
+
+    let documents = result_of(&report, "Users/a/Documents");
+    assert_eq!(documents.outcome, Outcome::Failed, "{documents:?}");
+    assert!(
+        documents.detail.as_deref().is_some_and(|d| d.contains("n0.txt")),
+        "{documents:?}"
+    );
+    assert_eq!(documents.partial, None, "it was there before the run: {documents:?}");
+}
+
+#[test]
+fn a_landed_file_deleted_on_the_drive_or_rewritten_within_its_second_is_planned_again() {
+    let fx = Fixture::with(build_tree);
+    let first = fx.plan();
+    assert!(fx.apply(&first.token).expect("apply").complete());
+    let replanned = fx.plan();
+    assert!(replanned.plan.items.is_empty(), "all landed");
+    let all_landed = replanned.rollups.as_ref().expect("roll-ups").coverage.landed.files;
+
+    // A landed copy removed from the drive.
+    std::fs::remove_file(fx.mirror("Users/a/Documents/notes/n2.txt")).expect("remove");
+    // A source file rewritten in place: same size, same inode, same whole
+    // second, other bytes and nanoseconds.
+    let main = fx.source.join("Users/a/src/app/src/main.rs");
+    let meta = std::fs::symlink_metadata(&main).expect("lstat");
+    std::fs::write(&main, bytes(99, 400)).expect("rewrite");
+    let nanos = u32::try_from((meta.mtime_nsec() + 1) % 1_000_000_000).expect("nanos");
+    let when =
+        std::time::UNIX_EPOCH + std::time::Duration::new(u64::try_from(meta.mtime()).expect("after 1970"), nanos);
+    std::fs::File::options()
+        .write(true)
+        .open(&main)
+        .expect("open")
+        .set_modified(when)
+        .expect("set mtime");
+    let now = std::fs::symlink_metadata(&main).expect("lstat");
+    assert_eq!(
+        (now.ino(), now.size(), now.mtime()),
+        (meta.ino(), meta.size(), meta.mtime())
+    );
+    assert_ne!(now.mtime_nsec(), meta.mtime_nsec());
+
+    let wave = fx.plan();
+    let summary = wave.rollups.as_ref().expect("roll-ups");
+    assert_eq!(summary.coverage.landed.files, all_landed - 12 - 2, "{summary:?}");
+    let rollups = rollup_items(&wave.plan);
+    assert!(rollups.iter().any(|(r, _, _)| r == "Users/a/Documents"), "{rollups:?}");
+    assert!(
+        rollups.iter().any(|(r, _, _)| r == "Users/a/src/app/src"),
+        "{rollups:?}"
+    );
+
+    let report = fx.apply(&wave.token).expect("apply");
+    assert_eq!(outcome_of(&report, "Users/a/Documents"), Outcome::Copied);
+    assert_eq!(
+        std::fs::read(fx.mirror("Users/a/Documents/notes/n2.txt")).expect("restored"),
+        bytes(2, 102)
+    );
+    // The old copy of main.rs is not overwritten; it is reported.
+    assert_eq!(outcome_of(&report, "Users/a/src/app/src"), Outcome::DestinationOccupied);
+}
+
+#[test]
+fn status_does_not_count_an_earlier_rollup_of_a_directory_as_this_plans() {
+    let fx = Fixture::with(build_tree);
+    let first = fx.plan();
+    assert!(fx.apply(&first.token).expect("apply").complete());
+
+    put(&fx.source, "Users/a/src/app/src/new.rs", b"fn new() {}");
+    let wave = fx.plan();
+    assert_eq!(
+        rollup_items(&wave.plan),
+        vec![(
+            "Users/a/src/app/src".to_owned(),
+            rdirstat_organize::RollupScope::Tree,
+            3
+        )]
+    );
+    // Changed again after the plan: this wave's roll-up does not land.
+    put(&fx.source, "Users/a/src/app/src/newer.rs", b"fn newer() {}");
+    let report = fx.apply(&wave.token).expect("apply");
+    assert_eq!(outcome_of(&report, "Users/a/src/app/src"), Outcome::ChangedSinceScan);
+
+    let status = status::status(&fx.dest, None).expect("status");
+    let source = &status.sources[0];
+    assert_eq!(source.pending.items, 1, "{source:?}");
+    assert_eq!(source.pending.bytes, wave.plan.items[0].logical, "{source:?}");
+}
+
+#[test]
+fn apply_loads_landed_rows_only_for_the_plans_rollup_directories() {
+    let fx = Fixture::with(build_tree);
+    let planned = fx.plan();
+    assert!(fx.apply(&planned.token).expect("apply").complete());
+    let mirror = fx.dest.join(".rdirstat/catalog");
+    let receipts = read_receipts(&mirror).expect("receipts");
+
+    let none = rollup::Landed::load(Some(&mirror), &receipts, &rollup::RollupDests::default()).expect("load");
+    assert_eq!(none.len(), 0, "a plan without roll-ups loads nothing");
+
+    let mut dests = rollup::RollupDests::default();
+    dests.trees.insert(fx.mirror("Users/a/Documents"));
+    let documents = rollup::Landed::load(Some(&mirror), &receipts, &dests).expect("load");
+    assert_eq!(documents.len(), 12, "the Documents tree's files only");
+
+    let mut dests = rollup::RollupDests::default();
+    dests.files.insert(fx.mirror("Users/a/Documents"));
+    let loose = rollup::Landed::load(Some(&mirror), &receipts, &dests).expect("load");
+    assert_eq!(loose.len(), 2, "letter.txt and latest, not the notes below");
 }

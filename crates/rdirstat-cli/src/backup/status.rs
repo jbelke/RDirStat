@@ -1,7 +1,7 @@
 //! `rdirstat backup index` and `rdirstat backup status`: what the drive holds,
 //! from the drive's own Parquet. Neither walks the drive or the source.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -85,11 +85,16 @@ pub(crate) fn status(dest: &Path, only: Option<&str>) -> Result<StatusReport> {
     let index = build_index(&catalog).with_context(|| format!("reading receipts in {}", catalog.display()))?;
     // A directory roll-up's files are index rows; the roll-up itself is one
     // `rollup` receipt naming the directory, which is what its plan row names.
-    let rollups: Vec<(String, String)> = read_receipts(&catalog)
+    let rollups: Vec<RollupReceipt> = read_receipts(&catalog)
         .with_context(|| format!("reading receipts in {}", catalog.display()))?
         .into_iter()
         .filter(|r| r.method == METHOD_ROLLUP)
-        .map(|r| (r.source_label, r.source_path))
+        .map(|r| RollupReceipt {
+            source_label: r.source_label,
+            source_path: r.source_path,
+            size: r.size,
+            verified_at_ms: r.verified_at_ms,
+        })
         .collect();
     let plans = read_plan_rows(&catalog).with_context(|| format!("reading plans in {}", catalog.display()))?;
 
@@ -118,11 +123,32 @@ pub(crate) fn status(dest: &Path, only: Option<&str>) -> Result<StatusReport> {
     })
 }
 
+/// The fields of a `rollup` receipt that tie it to one plan item.
+#[derive(Debug)]
+struct RollupReceipt {
+    source_label: String,
+    source_path: String,
+    size: u64,
+    verified_at_ms: i64,
+}
+
+/// A `rollup` receipt lands this plan row's item: same directory, same
+/// logical bytes, and verified after the plan was made. A plan only lists a
+/// roll-up that the drive did not already hold when it was made, so a
+/// receipt from before then is an earlier roll-up of the same directory.
+fn rollup_landed(by_path: &HashMap<&str, Vec<&RollupReceipt>>, row: &PlanRow) -> bool {
+    by_path.get(row.source_path.as_str()).is_some_and(|receipts| {
+        receipts
+            .iter()
+            .any(|r| r.size == row.logical && r.verified_at_ms >= row.created_at_ms)
+    })
+}
+
 fn source_status(
     catalog: &Path,
     label: &str,
     index: &[IndexRow],
-    rollups: &[(String, String)],
+    rollups: &[RollupReceipt],
     plans: &[PlanRow],
 ) -> Result<SourceStatus> {
     let mine: Vec<&IndexRow> = index.iter().filter(|r| r.source_label == label).collect();
@@ -135,13 +161,16 @@ fn source_status(
         }
     }
     let landed: HashSet<&str> = mine.iter().map(|r| r.source_path.as_str()).collect();
-    let mut planned_landed = landed.clone();
-    planned_landed.extend(
-        rollups
-            .iter()
-            .filter(|(source_label, _)| source_label == label)
-            .map(|(_, path)| path.as_str()),
-    );
+    // A roll-up receipt by path alone. A directory can be rolled up again in
+    // a later wave (a new scope, new files); a receipt counts for a plan row
+    // only if it is that row's item, below.
+    let mut rollups_by_path: HashMap<&str, Vec<&RollupReceipt>> = HashMap::new();
+    for receipt in rollups.iter().filter(|r| r.source_label == label) {
+        rollups_by_path
+            .entry(receipt.source_path.as_str())
+            .or_default()
+            .push(receipt);
+    }
 
     let last_plan = plans
         .iter()
@@ -176,7 +205,9 @@ fn source_status(
             continue;
         }
         match row.status.as_str() {
-            PLAN_STATUS_PLANNED if !planned_landed.contains(row.source_path.as_str()) => {
+            PLAN_STATUS_PLANNED
+                if !landed.contains(row.source_path.as_str()) && !rollup_landed(&rollups_by_path, row) =>
+            {
                 status.pending.add(row.logical);
             }
             PLAN_STATUS_SKIPPED => {

@@ -29,18 +29,24 @@
 //!   own, skipped by a rule, changed since the scan). Its subdirectories are
 //!   judged the same way, recursively.
 //!
-//! So the item count is bounded by the number of directories on the paths to
-//! skipped or individually planned items, plus one per [`MAX_TREE_FILES`]
-//! files: tens of thousands on a volume of tens of millions of inodes.
+//! So there is one files item per directory on the path to a skipped or
+//! individually planned item (or over a cap), and one tree item per clean
+//! child of such a directory. Sibling subtrees are not packed together: a
+//! directory over the caps with many small subdirectories gives one item per
+//! subdirectory, and a large volume can plan hundreds of thousands of items.
+//! A files item is not capped either; its memory at apply grows with the
+//! directory's loose files.
 //!
 //! # Already landed
 //!
 //! The drive's own catalog (`<dest>/.rdirstat/catalog`: file receipts and
-//! roll-up members) is read at plan time. A file it already holds, by source
-//! path, size and whole-second mtime, is not planned on its own, and a
-//! roll-up whose every file it holds is not planned at all. Apply decides
-//! again for itself, by inode and nanosecond mtime ([`Landed`]); the plan's
-//! reading is only an estimate.
+//! roll-up members) is read at plan time. A file it already holds is not
+//! planned on its own, and a roll-up whose every file it holds is not planned
+//! at all, so apply never sees them. "Holds" is therefore proven at plan
+//! time, not estimated ([`LandedKeys`]): the source file's path, size, inode
+//! and nanosecond mtime match a row, and the mirror path still has a file of
+//! that kind and size. Apply checks what it does see again, by the same
+//! identity ([`Landed`]).
 //!
 //! # Landing (apply)
 //!
@@ -49,31 +55,39 @@
 //! the newest mtime. Anything else is `changed_since_scan` for the item.
 //!
 //! - A tree roll-up whose mirror directory does not exist is one `ditto` of
-//!   the directory, then `compare_tree`.
+//!   the directory into a staging name beside it, then `compare_tree`, then
+//!   a no-replace rename into place once the source is proven unchanged.
 //! - Otherwise (a files roll-up, or a mirror directory that already exists,
 //!   partly from an earlier wave or a failed run) the scope is *merged*:
-//!   nothing at the destination is ever overwritten. A missing file, symlink
-//!   or whole subdirectory is landed with `ditto` and compared. A file that
-//!   is there and whose receipt or member row matches the source identity is
-//!   already landed. A file that is there without one is compared with the
-//!   source: equal, it is adopted; different, it is left alone and reported
-//!   (`destination_occupied`).
+//!   nothing at the destination is ever overwritten. Missing regular files
+//!   are landed per directory in batches (one `ditto` per chunk, each file
+//!   compared, then renamed into place without replacing anything); a
+//!   missing symlink is made directly and a missing subdirectory is one
+//!   `ditto`. A file that is there and whose receipt or member row matches
+//!   the source identity is already landed. A file that is there without one
+//!   is compared with the source: equal, it is adopted; different, it is left
+//!   alone and reported (`destination_occupied`).
 //!
 //! The walk is repeated after landing; a difference is
-//! `changed_during_copy` and nothing is recorded. Otherwise every file that
+//! `changed_during_copy` and nothing is recorded. The staged tree is
+//! removed, and a merge removes the copies it made of entries that changed:
+//! left behind without member rows, they would be refused as occupied in
+//! every later wave. Otherwise every file that
 //! landed or was adopted gets a `members` row (with its SHA-256), and, when
 //! all of the scope landed, the item gets one receipt with method `rollup`.
 //! Roll-up files are never clone sources and never cloned: deduplication
 //! stays with the files planned one by one.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use rdirstat_catalog::{METHOD_ROLLUP, ReceiptRow, read_receipts, visit_members};
-use rdirstat_copy::{compare_tree, land, partial_path, sha256_file, sha256_hex};
+use rdirstat_copy::{
+    compare_tree, land, land_files, partial_path, rename_no_replace, sha256_file, sha256_hex, staging_name,
+};
 use rdirstat_core::{CompletedScan, Kind, NodeId, flags};
 use rdirstat_organize::{ItemKind, PlanItem, Rollup, RollupScope, Rules, SkippedItem};
 use serde::Serialize;
@@ -83,7 +97,8 @@ use super::plan::RULE_CHANGED_SINCE_SCAN;
 
 /// Most files a tree roll-up holds. A larger directory is split: its loose
 /// files become a files roll-up and its subdirectories are judged on their
-/// own. Bounds one item's memory at apply and what one failed copy costs.
+/// own. Bounds a tree item's memory at apply and what one failed copy costs;
+/// files items are not bounded by it.
 pub(crate) const MAX_TREE_FILES: u64 = 100_000;
 /// Most logical bytes a tree roll-up holds, for the same reason.
 pub(crate) const MAX_TREE_BYTES: u64 = 64 << 30;
@@ -115,52 +130,113 @@ fn plan_key(source_path: &[u8], size: u64, mtime_s: i64) -> u128 {
     key(&[source_path, &size.to_le_bytes(), &mtime_s.to_le_bytes()])
 }
 
-/// What the drive's own catalog says has landed, as plan-time keys:
-/// `(source path, size, whole-second mtime)`.
+fn exact_key(source_path: &[u8], size: u64, ino: u64, mtime_ns: i64, dest_path: &[u8]) -> u128 {
+    key(&[
+        source_path,
+        &size.to_le_bytes(),
+        &ino.to_le_bytes(),
+        &mtime_ns.to_le_bytes(),
+        dest_path,
+    ])
+}
+
+/// What the drive's own catalog says has landed, for the plan.
+///
+/// The scan only knows a file's path, size and whole-second mtime, so those
+/// are the first, cheap test (`cheap`). A file that passes it is then
+/// `lstat`ed on the source and must match a receipt or member row by inode
+/// and nanosecond mtime too, at the mirror path the plan would give it
+/// (`exact`), and that mirror path must still hold a file of the same kind
+/// and size. Only then is it "already landed" and left out of the plan: a
+/// file rewritten within the same second, or a landed copy since deleted or
+/// truncated on the drive, is planned again. Two `lstat`s per landed file is
+/// the price; a file the drive has never seen costs none.
 #[derive(Debug, Default)]
 pub(crate) struct LandedKeys {
-    keys: HashSet<u128>,
+    cheap: HashSet<u128>,
+    exact: HashSet<u128>,
+    /// `<dest>/Backups/<label>`.
+    mirror_root: PathBuf,
 }
 
 impl LandedKeys {
     /// Reads file receipts and roll-up members for `label` from `catalog`
-    /// (the destination's mirror catalog). A missing catalog is empty.
+    /// (the destination's mirror catalog), whose mirror tree is
+    /// `mirror_root`. A missing catalog is empty.
     ///
     /// # Errors
     ///
     /// An unreadable part.
-    pub(crate) fn load(catalog: &Path, label: &str) -> anyhow::Result<Self> {
-        let mut keys = HashSet::new();
+    pub(crate) fn load(catalog: &Path, mirror_root: &Path, label: &str) -> anyhow::Result<Self> {
+        let mut landed = Self {
+            mirror_root: mirror_root.to_path_buf(),
+            ..Self::default()
+        };
         for row in read_receipts(catalog)? {
             if row.source_label == label && row.method != METHOD_ROLLUP {
-                keys.insert(plan_key(
+                landed.insert(
                     row.source_path.as_bytes(),
                     row.size,
-                    row.mtime_ns.div_euclid(1_000_000_000),
-                ));
+                    row.source_ino,
+                    row.mtime_ns,
+                    row.dest_path.as_bytes(),
+                );
             }
         }
         visit_members(catalog, |row| {
             if row.source_label == label {
-                keys.insert(plan_key(
+                landed.insert(
                     row.source_path.as_bytes(),
                     row.size,
-                    row.mtime_ns.div_euclid(1_000_000_000),
-                ));
+                    row.source_ino,
+                    row.mtime_ns,
+                    row.dest_path.as_bytes(),
+                );
             }
         })?;
-        Ok(Self { keys })
+        Ok(landed)
     }
 
-    pub(crate) fn contains(&self, absolute: &Path, size: u64, mtime_s: i64) -> bool {
-        !self.keys.is_empty()
-            && self
-                .keys
-                .contains(&plan_key(absolute.as_os_str().as_bytes(), size, mtime_s))
+    fn insert(&mut self, source: &[u8], size: u64, ino: u64, mtime_ns: i64, dest: &[u8]) {
+        self.cheap
+            .insert(plan_key(source, size, mtime_ns.div_euclid(1_000_000_000)));
+        self.exact.insert(exact_key(source, size, ino, mtime_ns, dest));
+    }
+
+    /// `absolute` (at `relative` under the source root, as the scan saw it:
+    /// `size` bytes, whole-second `mtime_s`) is on the drive, proven as the
+    /// type documents.
+    pub(crate) fn contains(&self, absolute: &Path, relative: &Path, size: u64, mtime_s: i64) -> bool {
+        let source_bytes = absolute.as_os_str().as_bytes();
+        if self.cheap.is_empty() || !self.cheap.contains(&plan_key(source_bytes, size, mtime_s)) {
+            return false;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(absolute) else {
+            return false;
+        };
+        let kind = meta.file_type();
+        if !(kind.is_file() || kind.is_symlink()) || meta.size() != size {
+            return false;
+        }
+        let dest = self.mirror_root.join(relative);
+        if !self.exact.contains(&exact_key(
+            source_bytes,
+            size,
+            meta.ino(),
+            clamp_i64(mtime_ns(&meta)),
+            dest.as_os_str().as_bytes(),
+        )) {
+            return false;
+        }
+        std::fs::symlink_metadata(&dest).is_ok_and(|landed| {
+            landed.file_type().is_file() == kind.is_file()
+                && landed.file_type().is_symlink() == kind.is_symlink()
+                && landed.size() == size
+        })
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.keys.len()
+        self.exact.len()
     }
 }
 
@@ -283,7 +359,7 @@ fn classify(
     }
     let landed = input
         .landed
-        .contains(&input.source.join(relative), node.size, node.mtime);
+        .contains(&input.source.join(relative), relative, node.size, node.mtime);
     Leaf::Member { landed }
 }
 
@@ -579,37 +655,75 @@ fn path_key(path: &[u8]) -> u128 {
     key(&[path])
 }
 
+/// The destination directories of a plan's roll-ups: the only places a
+/// merge looks files up, so the only rows [`Landed::load`] keeps.
+#[derive(Debug, Default)]
+pub(crate) struct RollupDests {
+    /// Mirror directories of tree roll-ups: any file below one.
+    pub(crate) trees: HashSet<PathBuf>,
+    /// Mirror directories of files roll-ups: their direct files only.
+    pub(crate) files: HashSet<PathBuf>,
+}
+
+impl RollupDests {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.trees.is_empty() && self.files.is_empty()
+    }
+
+    fn covers(&self, dest: &Path) -> bool {
+        let Some(parent) = dest.parent() else {
+            return false;
+        };
+        self.files.contains(parent) || (!self.trees.is_empty() && parent.ancestors().any(|a| self.trees.contains(a)))
+    }
+}
+
 impl Landed {
     /// Loads the members and file receipts of `catalog` (the drive's mirror;
-    /// `None` loads nothing, so nothing is trusted).
+    /// `None` loads nothing, so nothing is trusted) whose destination is in
+    /// one of `dests`. A plan without roll-ups loads nothing, and a drive
+    /// holding tens of millions of member rows costs memory only for the
+    /// directories this plan merges into.
     ///
     /// # Errors
     ///
     /// An unreadable part.
-    pub(crate) fn load(mirror: Option<&Path>, receipts: &[ReceiptRow]) -> anyhow::Result<Self> {
+    pub(crate) fn load(mirror: Option<&Path>, receipts: &[ReceiptRow], dests: &RollupDests) -> anyhow::Result<Self> {
         let mut landed = Self::default();
         let Some(mirror) = mirror else {
             return Ok(landed);
         };
+        if dests.is_empty() {
+            return Ok(landed);
+        }
         for row in receipts.iter().filter(|r| r.method != METHOD_ROLLUP) {
-            landed.insert(
-                row.dest_path.as_bytes(),
-                row.source_path.as_bytes(),
-                row.source_ino,
-                row.size,
-                row.mtime_ns,
-            );
+            if dests.covers(Path::new(&row.dest_path)) {
+                landed.insert(
+                    row.dest_path.as_bytes(),
+                    row.source_path.as_bytes(),
+                    row.source_ino,
+                    row.size,
+                    row.mtime_ns,
+                );
+            }
         }
         visit_members(mirror, |row| {
-            landed.insert(
-                row.dest_path.as_bytes(),
-                row.source_path.as_bytes(),
-                row.source_ino,
-                row.size,
-                row.mtime_ns,
-            );
+            if dests.covers(Path::new(row.dest_path)) {
+                landed.insert(
+                    row.dest_path.as_bytes(),
+                    row.source_path.as_bytes(),
+                    row.source_ino,
+                    row.size,
+                    row.mtime_ns,
+                );
+            }
         })?;
         Ok(landed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.by_dest.len()
     }
 
     fn insert(&mut self, dest: &[u8], source: &[u8], ino: u64, size: u64, mtime_ns: i64) {
@@ -796,7 +910,13 @@ pub(crate) enum RollupOutcome {
         receipt: Option<ReceiptRow>,
     },
     ChangedSinceScan(String),
-    ChangedDuringCopy(String),
+    /// The source moved under the copy; nothing is recorded. `partial` is a
+    /// path this run wrote that is still on disk (a copy of a file that did
+    /// not change), never a directory that was there before the run.
+    ChangedDuringCopy {
+        reason: String,
+        partial: Option<PathBuf>,
+    },
     /// Some files did not land. `members` are the ones that did and
     /// verified; they are recorded, the item's receipt is not.
     Incomplete {
@@ -862,9 +982,18 @@ pub(crate) fn land_rollup(
     let mut states: Vec<State> = vec![State::Failed; walk.entries.len()];
     let mut problems = Problems::default();
 
+    // A tree roll-up whose mirror directory does not exist is copied whole
+    // into a staging name beside it and moved into place only once the
+    // source is proven not to have moved under the copy. A copy of a source
+    // that changed is not a backup of anything the plan described; left at
+    // the mirror path without member rows, every changed file in it would
+    // read as someone else's file (`destination_occupied`) in every later
+    // wave.
     let fast = rollup.scope == RollupScope::Tree && std::fs::symlink_metadata(dest).is_err();
+    let staging = dest.with_file_name(staging_name());
+    let mut written: Vec<Written> = Vec::new();
     if fast {
-        match land(&item.absolute, dest, None, cancel) {
+        match land(&item.absolute, &staging, None, cancel) {
             Ok(_) => states.fill(State::Copied),
             Err(error) => {
                 let at = partial_path(&error).cloned();
@@ -872,17 +1001,35 @@ pub(crate) fn land_rollup(
             }
         }
     } else {
-        merge(&item.absolute, &walk, dest, landed, cancel, &mut states, &mut problems);
+        written = merge(&item.absolute, &walk, dest, landed, cancel, &mut states, &mut problems);
     }
 
+    #[cfg(test)]
+    after_copy_hook(&item.relative, dest);
+
     // Did the source move under the copy? Then no proof is about the plan.
-    match walk_scope(&item.absolute, rollup) {
-        Ok(after) => {
-            if let Err(reason) = matches_plan(&after, item, rollup) {
-                return RollupOutcome::ChangedDuringCopy(reason);
-            }
-        }
-        Err(error) => return RollupOutcome::ChangedDuringCopy(format!("cannot read the source: {error}")),
+    let after = walk_scope(&item.absolute, rollup);
+    let verdict = match &after {
+        Ok(after) => matches_plan(after, item, rollup),
+        Err(error) => Err(format!("cannot read the source: {error}")),
+    };
+    if let Err(reason) = verdict {
+        let partial = if fast {
+            discard_staging(&staging)
+        } else {
+            discard_changed(&walk, after.as_ref().ok(), written)
+        };
+        return RollupOutcome::ChangedDuringCopy { reason, partial };
+    }
+    if fast
+        && states.iter().all(|state| *state == State::Copied)
+        && let Err(error) = rename_no_replace(&staging, dest)
+    {
+        states.fill(State::Failed);
+        problems.note(
+            format!("moving the verified copy into place: {error}"),
+            Some(staging.clone()),
+        );
     }
 
     let Tally {
@@ -939,8 +1086,23 @@ pub(crate) fn land_rollup(
     }
 }
 
+/// A path this run wrote at the destination, and the entries it holds
+/// (`start..end` of the walk: one file, or a whole subdirectory).
+#[derive(Debug)]
+struct Written {
+    start: usize,
+    end: usize,
+    target: PathBuf,
+}
+
 /// The merge: lands what is missing at the destination and checks what is
-/// there, never writing over anything. `states` is filled per entry.
+/// there, never writing over anything. `states` is filled per entry. Returns
+/// what this run wrote.
+///
+/// Missing regular files are landed per directory in one batch
+/// ([`land_files`]: one `ditto` process per chunk of up to thousands of
+/// files), not one process each. A missing symlink is made directly, and a
+/// missing subdirectory is one `ditto` of the whole subtree.
 fn merge(
     source_root: &Path,
     walk: &ScopeWalk,
@@ -949,7 +1111,10 @@ fn merge(
     cancel: &AtomicBool,
     states: &mut [State],
     problems: &mut Problems,
-) {
+) -> Vec<Written> {
+    let mut written = Vec::new();
+    // Missing regular files, by their directory relative to the roll-up.
+    let mut batches: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
     let mut index = 0;
     while index < walk.entries.len() {
         let entry = &walk.entries[index];
@@ -967,9 +1132,21 @@ fn merge(
             }
         };
         match std::fs::symlink_metadata(&target) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && entry.kind == EntryKind::File => {
+                let parent = entry.relative.parent().map(Path::to_path_buf).unwrap_or_default();
+                batches.entry(parent).or_default().push(index);
+                index += 1;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 match land(&source, &target, None, cancel) {
-                    Ok(_) => whole(states, State::Copied),
+                    Ok(_) => {
+                        whole(states, State::Copied);
+                        written.push(Written {
+                            start: index,
+                            end: subtree_end,
+                            target,
+                        });
+                    }
                     Err(error) => {
                         whole(states, State::Failed);
                         let at = partial_path(&error).cloned();
@@ -1024,6 +1201,104 @@ fn merge(
             }
         }
     }
+
+    land_batches(
+        source_root,
+        walk,
+        dest,
+        &batches,
+        cancel,
+        states,
+        problems,
+        &mut written,
+    );
+    written.sort_by(|a, b| a.target.cmp(&b.target));
+    written
+}
+
+/// Lands the merge's missing regular files, one [`land_files`] call per
+/// directory.
+#[allow(clippy::too_many_arguments, reason = "the merge's own state, threaded through")]
+fn land_batches(
+    source_root: &Path,
+    walk: &ScopeWalk,
+    dest: &Path,
+    batches: &BTreeMap<PathBuf, Vec<usize>>,
+    cancel: &AtomicBool,
+    states: &mut [State],
+    problems: &mut Problems,
+    written: &mut Vec<Written>,
+) {
+    for (parent, indices) in batches {
+        let names: Vec<std::ffi::OsString> = indices
+            .iter()
+            .map(|&i| walk.entries[i].relative.file_name().unwrap_or_default().to_owned())
+            .collect();
+        let results = land_files(&source_root.join(parent), &names, &dest.join(parent), cancel);
+        for (&i, result) in indices.iter().zip(results) {
+            match result {
+                Ok(_) => {
+                    states[i] = State::Copied;
+                    written.push(Written {
+                        start: i,
+                        end: i + 1,
+                        target: dest.join(&walk.entries[i].relative),
+                    });
+                }
+                Err(error) => {
+                    states[i] = State::Failed;
+                    let at = partial_path(&error).cloned();
+                    problems.note(error.to_string(), at);
+                }
+            }
+        }
+    }
+}
+
+/// Removes a fast path's staged tree after the source moved under it.
+/// `Some` names it only if it could not be removed.
+fn discard_staging(staging: &Path) -> Option<PathBuf> {
+    std::fs::symlink_metadata(staging).ok()?;
+    std::fs::remove_dir_all(staging).err().map(|_| staging.to_path_buf())
+}
+
+/// After the source moved under a merge: removes what this run wrote for
+/// entries that are no longer what was copied (gone, or another inode, size
+/// or mtime, or for a directory, entries added or removed below it), and
+/// returns the first path it wrote that is still there.
+///
+/// A copy of a file that then changed proves nothing and has no member row;
+/// left in place it would be compared with the changed source in the next
+/// wave, differ, and be refused as someone else's file in every wave after.
+/// What this run wrote is its own output: no one else's file is removed.
+/// When the source cannot be read at all, nothing is removed.
+fn discard_changed(walk: &ScopeWalk, after: Option<&ScopeWalk>, written: Vec<Written>) -> Option<PathBuf> {
+    let Some(after) = after else {
+        return written.into_iter().next().map(|w| w.target);
+    };
+    let now: HashMap<&Path, &Entry> = after.entries.iter().map(|e| (e.relative.as_path(), e)).collect();
+    let below = |entries: &[Entry], root: &Path| entries.iter().filter(|e| e.relative.starts_with(root)).count();
+    let mut kept = None;
+    for w in written {
+        let copied = walk.entries.get(w.start..w.end).unwrap_or_default();
+        let same = copied.iter().all(|before| {
+            now.get(before.relative.as_path()).is_some_and(|e| {
+                e.kind == before.kind && e.ino == before.ino && e.size == before.size && e.mtime_ns == before.mtime_ns
+            })
+        }) && copied
+            .first()
+            .is_none_or(|root| root.kind != EntryKind::Dir || below(&after.entries, &root.relative) == copied.len());
+        let removed = !same
+            && match std::fs::symlink_metadata(&w.target) {
+                Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&w.target).is_ok(),
+                Ok(_) => std::fs::remove_file(&w.target).is_ok(),
+                Err(_) => true,
+            };
+        if !removed && kept.is_none() {
+            kept = Some(w.target);
+        }
+    }
+    kept
 }
 
 /// Tallies per-entry states and builds a member row, with the copy's
@@ -1074,9 +1349,12 @@ fn collect(
                     }
                     Err(error) => {
                         failed += 1;
+                        // An adopted file was there before this run: it is
+                        // not a partial this run left.
+                        let at = (*state == State::Copied).then_some(target.clone());
                         problems.note(
                             format!("verified, but hashing {} failed: {error}", target.display()),
-                            Some(target),
+                            at,
                         );
                     }
                 }
@@ -1095,6 +1373,26 @@ fn collect(
         occupied,
         members,
     }
+}
+
+#[cfg(test)]
+type AfterCopyHook = Box<dyn FnMut(&Path, &Path)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Called with `(item relative path, mirror directory)` after a roll-up
+    /// is copied and before the source is walked again: lets a test change
+    /// the source, or the destination, mid-copy.
+    pub(crate) static AFTER_COPY: std::cell::RefCell<Option<AfterCopyHook>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn after_copy_hook(relative: &Path, dest: &Path) {
+    AFTER_COPY.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(relative, dest);
+        }
+    });
 }
 
 /// What [`collect`] counted.

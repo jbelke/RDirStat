@@ -23,6 +23,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+mod batch;
 mod clone;
 mod compare;
 mod disk;
@@ -31,6 +32,7 @@ mod hash;
 mod identity;
 mod land;
 
+pub use batch::{STAGING_PREFIX, land_files, rename_no_replace, staging_name};
 pub use clone::clone_file;
 pub use compare::{
     COMPARE_CHUNK, VerifyTally, compare_contents_tree, compare_files, compare_tree, compare_xattr_names,

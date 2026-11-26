@@ -251,7 +251,7 @@ fn is_special(metadata: &Metadata) -> bool {
 /// An extended attribute macOS applies and reapplies on its own. It tracks
 /// which process wrote a file and is regenerated at the destination, so
 /// comparing it would fail every faithful copy.
-const SELF_MANAGED_XATTR: &str = "com.apple.provenance";
+pub(crate) const SELF_MANAGED_XATTR: &str = "com.apple.provenance";
 
 /// Proves the copy carried the extended attributes, not just the bytes.
 ///
@@ -317,7 +317,7 @@ fn attribute_set(root: &Path) -> Result<BTreeSet<String>, CopyError> {
 
 /// The extended-attribute names on `path` itself (symlinks not followed).
 /// A filesystem without xattr support reports none.
-fn list_xattr_names(path: &Path) -> Result<Vec<String>, CopyError> {
+pub(crate) fn list_xattr_names(path: &Path) -> Result<Vec<String>, CopyError> {
     let c_path = c_path(path)?;
     loop {
         let size = listxattr_raw(&c_path, None).map_err(|error| xattr_error(path, &error))?;
@@ -343,7 +343,7 @@ fn list_xattr_names(path: &Path) -> Result<Vec<String>, CopyError> {
     }
 }
 
-fn xattr_error(path: &Path, error: &io::Error) -> CopyError {
+pub(crate) fn xattr_error(path: &Path, error: &io::Error) -> CopyError {
     CopyError::mismatch(path, format!("could not read extended attributes: {error}"))
 }
 

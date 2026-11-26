@@ -19,9 +19,9 @@ use anyhow::{Context as _, Result, bail};
 use rdirstat_core::{CompletedScan, Kind, NodeId, ScanOptions, flags, format_iec};
 use rdirstat_organize::fit::codes;
 use rdirstat_organize::{
-    DEFAULT_CAP, DEFAULT_RESERVE_PRESSURE, DiskFacts, FitInput, FitPlan, INTENT_BACKUP, ItemKind, PLAN_SCHEMA_VERSION,
-    PlanFile, PlanItem, RULE_NON_UTF8, RollupScope, Rules, ScanItem, SkippedItem, Warning, fit, judge_backup_pair,
-    plan_token, validate_label,
+    BACKUPS_DIR, DEFAULT_CAP, DEFAULT_RESERVE_PRESSURE, DiskFacts, FitInput, FitPlan, INTENT_BACKUP, ItemKind,
+    PLAN_SCHEMA_VERSION, PlanFile, PlanItem, RULE_NON_UTF8, RollupScope, Rules, ScanItem, SkippedItem, Warning, fit,
+    judge_backup_pair, plan_token, validate_label,
 };
 use serde_json::{Value, json};
 
@@ -163,8 +163,12 @@ pub(crate) fn build_plan(request: &PlanRequest, probe: &dyn DiskProbe) -> Result
     // The drive's own catalog, read only, so files already on it are not
     // planned again. Only with roll-ups; without them a plan is unchanged.
     let landed = if request.rollup {
-        LandedKeys::load(&rdirstat_catalog::dest_catalog_dir(&dest), &request.label)
-            .context("reading the destination's catalog")?
+        LandedKeys::load(
+            &rdirstat_catalog::dest_catalog_dir(&dest),
+            &dest.join(BACKUPS_DIR).join(&request.label),
+            &request.label,
+        )
+        .context("reading the destination's catalog")?
     } else {
         LandedKeys::default()
     };
@@ -449,10 +453,9 @@ fn candidates(
                 items.push(item);
                 continue;
             }
-            // Already on the drive (by path, size, whole-second mtime): not
-            // ranked again. A roll-up of its directory still covers it, and
-            // apply checks it by inode before trusting the drive's copy.
-            if kind == ItemKind::File && landed.contains(&item.absolute, node.size, node.mtime) {
+            // Already on the drive (by path, size, inode, nanosecond mtime,
+            // and a copy still at its mirror path): not ranked again.
+            if kind == ItemKind::File && landed.contains(&item.absolute, &item.relative, node.size, node.mtime) {
                 already.files += 1;
                 already.bytes += node.size;
                 continue;

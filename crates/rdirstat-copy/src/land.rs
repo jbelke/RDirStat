@@ -102,12 +102,104 @@ pub fn land(
 }
 
 /// Creates `destination` as a symlink with `source`'s target (and its
-/// parent directories). `symlink(2)` refuses an existing path, so nothing is
-/// replaced.
+/// parent directories), then copies the link's own extended attributes onto
+/// it. `symlink(2)` refuses an existing path, so nothing is replaced.
+///
+/// The attributes matter because the verify ([`compare_tree`]) holds a
+/// symlink to its xattr names like any other file: a link carrying, say,
+/// `com.apple.FinderInfo` that landed without it would fail the verify on
+/// every run and never be receipted.
 fn copy_symlink(source: &Path, destination: &Path) -> Result<(), CopyError> {
     let target = std::fs::read_link(source).map_err(|error| CopyError::io(source, error))?;
     crate::ditto::create_parent(destination)?;
-    std::os::unix::fs::symlink(&target, destination).map_err(|error| CopyError::io(destination, error))
+    std::os::unix::fs::symlink(&target, destination).map_err(|error| CopyError::io(destination, error))?;
+    copy_link_xattrs(source, destination)
+}
+
+/// Copies every extended attribute of `source` itself onto `destination`
+/// itself, neither followed (`XATTR_NOFOLLOW`). The self-managed
+/// `com.apple.provenance` is left for macOS to mint.
+fn copy_link_xattrs(source: &Path, destination: &Path) -> Result<(), CopyError> {
+    let from = crate::c_path(source)?;
+    let to = crate::c_path(destination)?;
+    for name in crate::compare::list_xattr_names(source)? {
+        if name == crate::compare::SELF_MANAGED_XATTR {
+            continue;
+        }
+        let c_name = std::ffi::CString::new(name.as_bytes()).map_err(|_| CopyError::InvalidPath {
+            path: source.to_path_buf(),
+        })?;
+        let value = get_xattr_nofollow(&from, &c_name).map_err(|error| crate::compare::xattr_error(source, &error))?;
+        set_xattr_nofollow(&to, &c_name, &value).map_err(|error| crate::compare::xattr_error(destination, &error))?;
+    }
+    Ok(())
+}
+
+/// One attribute's value, read with `XATTR_NOFOLLOW`. Sized, then read; a
+/// value that grew between the two calls is sized again.
+#[allow(unsafe_code)]
+fn get_xattr_nofollow(path: &std::ffi::CStr, name: &std::ffi::CStr) -> std::io::Result<Vec<u8>> {
+    loop {
+        // SAFETY: `path` and `name` are valid NUL-terminated strings that
+        // outlive the call; a null buffer with size 0 is the documented size
+        // query.
+        let size = unsafe {
+            libc::getxattr(
+                path.as_ptr(),
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                0,
+                libc::XATTR_NOFOLLOW,
+            )
+        };
+        let Ok(size) = usize::try_from(size) else {
+            return Err(std::io::Error::last_os_error());
+        };
+        let mut buffer = vec![0_u8; size];
+        // SAFETY: as above, and `buffer` is a live, exclusively borrowed
+        // allocation of exactly `buffer.len()` bytes.
+        let read = unsafe {
+            libc::getxattr(
+                path.as_ptr(),
+                name.as_ptr(),
+                buffer.as_mut_ptr().cast::<libc::c_void>(),
+                buffer.len(),
+                0,
+                libc::XATTR_NOFOLLOW,
+            )
+        };
+        if let Ok(read) = usize::try_from(read) {
+            buffer.truncate(read);
+            return Ok(buffer);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ERANGE) {
+            return Err(error);
+        }
+    }
+}
+
+#[allow(unsafe_code)]
+fn set_xattr_nofollow(path: &std::ffi::CStr, name: &std::ffi::CStr, value: &[u8]) -> std::io::Result<()> {
+    // SAFETY: `path` and `name` are valid NUL-terminated strings and `value`
+    // a live slice of `value.len()` bytes; all outlive the call, and the
+    // kernel only reads them.
+    let result = unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_ptr().cast::<libc::c_void>(),
+            value.len(),
+            0,
+            libc::XATTR_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 /// `existing` is a regular file whose bytes equal `source`'s. Anything
@@ -239,6 +331,38 @@ mod tests {
             std::fs::read_link(&destination).expect("still a link"),
             Path::new("target.bin")
         );
+    }
+
+    #[test]
+    fn a_symlink_with_its_own_xattrs_lands_with_them_and_verifies() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        std::fs::write(scratch.path().join("target.bin"), b"payload").expect("write");
+        let source = scratch.path().join("link");
+        std::os::unix::fs::symlink("target.bin", &source).expect("symlink");
+        // `-s`: act on the link itself, not its target.
+        let status = std::process::Command::new("/usr/bin/xattr")
+            .args(["-s", "-w", "user.rdirstat.probe", "on-the-link"])
+            .arg(&source)
+            .status()
+            .expect("xattr");
+        assert!(status.success());
+        assert!(
+            crate::compare::list_xattr_names(&source)
+                .expect("list")
+                .contains(&"user.rdirstat.probe".to_owned()),
+            "the fixture put the attribute on the link"
+        );
+
+        let destination = scratch.path().join("out/link");
+        let landed = land(&source, &destination, None, &never()).expect("lands and verifies");
+        assert_eq!(landed.method, Method::Copy);
+        assert_eq!(
+            std::fs::read_link(&destination).expect("still a link"),
+            Path::new("target.bin")
+        );
+        let from = crate::c_path(&destination).expect("c path");
+        let name = std::ffi::CString::new("user.rdirstat.probe").expect("name");
+        assert_eq!(get_xattr_nofollow(&from, &name).expect("on the copy"), b"on-the-link");
     }
 
     #[test]
